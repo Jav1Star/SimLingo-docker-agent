@@ -16,6 +16,7 @@ import xml.etree.ElementTree as ET
 from collections import deque
 from pathlib import Path
 
+
 import carla
 import cv2
 import hydra
@@ -35,6 +36,14 @@ from transformers import AutoConfig, AutoProcessor
 import scenario_logger
 import team_code.transfuser_utils as t_u
 from scenario_logger import ScenarioLogger
+# # --- DEBUG: 打印 sys.path 的内容 ---
+# print("--- EVALUATOR: sys.path after insert ---", flush=True)
+# import pprint
+# pprint.pprint(sys.path)
+# print("--- EVALUATOR: PYTHONPATH env var ---", flush=True)
+# print(os.environ.get('PYTHONPATH'))
+# print("------------------------------------", flush=True)
+# # ------------------------------------
 from simlingo_training.utils.custom_types import DrivingInput, LanguageLabel
 from simlingo_training.utils.internvl2_utils import build_transform, dynamic_preprocess
 from team_code.config_simlingo import GlobalConfig
