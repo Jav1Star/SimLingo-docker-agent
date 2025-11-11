@@ -143,7 +143,7 @@ def finalize_job(job):
 
 
 def main():
-    SimlingoPATH = "/home/yangyujia/simlingo"
+    SimlingoPATH = os.path.expanduser("~/simlingo")
     configs = [
         {
             "agent": "simlingo",
@@ -153,7 +153,7 @@ def main():
             "seeds": [3],
             "tries": 1,  # 重试次数,1便于调试
             "out_root": f"{SimlingoPATH}/eval_results/Bench2Drive",
-            "carla_root": "~/software/carla0915",
+            "carla_root": "/data/carla0915",
             "repo_root": f"{SimlingoPATH}",
             "agent_file": f"{SimlingoPATH}/team_code/agent_simlingo.py",
             "team_code": "team_code",
