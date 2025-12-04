@@ -4,6 +4,7 @@ import subprocess
 import time
 import ujson
 import shutil
+import argparse
 from collections import deque
 from tqdm.autonotebook import tqdm
 
@@ -26,7 +27,7 @@ from tqdm.autonotebook import tqdm
 
 
 GPU_IDS = [0]  # 本地双 4090；如需限制，可通过环境变量 SIMLINGO_MAX_JOBS 控制并行
-MAX_PARALLEL_JOBS = 3
+MAX_PARALLEL_JOBS = 1
 POLL_INTERVAL_S = float(os.getenv("SIMLINGO_POLL_INTERVAL", "5.0"))
 
 carla_world_ports = set(range(10000, 20000, 50))
@@ -47,8 +48,7 @@ def needs_resubmit(job) -> bool:
     except Exception:
         return True
 
-    checkpoint = evaluation_data.get("_checkpoint", {})
-    progress = checkpoint.get("progress", [])
+    progress = evaluation_data['_checkpoint']['progress']
     if len(progress) < 2 or progress[0] < progress[1]:
         return True
 
@@ -58,7 +58,7 @@ def needs_resubmit(job) -> bool:
         "Failed - Simulation crashed",
         "Failed - Agent crashed",
     }
-    for record in checkpoint.get("records", []):
+    for record in evaluation_data['_checkpoint']['records']:
         if record.get("status") in failure_statuses:
             return True
 
@@ -80,7 +80,6 @@ def launch_job(job, gpu_id, world_port, tm_port):
     repo_root = expand_path(cfg["repo_root"])
     bench_root = os.path.join(repo_root, "Bench2Drive")  # 将子进程工作目录切到 Bench2Drive，减少导入冲突风险
 
-    env["CARLA_ROOT"] = carla_root
     addPYTHOPATH = ":".join(
             [
             f"{carla_root}/PythonAPI/carla",
@@ -92,9 +91,12 @@ def launch_job(job, gpu_id, world_port, tm_port):
     )
 
     env["PYTHONPATH"] = addPYTHOPATH
+    env["CARLA_ROOT"] = carla_root
+    env["WORK_DIR"] = repo_root
     env["SCENARIO_RUNNER_ROOT"] = f"{repo_root}/Bench2Drive/scenario_runner"
     env["SAVE_PATH"] = job["viz_path"]
-
+    env["LEADERBOARD_ROOT"] = f"{repo_root}/Bench2Drive/leaderboard"
+    
     command = [
         sys.executable,
         "-u",
@@ -108,8 +110,8 @@ def launch_job(job, gpu_id, world_port, tm_port):
         f"--agent-config={cfg['checkpoint']}",
         f"--traffic-manager-seed={job['seed']}",
         f"--port={world_port}",                 # 世界端口（与 CARLA server 对应）
-        f"--traffic-manager-port={tm_port}"    # 交通管理器端口
-        #f"--gpu-rank={gpu_id}"
+        f"--traffic-manager-port={tm_port}",    # 交通管理器端口
+        f"--gpu-rank={gpu_id}" # carla目前只能在0上启动
     ]
 
     stdout = open(job["log_file"], "w", encoding="utf-8")
@@ -122,11 +124,12 @@ def launch_job(job, gpu_id, world_port, tm_port):
         env=env,
         cwd=bench_root, 
         stderr=stderr,
+        stdout=stdout
     )
 
     job["process"] = process
     job["gpu_id"] = gpu_id
-    job["ports"] = {world_port, tm_port}
+    job["ports"] = {world_port, tm_port,world_port+1,world_port+2} # carla的streaming端口自动占用RPC端口的+1或者+2，需要一起避让
     job["_stdout_handle"] = stdout
     job["_stderr_handle"] = stderr
 
@@ -141,8 +144,99 @@ def finalize_job(job):
     job.pop("ports", None)
     job.pop("gpu_id", None)
 
+def check_and_kill_dead_job(job):
+    """
+    主动检查一个正在运行的作业是否 "卡死"（基于HPC版本的日志特征）。
+    如果是，则终止该进程，以便主循环的重试逻辑可以接管。
+    """
+    process = job.get("process")
+    # 1. 确保进程存在且仍在运行
+    if not process or process.poll() is not None:
+        return
 
-def main():
+    log_file = job.get("log_file")
+    if not log_file or not os.path.exists(log_file):
+        print(f"Warning: there is no {log_file}")
+        return
+
+    lines = []
+    try:
+        # 2. 刷新日志句柄，确保缓冲区内容已写入磁盘
+        # (必须在读取前执行，因为本脚本持有文件句柄)
+        stdout_handle = job.get("_stdout_handle")
+        if stdout_handle and not stdout_handle.closed:
+            stdout_handle.flush()
+        
+        stderr_handle = job.get("_stderr_handle")
+        if stderr_handle and not stderr_handle.closed:
+            stderr_handle.flush()
+
+        # 3. 读取日志文件内容
+        with open(log_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            
+    except Exception as e:
+        print(f"Warning: Could not read log {log_file} for dead job check: {e}")
+        return
+
+    if not lines:
+        return
+
+    # 4. 检查HPC版本中的 "dead job" 特征
+    # (增加了更通用的 "Stopping the route, the agent has crashed" 检查)
+    CRASH_MARKERS_SUBSTR = (
+        "Watchdog exception",
+        "Engine crash handling finished; re-raising signal 11",
+        "Stopping the route, the agent has crashed",
+    )
+
+    # ANSI 颜色行可能形如: "\x1b[91mStopping the route, the agent has crashed:"
+    def has_crash_marker(lines):
+        for line in lines:
+            for m in CRASH_MARKERS_SUBSTR:
+                if m in line:
+                    return True
+        return False
+
+
+    # 5. 如果检测到卡死，终止进程
+    if has_crash_marker(lines):
+        print(
+            f"Detected dead job {job['route_id']} (PID: {process.pid}) from log. "
+            f"Terminating process..."
+        )
+        process.terminate()
+
+
+
+def err_log_has_error(err_file: str) -> bool:
+    error_marks = (
+        "Traceback (most recent call last)",
+        "Segmentation fault",
+        "Signal 11",
+        "FatalError",
+        "LowLevelFatalError",
+        "Watchdog exception",
+        "Engine crash handling finished",
+        "Address already in use",
+        "CUDA out of memory",
+        "Failed - Agent couldn't be set up",
+        "Stopping the route, the agent has crashed",
+    )
+    if not os.path.exists(err_file):
+        return False  # 没有 err 文件 => 尚未评估
+    try:
+        with open(err_file, "r", encoding="utf-8") as f:
+            for line in f:
+                for m in error_marks:
+                    if m in line:
+                        return True
+    except Exception:
+        return False  # 读取失败时保守地视为不需要重跑
+    return False  # 有 err 文件但不含错误标记 => 已评估且正常
+
+
+def main(seed):
     SimlingoPATH = os.path.expanduser("~/simlingo")
     configs = [
         {
@@ -150,8 +244,9 @@ def main():
             "checkpoint": f"{SimlingoPATH}/outputs/simlingo/checkpoints/epoch=013.ckpt/pytorch_model.pt",
             "benchmark": "bench2drive",
             "route_path": f"{SimlingoPATH}/leaderboard/data/bench2drive_split",
-            "seeds": [3],
-            "tries": 1,  # 重试次数,1便于调试
+            #"seeds": [3],
+            "seeds": [seed],
+            "tries": 2,  # 重试次数,1便于调试
             "out_root": f"{SimlingoPATH}/eval_results/Bench2Drive",
             "carla_root": "/data/carla0915",
             "repo_root": f"{SimlingoPATH}",
@@ -184,10 +279,14 @@ def main():
 
                 viz_path = os.path.join(base_dir, "viz", route_id)
                 os.makedirs(viz_path, exist_ok=True)
-
-                result_file = os.path.join(base_dir, "res", f"{route_id}_res.json")
+                
                 log_file = os.path.join(base_dir, "out", f"{route_id}_out.log")
                 err_file = os.path.join(base_dir, "err", f"{route_id}_err.log")
+                result_file = os.path.join(base_dir, "res", f"{route_id}_res.json")
+                # 筛选：只有 (不存在 err 文件) 或 (err 文件包含错误) 才进入队列
+                if os.path.exists(err_file) and not err_log_has_error(err_file):
+                    print(f"[skip] route {route_id} clean err log -> skip")
+                    continue
 
                 job = {
                     "cfg": cfg,
@@ -215,6 +314,7 @@ def main():
             process = job["process"]
             return_code = process.poll()
             if return_code is None:
+                check_and_kill_dead_job(job)
                 continue
 
             # 回收 GPU 并关闭日志句柄，避免文件描述符泄漏
@@ -223,7 +323,7 @@ def main():
             finalize_job(job)
             
 
-            if not needs_resubmit(job) and return_code == 0:
+            if not needs_resubmit(job) and return_code == 0: 
                 job["status"] = "completed"
                 progress.update(1)
                 continue
@@ -236,9 +336,14 @@ def main():
 
             job["status"] = "failed"
             progress.update(1)
-            print(f"Job {job['route_id']} exhausted retries (return code {return_code}).")
             if return_code != 0:
-                return
+                    infos = [
+                        f"Job {job['route_id']} exited with return code {return_code}.",
+                        f"route: {job.get('route')}",
+                        f"log_file: {job.get('log_file')}",
+                        f"err_file: {job.get('err_file')}",
+                    ]
+                    print(infos)
         if len(running_jobs) >= MAX_PARALLEL_JOBS or not available_gpus:
             time.sleep(POLL_INTERVAL_S)
             continue
@@ -248,12 +353,6 @@ def main():
             job = pending_jobs.popleft()
 
             if job["status"] == "completed":
-                continue
-
-            if job["tries_remaining"] <= 0:
-                job["status"] = "failed"
-                progress.update(1)
-                print(f"Skipping job {job['route_id']}: no retries left.")
                 continue
 
             if not needs_resubmit(job):
@@ -303,4 +402,14 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # 1. 创建一个参数解析器
+    parser = argparse.ArgumentParser(description="一个接收 seed 参数的脚本。")
+    
+    # 2. 添加您想要的参数
+    parser.add_argument("seed", type=int, help="用于脚本的随机种子")
+
+    # 3. 解析命令行传入的参数
+    args = parser.parse_args()
+
+    # 4. 将解析到的参数 (args.seed) 传递给 main 函数
+    main(args.seed)
