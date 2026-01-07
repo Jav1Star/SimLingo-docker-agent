@@ -511,7 +511,7 @@ class LeaderboardEvaluator(object):
             self.statistics_manager.validate_and_write_statistics(self.sensors_initialized, crashed)
         
         if crashed:
-            cmd2 = "ps -ef | grep '-graphicsadapter="+ str(args.gpu_rank) + "' | grep -v grep | awk '{print $2}' | xargs -r kill -9"
+            cmd2 = "ps -ef | grep -- 'graphicsadapter="+ str(args.gpu_rank) + "' | grep -v grep | awk '{print $2}' | xargs -r kill -9"
             server = subprocess.Popen(cmd2, shell=True, preexec_fn=os.setsid)
             atexit.register(os.killpg, server.pid, signal.SIGKILL)
 

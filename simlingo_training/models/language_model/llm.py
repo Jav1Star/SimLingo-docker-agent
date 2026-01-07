@@ -12,6 +12,8 @@ from torch.nn import functional as F
 import torch
 from torch import Tensor, nn
 
+import os
+
 # ... (CONFIGS 字典保持不变) ...
 CONFIGS: Dict[str, Dict[str, Any]] = {
     "debug": dict(num_hidden_layers=2, num_attention_heads=2, hidden_size=32, intermediate_size=64),
@@ -69,6 +71,25 @@ class LLM(nn.Module):
             self.model.embed_tokens = self.model.base_model.embed_tokens
         # === [修改开始] ===
         elif 'internvl' in self.variant.lower():
+            # 自动下载模型逻辑
+            # 将 ~/models/OpenGVLab/InternVL2-1B 展开为绝对路径
+            base_model_dir = os.path.expanduser("~/models")
+            # 提取模型名称作为子目录，例如 InternVL2-1B
+            model_name = self.variant.split('/')[-1]
+            local_model_path = os.path.join(base_model_dir, model_name)
+            
+            # 检查本地目录是否存在且包含必要文件(如 config.json)
+            if not os.path.exists(os.path.join(local_model_path, "config.json")):
+                print(f"Model not found in {local_model_path}. Downloading from HuggingFace...")
+                from huggingface_hub import snapshot_download
+                snapshot_download(repo_id=self.variant, local_dir=local_model_path)
+                print(f"Model downloaded to {local_model_path}")
+            else:
+                print(f"Found local model in {local_model_path}")
+            
+            # 更新 self.variant 为本地路径，以便后续加载使用
+            self.variant = local_model_path
+
             print(f"Loading Local Modified InternLM2 from {self.variant}")
             
             # 打印调试信息，确认我们是否真的收到了 Qwen 的参数
@@ -76,10 +97,12 @@ class LLM(nn.Module):
 
             # [关键修改] 将 cfg (包含你在YAML里写的 hidden_size 等) 传给 from_pretrained
             # 这样 transformers 库就会用你的参数覆盖掉默认的 7B 参数
+            # 强制使用 float16 以节省内存，防止被 OS Kill
             self.model = InternLM2ForCausalLM.from_pretrained(
                 self.variant, 
                 trust_remote_code=False, 
-                **cfg  # <--- 加上这一行！这是解决显存爆炸和架构不匹配的钥匙
+                torch_dtype=torch.float16, ######
+                device_map="auto"
             )
             
             # 设置 embed_tokens 引用 (保持不变)
