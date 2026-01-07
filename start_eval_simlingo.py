@@ -238,7 +238,7 @@ def err_log_has_error(err_file: str) -> bool:
 
 def main(seed):
     SimlingoPATH = os.path.expanduser("~/simlingo")
-    configs = [
+    configs = [ # TODO 设置
         {
             "agent": "simlingo",
             "checkpoint": f"{SimlingoPATH}/outputs/simlingo/checkpoints/epoch=013.ckpt/pytorch_model.pt",
@@ -246,7 +246,7 @@ def main(seed):
             "route_path": f"{SimlingoPATH}/leaderboard/data/bench2drive_split",
             #"seeds": [3],
             "seeds": [seed],
-            "tries": 2,  # 重试次数,1便于调试
+            "tries": 0,  # 重试次数,1便于调试
             "out_root": f"{SimlingoPATH}/eval_results/Bench2Drive",
             "carla_root": "/data/carla0915",
             "repo_root": f"{SimlingoPATH}",
@@ -406,7 +406,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="一个接收 seed 参数的脚本。")
     
     # 2. 添加您想要的参数
-    parser.add_argument("seed", type=int, help="用于脚本的随机种子")
+    parser.add_argument("--seed", type=int, help="用于脚本的随机种子",default=3)
 
     # 3. 解析命令行传入的参数
     args = parser.parse_args()
