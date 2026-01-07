@@ -690,7 +690,28 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         # initialize DrivingInput with dict self.DrivingInput
         model_input = DrivingInput(**self.DrivingInput)
-        pred_speed_wps, pred_route, language = self.model(model_input)
+
+        # ================= [修改开始] =================
+        
+        # 1. 定义 Latency 策略
+        # 策略 A: 固定值 (最简单，用于测试)
+        # latency_target = 1.0  # 全速/全精度模式
+        
+        # 策略 B: 从 Config 中读取 (推荐，方便在 config.yaml 中修改)
+        # 你需要在你的 config 文件中添加 inference_latency 字段，或者在这里给默认值
+        # 假设我们默认想跑快一点 (0.75)
+        latency_target = getattr(self.cfg, 'inference_latency', 1.0) 
+        
+        # 2. 传入 latency 参数调用模型
+        # 注意：这里调用的是 self.model.__call__，它会映射到 driving.py 的 forward
+        """ 调用模型forward函数 """
+        pred_speed_wps, pred_route, language = self.model(
+            model_input, 
+            latency=latency_target # <--- 关键修改：传入 latency
+        )
+        
+        # ================= [修改结束] =================
+        # pred_speed_wps, pred_route, language = self.model(model_input)
         pred_speed_wps = pred_speed_wps.float() if pred_speed_wps is not None else None
         pred_route = pred_route.float() if pred_route is not None else None
 

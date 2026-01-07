@@ -237,11 +237,11 @@ def err_log_has_error(err_file: str) -> bool:
 
 
 def main(seed):
-    SimlingoPATH = os.path.expanduser("~/simlingo")
+    SimlingoPATH = os.path.expanduser("~/simlingo-adaption")
     configs = [
         {
             "agent": "simlingo",
-            "checkpoint": f"{SimlingoPATH}/outputs/simlingo/checkpoints/epoch=013.ckpt/pytorch_model.pt",
+            "checkpoint": f"{SimlingoPATH}/models/simlingo/checkpoints/epoch=013.ckpt/pytorch_model.pt",
             "benchmark": "bench2drive",
             "route_path": f"{SimlingoPATH}/leaderboard/data/bench2drive_split",
             #"seeds": [3],
