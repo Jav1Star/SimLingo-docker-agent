@@ -67,30 +67,21 @@ class LLM(nn.Module):
             self.tokenizer = LlavaNextProcessor.from_pretrained(self.variant, torch_dtype="auto",  trust_remote_code=True).tokenizer
             self.model = self.model.language_model
             self.model.embed_tokens = self.model.base_model.embed_tokens
-        # === [修改开始] ===
+        # === [修改部分] ===
         elif 'internvl' in self.variant.lower():
             print(f"Loading Local Modified InternLM2 from {self.variant}")
+            # 使用本地的 InternLM2ForCausalLM 类
+            self.model = InternLM2ForCausalLM.from_pretrained(self.variant, trust_remote_code=False)
             
-            # 打印调试信息，确认我们是否真的收到了 Qwen 的参数
-            print(f">>> [LLM Init Debug] Config kwargs: hidden_size={cfg.get('hidden_size')}, layers={cfg.get('num_hidden_layers')}")
-
-            # [关键修改] 将 cfg (包含你在YAML里写的 hidden_size 等) 传给 from_pretrained
-            # 这样 transformers 库就会用你的参数覆盖掉默认的 7B 参数
-            self.model = InternLM2ForCausalLM.from_pretrained(
-                self.variant, 
-                trust_remote_code=False, 
-                **cfg  # <--- 加上这一行！这是解决显存爆炸和架构不匹配的钥匙
-            )
-            
-            # 设置 embed_tokens 引用 (保持不变)
+            # 设置 embed_tokens 引用，供后续方法使用
+            # InternLM2 结构通常是 self.model.model.tok_embeddings
             self.model.embed_tokens = self.model.model.tok_embeddings
             
-            # 加载 Tokenizer (保持不变)
+            # 加载 Tokenizer (通常还是用 HF 的)
             self.tokenizer = AutoTokenizer.from_pretrained(self.variant, trust_remote_code=True, use_fast=False)
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
-        # === [修改结束] ===
-        
+        # =================    
         else:
             # ... (保持不变) ...
             raise ValueError(f"Carefull: Variant {self.variant} not tested.")
