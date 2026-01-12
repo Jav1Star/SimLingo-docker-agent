@@ -592,14 +592,42 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                         questions.append(conv[i]['content'][0]['text'])
                         conv[i]['content'] = conv[i]['content'][0]['text']
                         
-        cache_dir = f"pretrained/{(self.cfg.model.vision_model.variant.split('/')[1])}"
-        # get absolute path from workspace dir not wokring dir
+        # Logic to check for local model or download to models/ folder
+        repo_id = self.cfg.model.vision_model.variant
+        repo_name = repo_id.split('/')[-1]
+        
+        # 获取工作区根目录 (team_code/agent_simlingo.py -> 上两级 -> simlingo-adaption)
+        workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        local_model_path = os.path.join(workspace_root, "models", repo_name)
+
+        # 检查本地路径是否存在
+        if os.path.exists(local_model_path):
+             print(f"Found local model at {local_model_path}, using it.", flush=True)
+             cache_dir = local_model_path
+        else:
+             print(f"Local model not found at {local_model_path}. Downloading to {local_model_path}...", flush=True)
+             try:
+                 # 尝试从 HuggingFace 自动下载模型到本地 models/ 目录
+                 from huggingface_hub import snapshot_download
+                 # snapshot_download 会将整个仓库下载到 local_dir
+                 snapshot_download(repo_id=repo_id, local_dir=local_model_path)
+                 cache_dir = local_model_path
+             except Exception as e:
+                 print(f"Failed to download model to local dir: {e}. Fallback to default cache.", flush=True)
+                 # 如果下载失败（比如网络问题或未安装huggingface_hub），则回退到默认的 pretrained/ 目录缓存策略
+                 cache_dir = f"pretrained/{(self.cfg.model.vision_model.variant.split('/')[1])}"
+
+        # 获取 cache_dir 的绝对路径，可以从工作区目录获取，而不是当前工作目录
+        # 这里确保即使 cache_dir 是相对路径也能正确解析
         cache_dir = to_absolute_path(cache_dir)
         model_path = f"{cache_dir}/conversation.py"
+        
+        # 这里实际上是一个双重检查：即便前面找到了 local_model_path，也可能不包含 conversation.py
+        # 如果文件确实不存在，则再尝试下载一次 (如果是 fallback 路径，这里会下载到 fallback 路径)
         if not os.path.exists(model_path):
                 from huggingface_hub import snapshot_download
                 snapshot_download(repo_id=self.cfg.model.vision_model.variant, local_dir=cache_dir)
-                
+        
         #import from file from model_path
         spec = importlib.util.spec_from_file_location('get_conv_template', model_path)
         conv_module = importlib.util.module_from_spec(spec)

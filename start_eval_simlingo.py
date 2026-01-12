@@ -114,6 +114,9 @@ def launch_job(job, gpu_id, world_port, tm_port):
         f"--gpu-rank={gpu_id}" # carla目前只能在0上启动
     ]
 
+    if cfg.get("no_server_launch"):
+        command.append("--no-server-launch")
+
     stdout = open(job["log_file"], "w", encoding="utf-8")
     stderr = open(job["err_file"], "w", encoding="utf-8")
     stdout.write(" ".join(command) + "\n")
@@ -236,8 +239,21 @@ def err_log_has_error(err_file: str) -> bool:
     return False  # 有 err 文件但不含错误标记 => 已评估且正常
 
 
-def main(seed):
+def main(args):
+    seed = args.seed
     SimlingoPATH = os.path.expanduser("~/simlingo-adaption")
+    # for fast test
+    no_server_launch = False
+    if args.remote_carla_port is not None:
+        global carla_world_ports, carla_tm_ports
+        carla_world_ports = {args.remote_carla_port}
+        if args.remote_tm_port is not None:
+             carla_tm_ports = {args.remote_tm_port}
+        else:
+             carla_tm_ports = {args.remote_carla_port + 8000}
+        no_server_launch = True
+        print(f"Using remote CARLA at port {args.remote_carla_port}")
+
     configs = [ # TODO 设置
         {
             "agent": "simlingo",
@@ -254,6 +270,7 @@ def main(seed):
             "team_code": "team_code",
             "agent_config": "not_used",
             "username": os.getenv("USER", "local_user"),
+            "no_server_launch": no_server_launch,
         }
     ]
 
@@ -407,9 +424,11 @@ if __name__ == "__main__":
     
     # 2. 添加您想要的参数
     parser.add_argument("--seed", type=int, help="用于脚本的随机种子",default=3)
+    parser.add_argument("--remote-carla-port", type=int, default=20000, help="External CARLA world port")
+    parser.add_argument("--remote-tm-port", type=int, default=None, help="External CARLA TM port")
 
     # 3. 解析命令行传入的参数
     args = parser.parse_args()
 
-    # 4. 将解析到的参数 (args.seed) 传递给 main 函数
-    main(args.seed)
+    # 4. 将解析到的参数 (args) 传递给 main 函数
+    main(args)

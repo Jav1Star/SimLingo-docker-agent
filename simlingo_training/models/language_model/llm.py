@@ -54,6 +54,64 @@ class LLM(nn.Module):
         for key, value in cfg.items():
             setattr(self, key, value)
 
+        # ----------------------------------------------------------------------
+        # SimLingo Adaptation: Local Model Caching Logic (与agent_simlingo逻辑一致)
+        # ----------------------------------------------------------------------
+        # 只有在 variant 看起来像是一个预训练模型(需要从HF加载)时才执行此操作
+        # Avoid checking for "x-small" etc which are keys in CONFIGS
+        target_keywords = ['pythia', 'paligemma', 'tinyllama', 'llava', 'internvl']
+        if any(k in self.variant.lower() for k in target_keywords):
+            import os
+            # 解析工作区路径: simlingo-adaption/models
+            # 当前文件: .../simlingo_training/models/language_model/llm.py
+            # 向上4级到达 simlingo-adaption
+            curr_dir = os.path.dirname(os.path.abspath(__file__))
+            workspace_root = os.path.abspath(os.path.join(curr_dir, "../../../../"))
+            models_dir = os.path.join(workspace_root, "models")
+            
+            # 如果 self.variant 已经是一个存在的路径，则直接使用
+            if not os.path.exists(self.variant):
+                # 假设 variant 是 repo_id (例如 OpenGVLab/InternVL2-1B)，提取 repo_name
+                repo_name = self.variant.split('/')[-1]
+                local_model_path = os.path.join(models_dir, repo_name)
+                
+                if os.path.exists(local_model_path):
+                    print(f"[LLM] Found local model at {local_model_path}. Using it.")
+                    self.variant = local_model_path
+                else:
+                    # 尝试下载到本地 models 目录
+                    try:
+                        print(f"[LLM] Model not found at {local_model_path}. Attempting download from {self.variant}...")
+                        from huggingface_hub import snapshot_download
+                        snapshot_download(repo_id=self.variant, local_dir=local_model_path)
+                        print(f"[LLM] Successfully downloaded model to {local_model_path}.")
+                        self.variant = local_model_path
+                    except Exception as e:
+                        print(f"[LLM] Failed to download/setup local model: {e}. Fallback to default loading (system cache).")
+        # ----------------------------------------------------------------------
+
+        # ---------------------------------------------------------------------------
+        # Logic to auto-detect local 'models' folder for cache_dir
+        # Consistent with team_code/agent_simlingo.py
+        # ---------------------------------------------------------------------------
+        if not hasattr(self, 'cache_dir') or self.cache_dir is None:
+            import os
+            try:
+                # llm.py -> language_model -> models -> simlingo_training -> simlingo-adaption
+                current_file = os.path.abspath(__file__)
+                workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_file))))
+                
+                # Check if we assume the standard structure where 'models' is valid
+                # Adjust repo name logic if needed
+                repo_name = self.variant.split('/')[-1]
+                local_models_dir = os.path.join(workspace_root, "models", repo_name)
+                
+                if os.path.exists(local_models_dir):
+                    print(f"[LLM] Auto-detected local model at {local_models_dir}, using it.", flush=True)
+                    self.cache_dir = local_models_dir
+            except Exception as e:
+                print(f"[LLM] Local model detection failed: {e}", flush=True)
+
         if 'pythia' in self.variant:
             raise ValueError(f"Carefull: Variant {self.variant} not tested.")
             self.variant = f'EleutherAI/{self.variant}'
@@ -85,7 +143,11 @@ class LLM(nn.Module):
             self.model = self.model.language_model
             self.model.embed_tokens = self.model.base_model.embed_tokens
         elif 'internvl' in self.variant.lower():
-            self.model = AutoModel.from_pretrained(self.variant, trust_remote_code=True)
+            load_kwargs = {'trust_remote_code': True}
+            if hasattr(self, 'cache_dir') and self.cache_dir:
+                load_kwargs['cache_dir'] = self.cache_dir
+                
+            self.model = AutoModel.from_pretrained(self.variant, **load_kwargs)
             self.model = self.model.language_model
             try:
                 self.model.embed_tokens = self.model.base_model.embed_tokens
