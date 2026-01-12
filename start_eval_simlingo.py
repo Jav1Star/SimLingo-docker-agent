@@ -237,7 +237,7 @@ def err_log_has_error(err_file: str) -> bool:
 
 
 def main(seed):
-    SimlingoPATH = os.path.expanduser("~/simlingo")
+    SimlingoPATH = os.path.expanduser("~/simlingo-adaption")
     configs = [ # TODO 设置
         {
             "agent": "simlingo",

@@ -32,7 +32,7 @@ def main(cfg: TrainConfig):
     processor = AutoProcessor.from_pretrained(cfg.model.vision_model.variant, trust_remote_code=True)
     model_type_name = cfg.model.vision_model.variant.split('/')[1]
     cache_dir = None #f"pretrained/{(model_type_name)}"
-    
+    # hydra根据配置文件中的 _target_ 字段，动态导入并创建类实例。
     data_module = hydra.utils.instantiate(
         cfg.data_module, 
         processor=processor,
@@ -48,7 +48,7 @@ def main(cfg: TrainConfig):
         cache_dir=cache_dir,
         _recursive_=False
         )
-
+    # 是否加载预训练权重
     if cfg.checkpoint is not None:
         if os.path.isdir(cfg.checkpoint):
             state_dict = get_fp32_state_dict_from_zero_checkpoint(cfg.checkpoint)
@@ -99,12 +99,14 @@ def main(cfg: TrainConfig):
     wandblogger.watch(model)
     loggers.append(wandblogger)
 
+    # 多卡训练策略
     strategy = cfg.strategy
     if strategy == "deepspeed_stage_2":
         strategy = pl.strategies.DeepSpeedStrategy(
             stage=2, loss_scale=cfg.fp16_loss_scale, logging_batch_size_per_gpu=cfg.data_module.batch_size
         )
 
+    # 模型权重保存回调函数
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
         save_top_k=-1,
         monitor=None,
@@ -115,13 +117,14 @@ def main(cfg: TrainConfig):
         # every_n_train_steps=cfg.val_check_interval,
     )
 
+    # 学习率变化
     lr_monitor = LearningRateMonitor(logging_interval='step')
     model_summary = ModelSummary(max_depth=3)
     callbacks=[
         checkpoint_callback, 
         model_summary, 
         # ThroughputMonitor(batch_size_fn=lambda batch: batch.driving_input.camera_images.size(0)), 
-        VisualiseCallback(interval=1000, val_interval=1000)
+        VisualiseCallback(interval=1000, val_interval=1000) # 每隔一定步数可视化预测结果
     ]
     if not cfg.debug: 
         callbacks.append(lr_monitor)

@@ -1,4 +1,4 @@
 defaults:
   - train_base
   - model/language_model: llm
-  - experiment: debug #simlingo_seed1
+  - experiment: debug #config: expriment/debug.yaml overwritten by command line

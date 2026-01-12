@@ -43,7 +43,7 @@ max_epochs: 15
 val_every_n_epochs: 2
 
 # debug: true
-gpus: 8
+gpus: 2
 seed: 9876
 name: simlingo_seed_9876
 resume: False
