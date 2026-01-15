@@ -57,6 +57,36 @@ class LingoInternVLModel(nn.Module):
         IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
         img_context_token_id = self.tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
         self.img_context_token_id = img_context_token_id
+        # ================= [新增] 统一预处理 Latency =================
+        # 将 Latency 提前转为 1-d Tensor，供后续所有步骤复用
+        """ TODO: 这里代码可以优化一下, 确认ref_tensor到底用谁做参考 """
+        latency_tensor = None
+        if latency is not None:
+            # 获取当前设备的参考 Tensor (用于对齐 device 和 dtype)
+            # 注意：此时 inputs_embeds 可能还是 None，我们用 input_ids 或 adaptor_dict 里的东西做参考
+            ref_tensor = adaptor_dict.get('language_inputs', None)
+            if ref_tensor is None and 'language__ids' in adaptor_dict:
+                print(f"internvl2_model.py bug: language_inputs is None, using language__ids as ref_tensor") 
+                ref_tensor = adaptor_dict['language__ids']
+            if ref_tensor is None:
+                print(f"internvl2_model.py: ref_tensor is None, 'language__ids' is not in adaptor_dict")
+            
+            device = ref_tensor.device if ref_tensor is not None else self.device
+            dtype = ref_tensor.dtype if ref_tensor is not None and ref_tensor.is_floating_point() else torch.float32
+
+            # 确保转为 1-d Tensor [Batch_Size]
+            # 假设 input_ids 存在，我们可以用它的 batch size
+            bs = adaptor_dict['language__ids'].shape[0]
+
+            if not isinstance(latency, torch.Tensor):
+                latency_tensor = torch.full((bs,), latency, device=device, dtype=dtype)
+            else:
+                # 如果已经是 Tensor，确保维度和设备正确
+                if latency.ndim == 0:
+                    latency_tensor = latency.expand(bs).to(device).to(dtype)
+                else:
+                    latency_tensor = latency.to(device).to(dtype)
+        # ===========================================================
         
         output_attentions = output_attentions if output_attentions is not None else self.model.config.output_attentions
         output_hidden_states = (
@@ -123,15 +153,21 @@ class LingoInternVLModel(nn.Module):
                 # === [Step A] 准备 Latency Embedding ===
                 # 时延
                 latency_embed = None
-                if latency is not None:
+                if latency_tensor is not None: # <--- 改用 latency_tensor 判断
+                    # 生成 Embedding: [BS, Hidden]
+                    # 直接传处理好的 Tensor 给 scheduler
+                    latency_embed = self.scheduler.latency_encoding(latency_tensor)
+                """ if latency is not None:
+                    print(f"DEBUG_CTX [2/3] LLM Input: type={type(latency)}")
                     # 确保转为 Tensor [Batch_Size]
                     if not isinstance(latency, torch.Tensor):
                         latency_tensor = torch.tensor([latency] * BS, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
                     else:
+                        print(f"DEBUG_CTX [2/3] LLM Input Shape: {latency.shape}, dim={latency.ndim}")
                         latency_tensor = latency.to(inputs_embeds.device).to(inputs_embeds.dtype)
                     
                     # 生成 Embedding: [BS, Hidden]
-                    latency_embed = self.scheduler.latency_encoding(latency_tensor)
+                    latency_embed = self.scheduler.latency_encoding(latency_tensor) """
                 
                 # === [Step B] 准备重构序列 ===
                 # 文本
@@ -258,7 +294,10 @@ class LingoInternVLModel(nn.Module):
                     adaptor_dict['latency_token_position'] = torch.tensor(
                         latency_token_positions, device=inputs_embeds.device
                     )
-                    adaptor_dict['latency'] = latency
+                    # 修改前：存入原始数据 (可能是标量)
+                    # adaptor_dict['latency'] = latency 
+                    # 修改后：存入韩式开头已经处理好的 1-d Tensor
+                    adaptor_dict['latency'] = latency_tensor
                     adaptor_dict['scheduler'] = self.scheduler.forward
 
             # pixel_values is not None but is empty ---> text only cases

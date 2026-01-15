@@ -179,7 +179,9 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                 _recursive_=False
             ).to(self.device)
         torch.set_default_dtype(default_dtype)
-        self.model.load_state_dict(torch.load(self.config_path))
+        # self.model.load_state_dict(torch.load(self.config_path))
+        # 修改后：允许加载不完整的权重（缺失的部分会随机初始化）
+        self.model.load_state_dict(torch.load(self.config_path), strict=False)
         self.iter = self.config_path.split("epoch=")[-1].split("/")[0]
         self.session = self.config_path.split("/")[-4]
         
@@ -591,15 +593,22 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                 for i in range(len(conv)):
                         questions.append(conv[i]['content'][0]['text'])
                         conv[i]['content'] = conv[i]['content'][0]['text']
-                        
-        cache_dir = f"pretrained/{(self.cfg.model.vision_model.variant.split('/')[1])}"
+        # ================= [修改开始] =================
+        # 原代码会去 pretrained 文件夹找，或者尝试从 HuggingFace 下载，但这会覆盖你的本地修改
         # get absolute path from workspace dir not wokring dir
-        cache_dir = to_absolute_path(cache_dir)
-        model_path = f"{cache_dir}/conversation.py"
+        # cache_dir = f"pretrained/{(self.cfg.model.vision_model.variant.split('/')[1])}"
+        # cache_dir = to_absolute_path(cache_dir)
+        # model_path = f"{cache_dir}/conversation.py"
+        # if not os.path.exists(model_path):
+        #         from huggingface_hub import snapshot_download
+        #         snapshot_download(repo_id=self.cfg.model.vision_model.variant, local_dir=cache_dir)
+        
+        # 【强制指定】指向你本地修改过的 InternVL 目录下的 conversation.py
+        model_path = "/home/fanjiawei/simlingo-adaption/simlingo_training/models/language_model/internvl_2_1b/conversation.py"
+        
         if not os.path.exists(model_path):
-                from huggingface_hub import snapshot_download
-                snapshot_download(repo_id=self.cfg.model.vision_model.variant, local_dir=cache_dir)
-                
+            raise FileNotFoundError(f"CRITICAL ERROR: Could not find conversation.py at {model_path}")
+        # ================= [修改结束] =================
         #import from file from model_path
         spec = importlib.util.spec_from_file_location('get_conv_template', model_path)
         conv_module = importlib.util.module_from_spec(spec)
@@ -700,14 +709,36 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         # 策略 B: 从 Config 中读取 (推荐，方便在 config.yaml 中修改)
         # 你需要在你的 config 文件中添加 inference_latency 字段，或者在这里给默认值
         # 假设我们默认想跑快一点 (0.75)
-        latency_target = getattr(self.cfg, 'inference_latency', 1.0) 
+        # latency_target = getattr(self.cfg, 'inference_latency', 1.0) 
         
         # 2. 传入 latency 参数调用模型
         # 注意：这里调用的是 self.model.__call__，它会映射到 driving.py 的 forward
-        """ 调用模型forward函数 """
+        # """ 调用模型forward函数 """
+        # pred_speed_wps, pred_route, language = self.model(
+        #     model_input, 
+        #     latency=latency_target # <--- 关键修改：传入 latency
+        # )
+        # 1. 获取配置中的 float 值
+        latency_val = getattr(self.cfg, 'inference_latency', 1.0) 
+        
+        # 2. [关键] 手动构建 Tensor 并匹配 Batch Size
+        # model_input 是一个 DrivingInput 对象，里面的 "camera_images" 是 [1, T, ...]
+        # 我们可以用它的 batch size 作为参考
+        batch_size = self.DrivingInput["camera_images"].shape[0] # 通常是 1
+        
+        # 构建一个形状为 [batch_size] 的 Tensor，填满 latency_val
+        # 注意：必须放到 self.device (GPU) 上，否则模型内部会报 device mismatch
+        latency_target = torch.full(
+            (batch_size,), 
+            latency_val, 
+            dtype=torch.float32, # 或者 self.model.dtype 如果能获取到
+            device=self.device
+        )
+        print(f"DEBUG_CTX [1/3] Agent Output: shape={latency_target.shape}, dim={latency_target.ndim}") # 期望: [1], 1
+        # 3. 传入处理好的 Tensor
         pred_speed_wps, pred_route, language = self.model(
             model_input, 
-            latency=latency_target # <--- 关键修改：传入 latency
+            latency=latency_target 
         )
         
         # ================= [修改结束] =================

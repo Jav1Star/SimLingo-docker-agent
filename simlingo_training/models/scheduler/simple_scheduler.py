@@ -55,6 +55,9 @@ class SimpleScheduler_L(nn.Module):
         return latency_emb
 
     def forward(self, x, latency):
+        # print(f"DEBUG_CTX [3/3] Scheduler Input: type={type(latency)}")
+        # if isinstance(latency, torch.Tensor):
+        #     print(f"DEBUG_CTX [3/3] Scheduler Input Shape: {latency.shape}, dim={latency.ndim}")
         latency = latency_quantizing(latency, self.num_prefix_layers, self.num_hidden_layers)[0]
         logits = self.mlp_head(x)
         output_samples = []

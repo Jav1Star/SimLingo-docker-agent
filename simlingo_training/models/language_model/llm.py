@@ -2,9 +2,8 @@ from transformers import LlamaModel, LlamaConfig, AutoTokenizer, AutoModelForCau
 from transformers import GPTNeoXForCausalLM
 from transformers import LlavaNextProcessor, LlavaNextForConditionalGeneration
 from transformers import AutoModel, AutoTokenizer
-
-# [新增] 导入本地修改后的 InternLM2 类
-from .modeling_internlm2 import InternLM2ForCausalLM
+# [新增] 引入 Scheduler 
+from ..scheduler.simple_scheduler import SimpleScheduler_L
 
 from typing import Any, Dict, Optional, Tuple
 from torch.nn import functional as F
@@ -40,14 +39,12 @@ class LLM(nn.Module):
             setattr(self, key, value)
 
         if 'pythia' in self.variant:
-            # ... (保持不变) ...
             raise ValueError(f"Carefull: Variant {self.variant} not tested.")
             self.variant = f'EleutherAI/{self.variant}'
             self.model = GPTNeoXForCausalLM.from_pretrained(self.variant, trust_remote_code=True)
             self.tokenizer = AutoTokenizer.from_pretrained(self.variant, torch_dtype="auto",  trust_remote_code=True)
             self.model.embed_tokens = self.model.base_model.embed_in
         elif 'paligemma' in self.variant:
-            # ... (保持不变) ...
             raise ValueError(f"Carefull: Variant {self.variant} not tested.")
             self.variant = f'google/{self.variant}'
             from transformers import AutoProcessor, PaliGemmaForConditionalGeneration
@@ -55,66 +52,55 @@ class LLM(nn.Module):
             self.model.embed_tokens = self.model.base_model.embed_tokens
             self.tokenizer = AutoProcessor.from_pretrained(self.variant, torch_dtype="auto").tokenizer
         elif 'TinyLlama' in self.variant:
-            # ... (保持不变) ...
             raise ValueError(f"Carefull: Variant {self.variant} not tested.")
             print('Loading pretrained model')
             self.model = AutoModelForCausalLM.from_pretrained(self.variant, trust_remote_code=True)
             self.tokenizer = AutoTokenizer.from_pretrained(self.variant, torch_dtype="auto",  trust_remote_code=True)
             self.model.embed_tokens = self.model.base_model.embed_tokens
         elif 'llava-v1.6' in self.variant:
-            # ... (保持不变) ...
             raise ValueError(f"Carefull: Variant {self.variant} not tested.")
             print('Loading pretrained model')
             self.model = LlavaNextForConditionalGeneration.from_pretrained(self.variant, trust_remote_code=True)
             self.tokenizer = LlavaNextProcessor.from_pretrained(self.variant, torch_dtype="auto",  trust_remote_code=True).tokenizer
             self.model = self.model.language_model
             self.model.embed_tokens = self.model.base_model.embed_tokens
-        # === [修改部分] ===
+        # === [修改部分] 对接 InternVL2-1B (本地修改版) ===
         elif 'internvl' in self.variant.lower():
-            # 自动下载模型逻辑
-            # 将 ~/models/OpenGVLab/InternVL2-1B 展开为绝对路径
-            base_model_dir = os.path.expanduser("~/models")
-            # 提取模型名称作为子目录，例如 InternVL2-1B
-            model_name = self.variant.split('/')[-1]
-            local_model_path = os.path.join(base_model_dir, model_name)
+            # 1. 构建本地路径
+            # llm.py 在 models/language_model/ 下，而 internvl_2_1b 在 models/language_model/internvl_2_1b/
+            local_model_path = os.path.join(os.path.dirname(__file__), "internvl_2_1b")
+            print(f'Loading local InternVL model from: {local_model_path}')
             
-            # 检查本地目录是否存在且包含必要文件(如 config.json)
-            if not os.path.exists(os.path.join(local_model_path, "config.json")):
-                print(f"Model not found in {local_model_path}. Downloading from HuggingFace...")
-                from huggingface_hub import snapshot_download
-                snapshot_download(repo_id=self.variant, local_dir=local_model_path)
-                print(f"Model downloaded to {local_model_path}")
-            else:
-                print(f"Found local model in {local_model_path}")
+            # 2. 加载 Wrapper 模型 (InternVLChatModel)
+            # 必须设置 trust_remote_code=True 以执行你本地的 modeling_internvl_chat.py
+            self.model = AutoModel.from_pretrained(local_model_path, trust_remote_code=True)
             
-            # 更新 self.variant 为本地路径，以便后续加载使用
-            self.variant = local_model_path
+            # === [关键修复] 去壳：只保留语言模型部分 ===
+            # 这样 self.model 就变成了 Qwen2ForCausalLM (你修改过的那个类)
+            self.model = self.model.language_model 
+            # ==========================================
+            # 3. 加载 Tokenizer
+            # 这里的 tokenizer 实际上是 Qwen2Tokenizer
+            self.tokenizer = AutoTokenizer.from_pretrained(local_model_path, trust_remote_code=True)
+            
+            # 4. 绑定 Embeddings
+            # SimLingo 需要访问 embed_tokens 进行采样
+            # InternVL 的结构是 Wrapper -> language_model (Qwen2) -> embed_tokens
+            # self.model.embed_tokens = self.model.language_model.get_input_embeddings()
+            self.model.embed_tokens = self.model.get_input_embeddings()
 
-            print(f"Loading Local Modified InternLM2 from {self.variant}")
+            # 5. [关键] 初始化 Scheduler
+            # 我们需要获取 LLM 的配置 (包含 num_prefix_layers)
+            # llm_config = self.model.config.llm_config
+            # 既然 self.model 已经是 Qwen2，它的 config 就是我们要的 llm_config
+            llm_config = self.model.config  # <--- 直接赋值，不要 .llm_config
             
-            # 打印调试信息，确认我们是否真的收到了 Qwen 的参数
-            print(f">>> [LLM Init Debug] Config kwargs: hidden_size={cfg.get('hidden_size')}, layers={cfg.get('num_hidden_layers')}")
-
-            # [关键修改] 将 cfg (包含你在YAML里写的 hidden_size 等) 传给 from_pretrained
-            # 这样 transformers 库就会用你的参数覆盖掉默认的 7B 参数
-            # 强制使用 float16 以节省内存，防止被 OS Kill
-            self.model = InternLM2ForCausalLM.from_pretrained(
-                self.variant, 
-                trust_remote_code=False, 
-                torch_dtype=torch.float16, ######
-                device_map="auto"
-            )
-            
-            # 设置 embed_tokens 引用 (保持不变)
-            self.model.embed_tokens = self.model.model.tok_embeddings
-            
-            # 加载 Tokenizer (通常还是用 HF 的)
-            self.tokenizer = AutoTokenizer.from_pretrained(self.variant, trust_remote_code=True, use_fast=False)
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-        # =================    
+            # 假设使用 SimpleScheduler_L (你也可以根据 cfg 传入的参数动态选择 L 或 H)
+            print("Initializing Scheduler for dynamic layer skipping...")
+            self.scheduler = SimpleScheduler_L(llm_config)
+            # 将 scheduler 绑定到 scheduler 属性上，或者确保它能被 forward 访问
+            # 注意：InternVL wrapper 本身没有 self.scheduler，我们需要在调用 forward 时传入    
         else:
-            # ... (保持不变) ...
             raise ValueError(f"Carefull: Variant {self.variant} not tested.")
             config_overrides = CONFIGS[self.variant].copy()
             configuration = LlamaConfig(**config_overrides)
@@ -125,7 +111,6 @@ class LLM(nn.Module):
                 self.tokenizer.pad_token = self.tokenizer.eos_token
 
         if self.lora:
-            # ... (保持不变) ...
             from peft import get_peft_model
             from peft import LoraConfig
             
@@ -136,6 +121,7 @@ class LLM(nn.Module):
                 lora_alpha=self.lora_alpha,
                 lora_dropout=self.lora_dropout,
                 target_modules="all-linear",
+                # target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
             )
             self.model = get_peft_model(self.model, peft_config)
             self.model.print_trainable_parameters()
@@ -150,26 +136,51 @@ class LLM(nn.Module):
         attention_mask: Tensor = None,
         return_dict: bool = True,
         position_ids: Optional[Tensor] = None,
-        # [新增 AdaLLaVA 参数]
+        # === [新增] AdaLLaVA 专用参数 ===
         latency: Optional[float] = None,
         latency_token_position: Optional[Tensor] = None,
         scheduler: Optional[object] = None,
+        **kwargs
     ) -> Tensor:
 
-        # 将新增参数传递给底层的 InternLM2ForCausalLM.forward
-        outputs = self.model(
-            inputs_embeds=embeddings,
-            attention_mask=attention_mask,
-            output_hidden_states=True,
-            position_ids=position_ids,
-            return_dict=return_dict,
-            # 传递参数
-            latency=latency,
-            latency_token_position=latency_token_position,
-            scheduler=scheduler,
-        )#.last_hidden_state
-        features = outputs.hidden_states[-1]
-        logits = outputs[0]
+        # 1. 准备传递给 Qwen2 (LLM) 的参数
+        # 注意：这里只传 inputs_embeds，因为视觉信息已经在 embeddings 里了
+        model_inputs = {
+            "inputs_embeds": embeddings,
+            "attention_mask": attention_mask,
+            "output_hidden_states": True, # AdaLLaVA 需要 hidden states
+            "position_ids": position_ids,
+            "return_dict": return_dict
+        }
+
+        # 2. [AdaLLaVA 逻辑] 注入 Scheduler 和 Latency
+        if scheduler is not None:
+            model_inputs["scheduler"] = scheduler
+        
+        if latency is not None:
+            # 确保 latency 是 Tensor 且在正确的设备上
+            if isinstance(latency, (float, int)):
+                latency = torch.tensor(latency, device=embeddings.device, dtype=embeddings.dtype)
+            model_inputs["latency"] = latency
+
+        if latency_token_position is not None:
+            model_inputs["latency_token_position"] = latency_token_position
+
+        # 3. 调用模型 (self.model 应该是 Qwen2ForCausalLM 或其变体)
+        # 不需要传 pixel_values，因为它只处理 embeddings
+        outputs = self.model(**model_inputs)
+
+        # 4. 获取输出 (Qwen2 返回 CausalLMOutputWithPast)
+        if hasattr(outputs, "hidden_states"):
+            features = outputs.hidden_states[-1]
+        else:
+            # 兼容 tuple 返回
+            features = outputs[-1] 
+
+        if hasattr(outputs, "logits"):
+            logits = outputs.logits
+        else:
+            logits = outputs[0]
 
         return features, logits
 

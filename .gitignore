@@ -3,6 +3,7 @@ database/
 pretrained/
 results/
 outputs/
+/outputs/
 eval/
 eval_results/
 pretrained/
@@ -169,3 +170,36 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 .DS_Store
+
+# 1. 全局忽略模型权重文件 (无论它们藏在哪)
+# 这是最重要的一条！防止你把几十GB的模型误传上去
+*.pth
+*.pt
+*.bin
+*.ckpt
+*.safetensors
+*.h5
+*.onnx
+*.gguf
+
+# 2. 忽略训练日志和缓存工具
+# WandB (Weights & Biases) 会产生巨大的本地缓存
+wandb/
+# Tensorboard 的日志目录
+runs/
+logs/
+# DeepSpeed 产生的特定缓存
+*.ds_config
+ds_config.json
+
+# 3. 忽略仿真和生成的数据 (Carla/SimLingo)
+# 避免上传生成的测试视频或大量图片
+*.mp4
+*.gif
+*.avi
+# 如果你的数据集也是解压在当前目录的，建议忽略 jsonl 以外的大数据
+# *.jpg
+# *.png
+
+# 4. 编辑器配置 (如果你用 VSCode)
+.vscode/
