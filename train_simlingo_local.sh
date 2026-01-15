@@ -25,9 +25,9 @@ export PYTHONPATH="${CARLA_ROOT}/PythonAPI/carla/":"${SCENARIO_RUNNER_ROOT}":"${
 
 # Environment variables for distributed training
 export MASTER_ADDR=localhost
-export MASTER_PORT=29500
+export MASTER_PORT=29501
 export NCCL_DEBUG=INFO
-
+export WANDB__SERVICE_WAIT=300
 # Adjust threads for local machine
 export OMP_NUM_THREADS=16 # Adjusted for local CPU cores
 export OPENBLAS_NUM_THREADS=1
@@ -47,8 +47,8 @@ cd "$WORK_DIR"
 
 # gpu = 1 test
 # config: expriment/simlingo_seed1.yaml
-WANDB__SERVICE_WAIT=300 python simlingo_training/train.py \
-    experiment=simlingo_seed1 \
+python simlingo_training/train.py \
+    experiment=debug \
     data_module.batch_size=4 \
     gpus=1 \
     name=simlingo_seed1_local

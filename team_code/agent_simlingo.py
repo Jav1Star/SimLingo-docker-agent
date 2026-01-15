@@ -901,7 +901,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         del self.model
         del self.config
-        if self.cfg.data_module.encoder == 'llavanext':
+        if hasattr(self.cfg.data_module, 'encoder') and self.cfg.data_module.encoder == 'llavanext':
             del self.processor
 
 

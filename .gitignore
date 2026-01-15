@@ -172,6 +172,7 @@ cython_debug/
 # model
 *.safetensors
 /models/*
+/data/*
 
 # cache
 *.mp4

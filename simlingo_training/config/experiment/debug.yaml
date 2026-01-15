@@ -22,8 +22,8 @@ data_module:
   num_workers: 0
   # dreamer_dataset: null
   base_dataset:
-    data_path: database/simlingo
-    bucket_path: database/bucketsv2_simlingo
+    data_path: data/simlingo
+    bucket_path: data/simlingo
     pred_len: 11
     cut_bottom_quarter: True
     use_commentary: True
