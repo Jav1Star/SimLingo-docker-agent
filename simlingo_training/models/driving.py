@@ -167,12 +167,16 @@ class DrivingModel(pl.LightningModule):
 
                 # === [新增关键修正：正确提取当前样本的 Latency] ===
                 # 默认直接使用 (适用于 float 或 标量 tensor)
+                """ TODO: 这里的latency理论上应该是一个一维张量, 不会是float或标量 """
                 current_latency = latency_val
                 
                 # 如果 latency_val 是 Tensor 且是一个向量 (Batch 形式)
                 # 我们需要取出当前 b_idx 对应的那一个值
                 if isinstance(latency_val, torch.Tensor) and latency_val.dim() > 0:
-                    current_latency = latency_val[b_idx]
+                    # current_latency = latency_val[b_idx]
+                    # 使用切片 [b_idx:b_idx+1] 而不是索引 [b_idx]
+                    # 切片操作会保留维度
+                    current_latency = latency_val[b_idx:b_idx+1] # -> 1-d tensor [1]
                 # ================================================
                 
                 if self.language_model.variant == 'OpenGVLab/InternVL2-4B':
@@ -227,6 +231,8 @@ class DrivingModel(pl.LightningModule):
                                 
                 self.language.append(self.tokenizer.batch_decode(sampled_tokens, skip_special_tokens=True)[0])
         else:
+            """ TODO: 这里没做关于latency的张量处理 """
+            print("fff driving.py def forward DEBUG_CTX: Non-language output mode")
             # single forward pass same as during training so we can use the same function
             # 单次前向传播 (用于验证或非语言输出模式)
             # 注意：这里的 forward_model 也需要传递 latency
