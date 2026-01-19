@@ -28,7 +28,7 @@ class LingoInternVLModel(nn.Module):
         if not hasattr(llm_config, 'num_prefix_layers'):
             llm_config.num_prefix_layers = 2
             
-        # 初始化 L-Mode (按层) 调度器
+        # 初始化 L-Mode (按层) 调度器 # TODO 这为什么有
         self.scheduler = SimpleScheduler_L(
             config=llm_config,
             tau=5, 

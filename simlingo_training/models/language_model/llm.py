@@ -2,8 +2,10 @@ from transformers import LlamaModel, LlamaConfig, AutoTokenizer, AutoModelForCau
 from transformers import GPTNeoXForCausalLM
 from transformers import LlavaNextProcessor, LlavaNextForConditionalGeneration
 from transformers import AutoModel, AutoTokenizer
+from transformers import Qwen2Tokenizer
 # [新增] 引入 Scheduler 
 from ..scheduler.simple_scheduler import SimpleScheduler_L
+from .internvl_2_1b.modeling_internvl_chat import InternVLChatModel
 
 from typing import Any, Dict, Optional, Tuple
 from torch.nn import functional as F
@@ -37,28 +39,6 @@ class LLM(nn.Module):
         super().__init__()
         for key, value in cfg.items():
             setattr(self, key, value)
-        # ---------------------------------------------------------------------------
-        # Logic to auto-detect local 'models' folder for cache_dir
-        # Consistent with team_code/agent_simlingo.py
-        # ---------------------------------------------------------------------------
-        if not hasattr(self, 'cache_dir') or self.cache_dir is None:
-            import os
-            try:
-                # llm.py -> language_model -> models -> simlingo_training -> simlingo-adaption
-                current_file = os.path.abspath(__file__)
-                workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_file))))
-                
-                # Check if we assume the standard structure where 'models' is valid
-                # Adjust repo name logic if needed
-                repo_name = self.variant.split('/')[-1]
-                local_models_dir = os.path.join(workspace_root, "models", repo_name)
-                
-                if os.path.exists(local_models_dir):
-                    print(f"[LLM] Auto-detected local model at {local_models_dir}, using it.", flush=True)
-                    self.cache_dir = local_models_dir
-            except Exception as e:
-                print(f"[LLM] Local model detection failed: {e}", flush=True)
-
         if 'pythia' in self.variant:
             raise ValueError(f"Carefull: Variant {self.variant} not tested.")
             self.variant = f'EleutherAI/{self.variant}'
@@ -93,16 +73,15 @@ class LLM(nn.Module):
             print(f'Loading local InternVL model from: {local_model_path}')
             
             # 2. 加载 Wrapper 模型 (InternVLChatModel)
-            # 必须设置 trust_remote_code=True 以执行你本地的 modeling_internvl_chat.py
-            self.model = AutoModel.from_pretrained(local_model_path, trust_remote_code=True)
+            # 直接使用本地自定义类来初始化
+            self.model = InternVLChatModel.from_pretrained(local_model_path) # TODO: 加载simlingo权重。
             
             # === [关键修复] 去壳：只保留语言模型部分 ===
             # 这样 self.model 就变成了 Qwen2ForCausalLM (你修改过的那个类)
             self.model = self.model.language_model 
             # ==========================================
-            # 3. 加载 Tokenizer
-            # 这里的 tokenizer 实际上是 Qwen2Tokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(local_model_path, trust_remote_code=True)
+            # 3. 加载 Qwen2Tokenizer
+            self.tokenizer = Qwen2Tokenizer.from_pretrained(local_model_path)
             
             # 4. 绑定 Embeddings
             # SimLingo 需要访问 embed_tokens 进行采样

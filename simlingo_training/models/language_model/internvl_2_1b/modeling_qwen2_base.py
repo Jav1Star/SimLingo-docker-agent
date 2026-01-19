@@ -54,9 +54,7 @@ from transformers.utils import (
 # 如果两个文件都在 internvl_2_1b 文件夹下，且你通过模块调用，建议保留 .
 from .configuration_qwen2 import Qwen2Config
 
-
-if is_flash_attn_2_available():
-   from .modeling_flash_attention_utils import _flash_attention_forward
+from .modeling_flash_attention_utils import _flash_attention_forward
 
 
 logger = logging.get_logger(__name__)

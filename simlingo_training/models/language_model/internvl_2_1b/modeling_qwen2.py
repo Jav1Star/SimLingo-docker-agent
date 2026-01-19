@@ -57,20 +57,7 @@ from transformers.utils import (
 from .configuration_qwen2 import Qwen2Config
 
 # 1. 尝试导入
-try:
-    if is_flash_attn_2_available():
-        from .modeling_flash_attention_utils import _flash_attention_forward
-except ImportError:
-    # 2. 如果在依赖解析阶段（缓存复制前）找不到文件，先静默失败
-    # 等到真正运行 forward 时，如果还是找不到，自然会报 NameError，
-    # 但那时缓存应该已经复制完毕了。
-    _flash_attention_forward = None
-# if is_flash_attn_2_available():
-#     from .modeling_flash_attention_utils import _flash_attention_forward
-# === [修改后] 强制禁用，绕过文件查找 ===
-# if False: # is_flash_attn_2_available():
-#     pass
-#     # from .modeling_flash_attention_utils import _flash_attention_forward
+from .modeling_flash_attention_utils import _flash_attention_forward
 
 logger = logging.get_logger(__name__)
 

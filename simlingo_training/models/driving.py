@@ -119,6 +119,7 @@ class DrivingModel(pl.LightningModule):
         
         if driving_input is not None:
             adaptor_dict = self.adaptors(example, inference=True)
+            # TODO 检查，这里是全部都替换了？为什么全部包装在image_encoder的方法里
             adaptor_dict = self.vision_model.image_encoder.replace_placeholder_tokens(
                     adaptor_dict = adaptor_dict,
                     pixel_values = driving_input.camera_images,
@@ -154,6 +155,7 @@ class DrivingModel(pl.LightningModule):
 
             # [修改 2] 从 adaptor_dict 中提取参数
             # 注意：这些参数现在已经在 replace_placeholder_tokens 里打包好了
+            # TODO check，adaptor_dict里没有这些key，目前
             scheduler_fn = adaptor_dict.get('scheduler')
             latency_token_pos = adaptor_dict.get('latency_token_position')
             latency_val = adaptor_dict.get('latency')

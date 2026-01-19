@@ -179,8 +179,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                 _recursive_=False
             ).to(self.device)
         torch.set_default_dtype(default_dtype)
-        # self.model.load_state_dict(torch.load(self.config_path))
-        # 修改后：允许加载不完整的权重（缺失的部分会随机初始化）
+
         self.model.load_state_dict(torch.load(self.config_path), strict=False)
         self.iter = self.config_path.split("epoch=")[-1].split("/")[0]
         self.session = self.config_path.split("/")[-4]
@@ -593,45 +592,43 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                 for i in range(len(conv)):
                         questions.append(conv[i]['content'][0]['text'])
                         conv[i]['content'] = conv[i]['content'][0]['text']
-        adallava = True
-        workspace_root = Path(os.getcwd()).parent.parent
-        if adallava:
-            # 【强制指定】指向你本地修改过的 InternVL 目录下的 conversation.py
-            model_path = os.path.join(workspace_root,"simlingo_training/models/language_model/internvl_2_1b/conversation.py")
-            if not os.path.exists(model_path):
-                raise FileNotFoundError(f"CRITICAL ERROR: Could not find conversation.py at {model_path}")
-        else:
-            # ================= [修改开始] =================
-            # Logic to check for local model or download to models/ folder
-            repo_id = self.cfg.model.vision_model.variant 
-            repo_name = repo_id.split('/')[-1] # 索引具体模型
-            local_model_path = os.path.join(workspace_root, "models", repo_name)
-
-            # 检查本地路径是否存在
-            if os.path.exists(local_model_path):
-                print(f"Found local model at {local_model_path}, using it.", flush=True)
-                cache_dir = local_model_path
-            else:
-                print(f"Local model not found at {local_model_path}. Downloading to {local_model_path}...", flush=True)
-                try:
-                    # 尝试从 HuggingFace 自动下载模型到本地 models/ 目录
-                    from huggingface_hub import snapshot_download
-                    # snapshot_download 会将整个仓库下载到 local_dir
-                    snapshot_download(repo_id=repo_id, local_dir=local_model_path)
-                    cache_dir = local_model_path
-                except Exception as e:
-                    print(f"Failed to download model to local dir: {e}. Fallback to default cache.", flush=True)
-                    # 如果下载失败（比如网络问题或未安装huggingface_hub），则回退到默认的 pretrained/ 目录缓存策略
-                    # 原代码会去 pretrained 文件夹找，或者尝试从 HuggingFace 下载，但这会覆盖你的本地修改
+                        
+        # Logic to check for local model or download to models/ folder
+        repo_id = self.cfg.model.vision_model.variant
+        repo_name = repo_id.split('/')[-1]
         
-            # 这里实际上是一个双重检查：即便前面找到了 local_model_path，也可能不包含 conversation.py
-            # 如果文件确实不存在，则再尝试下载一次 (如果是 fallback 路径，这里会下载到 fallback 路径)
-            if not os.path.exists(model_path):
-                raise FileNotFoundError(f"CRITICAL ERROR: Could not find conversation.py at {model_path}")
-            #         from huggingface_hub import snapshot_download
-            #         snapshot_download(repo_id=self.cfg.model.vision_model.variant, local_dir=cache_dir)
+        # 获取工作区根目录 (team_code/agent_simlingo.py -> 上两级 -> simlingo-adaption)
+        workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        local_model_path = os.path.join(workspace_root, "models", repo_name)
 
-        # ================= [修改结束] =================
+        # 检查本地路径是否存在
+        if os.path.exists(local_model_path):
+             print(f"Found local model at {local_model_path}, using it.", flush=True)
+             cache_dir = local_model_path
+        else:
+             print(f"Local model not found at {local_model_path}. Downloading to {local_model_path}...", flush=True)
+             try:
+                 # 尝试从 HuggingFace 自动下载模型到本地 models/ 目录
+                 from huggingface_hub import snapshot_download
+                 # snapshot_download 会将整个仓库下载到 local_dir
+                 snapshot_download(repo_id=repo_id, local_dir=local_model_path)
+                 cache_dir = local_model_path
+             except Exception as e:
+                 print(f"Failed to download model to local dir: {e}. Fallback to default cache.", flush=True)
+                 # 如果下载失败（比如网络问题或未安装huggingface_hub），则回退到默认的 pretrained/ 目录缓存策略
+                 cache_dir = f"pretrained/{(self.cfg.model.vision_model.variant.split('/')[1])}"
+
+        # 获取 cache_dir 的绝对路径，可以从工作区目录获取，而不是当前工作目录
+        # 这里确保即使 cache_dir 是相对路径也能正确解析
+        cache_dir = to_absolute_path(cache_dir)
+        model_path = f"{cache_dir}/conversation.py"
+        
+        # 这里实际上是一个双重检查：即便前面找到了 local_model_path，也可能不包含 conversation.py
+        # 如果文件确实不存在，则再尝试下载一次 (如果是 fallback 路径，这里会下载到 fallback 路径)
+        if not os.path.exists(model_path):
+                from huggingface_hub import snapshot_download
+                snapshot_download(repo_id=self.cfg.model.vision_model.variant, local_dir=cache_dir)
+        
         #import from file from model_path
         spec = importlib.util.spec_from_file_location('get_conv_template', model_path)
         conv_module = importlib.util.module_from_spec(spec)
@@ -722,50 +719,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         # initialize DrivingInput with dict self.DrivingInput
         model_input = DrivingInput(**self.DrivingInput)
-
-        # ================= [修改开始] =================
-        
-        # 1. 定义 Latency 策略
-        # 策略 A: 固定值 (最简单，用于测试)
-        # latency_target = 1.0  # 全速/全精度模式
-        
-        # 策略 B: 从 Config 中读取 (推荐，方便在 config.yaml 中修改)
-        # 你需要在你的 config 文件中添加 inference_latency 字段，或者在这里给默认值
-        # 假设我们默认想跑快一点 (0.75)
-        # latency_target = getattr(self.cfg, 'inference_latency', 1.0) 
-        
-        # 2. 传入 latency 参数调用模型
-        # 注意：这里调用的是 self.model.__call__，它会映射到 driving.py 的 forward
-        # """ 调用模型forward函数 """
-        # pred_speed_wps, pred_route, language = self.model(
-        #     model_input, 
-        #     latency=latency_target # <--- 关键修改：传入 latency
-        # )
-        # 1. 获取配置中的 float 值
-        latency_val = getattr(self.cfg, 'inference_latency', 1.0) 
-        
-        # 2. [关键] 手动构建 Tensor 并匹配 Batch Size
-        # model_input 是一个 DrivingInput 对象，里面的 "camera_images" 是 [1, T, ...]
-        # 我们可以用它的 batch size 作为参考
-        batch_size = self.DrivingInput["camera_images"].shape[0] # 通常是 1
-        
-        # 构建一个形状为 [batch_size] 的 Tensor，填满 latency_val
-        # 注意：必须放到 self.device (GPU) 上，否则模型内部会报 device mismatch
-        latency_target = torch.full(
-            (batch_size,), 
-            latency_val, 
-            dtype=torch.float32, # 或者 self.model.dtype 如果能获取到
-            device=self.device
-        )
-        print(f"DEBUG_CTX [1/3] Agent Output: shape={latency_target.shape}, dim={latency_target.ndim}") # 期望: [1], 1
-        # 3. 传入处理好的 Tensor
-        pred_speed_wps, pred_route, language = self.model(
-            model_input, 
-            latency=latency_target 
-        )
-        
-        # ================= [修改结束] =================
-        # pred_speed_wps, pred_route, language = self.model(model_input)
+        pred_speed_wps, pred_route, language = self.model(model_input)
         pred_speed_wps = pred_speed_wps.float() if pred_speed_wps is not None else None
         pred_route = pred_route.float() if pred_route is not None else None
 

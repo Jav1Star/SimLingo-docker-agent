@@ -16,6 +16,7 @@ from transformers import (AutoModel, GenerationConfig, LlamaForCausalLM)
 # === [AdaLLaVA 修改] 引用本地修改过的 Qwen2 模型 ===
 # modeling_qwen2.py 和 modeling_internvl_chat.py 在同一目录下
 from .modeling_qwen2 import Qwen2ForCausalLM
+from .modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import ModelOutput, logging
@@ -24,10 +25,6 @@ from .configuration_internvl_chat import InternVLChatConfig
 from .conversation import get_conv_template
 from .modeling_intern_vit import InternVisionModel, has_flash_attn
 # 有关flash attention 2 的处理
-try:
-    from . import modeling_flash_attention_utils
-except ImportError:
-    pass
 
 
 logger = logging.get_logger(__name__)
