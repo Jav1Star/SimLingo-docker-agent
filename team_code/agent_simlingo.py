@@ -719,7 +719,14 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         # initialize DrivingInput with dict self.DrivingInput
         model_input = DrivingInput(**self.DrivingInput)
-        pred_speed_wps, pred_route, language = self.model(model_input)
+        latency_target = self.latency_input_process() # TODO: 很多行的最好都弄成函数，特别是后期我们可能要大改的。
+        # 3. 传入处理好的 Tensor
+        pred_speed_wps, pred_route, language = self.model(
+            model_input, 
+            latency=latency_target 
+        )
+        
+        # ================= [修改结束] ================
         pred_speed_wps = pred_speed_wps.float() if pred_speed_wps is not None else None
         pred_route = pred_route.float() if pred_route is not None else None
 
@@ -905,7 +912,45 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         if hasattr(self.cfg.data_module, 'encoder') and self.cfg.data_module.encoder == 'llavanext':
             del self.processor
 
-
+    def latency_input_process(self):
+        # ================= [修改开始] =================
+        
+        # 1. 定义 Latency 策略
+        # 策略 A: 固定值 (最简单，用于测试)
+        # latency_target = 1.0  # 全速/全精度模式
+        
+        # 策略 B: 从 Config 中读取 (推荐，方便在 config.yaml 中修改)
+        # 你需要在你的 config 文件中添加 inference_latency 字段，或者在这里给默认值
+        # 假设我们默认想跑快一点 (0.75)
+        # latency_target = getattr(self.cfg, 'inference_latency', 1.0) 
+        
+        # 2. 传入 latency 参数调用模型
+        # 注意：这里调用的是 self.model.__call__，它会映射到 driving.py 的 forward
+        # """ 调用模型forward函数 """
+        # pred_speed_wps, pred_route, language = self.model(
+        #     model_input, 
+        #     latency=latency_target # <--- 关键修改：传入 latency
+        # )
+        # 1. 获取配置中的 float 值
+        latency_val = getattr(self.cfg, 'inference_latency', 1.0) 
+        
+        # 2. [关键] 手动构建 Tensor 并匹配 Batch Size
+        # model_input 是一个 DrivingInput 对象，里面的 "camera_images" 是 [1, T, ...]
+        # 我们可以用它的 batch size 作为参考
+        batch_size = self.DrivingInput["camera_images"].shape[0] # 通常是 1
+        
+        # 构建一个形状为 [batch_size] 的 Tensor，填满 latency_val
+        # 注意：必须放到 self.device (GPU) 上，否则模型内部会报 device mismatch
+        latency_target = torch.full(
+            (batch_size,), 
+            latency_val, 
+            dtype=torch.float32, # 或者 self.model.dtype 如果能获取到
+            device=self.device
+        )
+        print(f"DEBUG_CTX [1/3] Agent Output: shape={latency_target.shape}, dim={latency_target.ndim}") # 期望: [1], 1
+        return latency_target
+        
+        # ================= [修改结束] =================
 # Filter Functions
 def bicycle_model_forward(x, dt, steer, throttle, brake):
     # Kinematic bicycle model.
