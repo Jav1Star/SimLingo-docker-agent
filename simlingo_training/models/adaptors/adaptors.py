@@ -467,7 +467,7 @@ def replace_placeholder_tokens(
                 end = start + coords_length_org[i]
                 inputs_embeds[pos[0], start:end] = wp_embeds[i]
 
-        # 2. Merge text and images (修改核心：显式拼接 Latency Token)
+        # 2. Merge text and images, 显式拼接 Latency Token至末尾
         # TODO : 目前只支持单个图像输入的情况,且默认占位符的数目都一致
         if pixel_values is not None and input_ids.shape[1] != 1 and pixel_values.size(0) > 0:
             all_pixel_values = [pixel_values] # 单font视角
@@ -497,7 +497,6 @@ def replace_placeholder_tokens(
             latency_embed = None
             if latency_tensor is not None: # <--- 改用 latency_tensor 判断
                 # 生成 Embedding: [BS, Hidden]
-                # 直接传处理好的 Tensor 给 scheduler
                 latency_embed = scheduler.latency_encoding(latency_tensor)
             else:
                 raise ValueError("latency tensor is None")

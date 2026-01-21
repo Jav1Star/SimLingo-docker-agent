@@ -58,9 +58,12 @@ class SimpleScheduler_L(nn.Module):
         return latency_emb
 
     def forward(self, x, latency):
-        # print(f"DEBUG_CTX [3/3] Scheduler Input: type={type(latency)}")
-        # if isinstance(latency, torch.Tensor):
-        #     print(f"DEBUG_CTX [3/3] Scheduler Input Shape: {latency.shape}, dim={latency.ndim}")
+        '''
+         x: latency token [bs, hidden_size]
+         latency: just latency
+        
+         return: execution plan, size [batch_size, num_hidden_layers, 2, num_attention_heads]
+        '''
         latency = latency_quantizing(latency, self.num_prefix_layers, self.num_hidden_layers)[0]
         logits = self.mlp_head(x)
         output_samples = []
@@ -69,7 +72,7 @@ class SimpleScheduler_L(nn.Module):
             output_samples.append(sample)
         
         output_samples = torch.stack(output_samples)
-        output_samples = output_samples[:,:,None,None].repeat(1, 1, 2, self.num_attention_heads)
+        output_samples = output_samples[:,:,None,None].repeat(1, 1, 2, self.num_attention_heads) # for L 注意力头决策与MLP模块共享 
 
         prefix_execution_plan = self.get_prefix_execution_plan(output_samples)
 

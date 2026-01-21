@@ -128,7 +128,7 @@ class DrivingModel(pl.LightningModule):
             driving_input = example
         
         if driving_input is not None:
-            adaptor_dict = self.adaptors(example, inference=True) # TODO
+            adaptor_dict = self.adaptors(example, inference=True)
             # 将其从img_encoder中提取出来，使用参数的形式传入image,wp,scheduler encoder
             adaptor_dict = replace_placeholder_tokens(
                     adaptor_dict = adaptor_dict,
@@ -140,36 +140,20 @@ class DrivingModel(pl.LightningModule):
                     latency = latency,
                 )
             
-            # ================= [新增关键修正 START] =================
-            # 必须手动更新 split_sizes，否则后续的 split_outputs_by_adaptor 会报错
-            # 因为序列变长了，但 adaptors 里的记录还是旧的
-            
-            if 'language_inputs' in adaptor_dict:
-                # 获取最新的 language input 长度 (包含 Image + Latency)
-                new_lang_len = adaptor_dict['language_inputs'].shape[1]
-                
-                # 更新 split_sizes (重建列表以确保安全)
-                # 逻辑：遍历所有 adaptors，获取它们当前的 input 长度
-                new_split_sizes = []
-                # 注意：self.adaptors.adaptors 是一个属性，返回字典
-                for key in self.adaptors.adaptors.keys():
-                    # key 通常是 'language' 和 'driving'
-                    input_tensor = adaptor_dict[f"{key}_inputs"]
-                    new_split_sizes.append(input_tensor.shape[1])
-                
-                # 覆盖旧的 split_sizes
-                adaptor_dict['split_sizes'] = torch.tensor(new_split_sizes, device=adaptor_dict['split_sizes'].device)
-            # ================= [新增关键修正 END] =================
+
+            # 手动更新 split_sizes. split_sizez作用于所有[{key}_input]
+            # language_input中，包括了text, pic, and latency; driving_input中，包括了wps task token
+            new_split_sizes = []
+            for key in self.adaptors.adaptors.keys():
+                input_tensor = adaptor_dict[f"{key}_inputs"]
+                new_split_sizes.append(input_tensor.size(1))
+            adaptor_dict['split_sizes'] = torch.tensor(new_split_sizes, device=adaptor_dict['split_sizes'].device)
+
             
             input_embeds_all = adaptor_dict["language_inputs"]
             attention_masks = adaptor_dict['language_inputs_mask']
-
-            # [修改 2] 从 adaptor_dict 中提取参数
-            # 注意：这些参数现在已经在 replace_placeholder_tokens 里打包好了
-            # TODO check，adaptor_dict里没有这些key
-            scheduler_fn = self.scheduler.forward
             latency_token_pos = adaptor_dict.get('latency_token_position')
-            latency_val = adaptor_dict.get('latency')
+            latency_tensor = adaptor_dict.get('latency')
 
 
         if self.predict_language:
@@ -177,19 +161,10 @@ class DrivingModel(pl.LightningModule):
             for b_idx, (input_embed, attention_mask) in enumerate(zip(input_embeds_all, attention_masks)):
                 input_embed = input_embed.unsqueeze(0)
                 attention_mask = attention_mask.unsqueeze(0)
-
-                # === [新增关键修正：正确提取当前样本的 Latency] ===
-                # 默认直接使用 (适用于 float 或 标量 tensor)
-                """ TODO: 这里的latency理论上应该是一个一维张量, 不会是float或标量 """
-                current_latency = latency_val
                 
-                # 如果 latency_val 是 Tensor 且是一个向量 (Batch 形式)
-                # 我们需要取出当前 b_idx 对应的那一个值
-                if isinstance(latency_val, torch.Tensor) and latency_val.dim() > 0:
-                    # current_latency = latency_val[b_idx]
-                    # 使用切片 [b_idx:b_idx+1] 而不是索引 [b_idx]
-                    # 切片操作会保留维度
-                    current_latency = latency_val[b_idx:b_idx+1] # -> 1-d tensor [1]
+                # 提取当前样本的latency
+                if isinstance(latency_tensor, torch.Tensor) and latency_tensor.dim() > 0:
+                    current_latency = latency_tensor[b_idx:b_idx+1] # -> 1-d tensor [1]
                 # ================================================
                 
                 if self.language_model.variant == 'OpenGVLab/InternVL2-4B':
@@ -212,7 +187,7 @@ class DrivingModel(pl.LightningModule):
                     # 传入 AdaLLaVA 参数
                     latency=current_latency, # [修改] 使用 current_latency
                     latency_token_position=latency_token_pos[b_idx].unsqueeze(0) if latency_token_pos is not None else None,
-                    scheduler=scheduler_fn,
+                    scheduler=self.scheduler.forward,
                 )
                 
                 # 获得驾驶输入，拼接CoT与驾驶输入，进行驾驶决策推理
@@ -223,7 +198,7 @@ class DrivingModel(pl.LightningModule):
                     # 传入 AdaLLaVA 参数
                     latency=current_latency, # [修改] 使用 current_latency
                     latency_token_position=latency_token_pos[b_idx].unsqueeze(0) if latency_token_pos is not None else None,
-                    scheduler=scheduler_fn,
+                    scheduler=self.scheduler.forward,
                     )
 
                 len_driving = inputs_driving["inputs"].size(1)
@@ -298,7 +273,7 @@ class DrivingModel(pl.LightningModule):
         )
 
         # === [核心修改] 重构输入序列与更新账本 ===
-        # 废弃旧的 adaptor_dict['inputs']，因为它太短了装不下新数据
+        # 废弃旧的 adaptor_dict['inputs']，因为它太短了装不下新数据 TODO: ????为什么跟foward这么不一致
         # 我们遍历 adaptors，把变长后的 Language 和不变的 Driving 重新拼起来
 
         new_inputs_list = []

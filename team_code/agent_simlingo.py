@@ -924,17 +924,10 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         # 假设我们默认想跑快一点 (0.75)
         # latency_target = getattr(self.cfg, 'inference_latency', 1.0) 
         
-        # 2. 传入 latency 参数调用模型
-        # 注意：这里调用的是 self.model.__call__，它会映射到 driving.py 的 forward
-        # """ 调用模型forward函数 """
-        # pred_speed_wps, pred_route, language = self.model(
-        #     model_input, 
-        #     latency=latency_target # <--- 关键修改：传入 latency
-        # )
         # 1. 获取配置中的 float 值
-        latency_val = getattr(self.cfg, 'inference_latency', 1.0) 
+        latency_val = getattr(self.cfg, 'inference_latency', 0.5) 
         
-        # 2. [关键] 手动构建 Tensor 并匹配 Batch Size
+        # 2. [关键] 手动构建 Tensor 并匹配 Batch Sizeg
         # model_input 是一个 DrivingInput 对象，里面的 "camera_images" 是 [1, T, ...]
         # 我们可以用它的 batch size 作为参考
         batch_size = self.DrivingInput["camera_images"].shape[0] # 通常是 1

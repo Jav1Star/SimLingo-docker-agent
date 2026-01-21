@@ -887,34 +887,36 @@ class Qwen2Model(Qwen2PreTrainedModel):
 
         # === [AdaLLaVA Modification] 初始化变量 ===
         execution_plan = None
+        layer_2_skip = []
         # 前两层用于生成shceduler计划
-        num_prefix_layers = getattr(self.config, 'num_prefix_layers', 2)
-
+        num_prefix_layers = getattr(self.config, 'num_prefix_layers')
         for idx, decoder_layer in enumerate(self.layers):
-            # === [AdaLLaVA Modification] 计划生成 (Plan Generation) ===
+            # === [AdaLLaVA Modification] 计划生成===
             # 仅在指定的锚点层（通常是第2层之后），且存在延迟约束和调度器时执行
             if idx == num_prefix_layers:
                 if latency is not None and scheduler is not None:
-                    if latency_token_position is not None:
+                    if latency_token_position is None:
+                        raise ValueError("latency_token_position must be provided when latency and scheduler are used.")
+                    else:
                         # 1. 提取 Latency Token 的特征
                         batch_indices = torch.arange(hidden_states.size(0), device=hidden_states.device)
                         latency_token_feat = hidden_states[batch_indices, latency_token_position]
                         
                         # 2. 调用 Scheduler 生成计划 (假设返回形状需要转置)
+                        # execution_plan: [Layers, Batch, 2, Heads]
                         execution_plan = scheduler(latency_token_feat.contiguous(), latency).transpose(0, 1)
-
-            # === [AdaLLaVA Modification] 计划执行 (Plan Execution) ===
+                        
+            # === [AdaLLaVA Modification] 当前层开关决策与实现 ===
             drop_states = None
-            # 仅在非前缀层且有计划时检查是否跳过
             if execution_plan is not None and idx >= num_prefix_layers:
                 if idx < len(execution_plan):
-                    drop_states = execution_plan[idx]
+                    drop_states = execution_plan[idx] # TODO 训练的时候，batch如何处理的？ # TODO 确定开关比例。
 
-            # 核心跳过逻辑：非训练模式且 drop_states 全为0时跳过
-            if not self.training and drop_states is not None and torch.all(drop_states == 0):
-                if output_hidden_states:
-                    all_hidden_states += (hidden_states,)
-                continue
+                # 核心跳过逻辑：非训练模式且 drop_states 全为0时跳过
+                if torch.all(drop_states == 0):
+                    if output_hidden_states:
+                        all_hidden_states += (hidden_states,)
+                    continue
             # ========================================================
 
             if output_hidden_states:
@@ -1124,11 +1126,6 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self.model = Qwen2Model(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-
-        # === [AdaLLaVA Modification] ===
-        self.scheduler = None
-        # ===============================
-
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -1211,7 +1208,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # === [AdaLLaVA Modification] 确定调度器 ===
-        scheduler_fn = scheduler if scheduler is not None else (self.scheduler.forward if hasattr(self, 'scheduler') and self.scheduler else None)
+        scheduler_fn = scheduler
         # ==========================================
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)

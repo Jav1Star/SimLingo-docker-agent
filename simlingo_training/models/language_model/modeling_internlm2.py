@@ -1019,7 +1019,7 @@ class InternLM2Model(InternLM2PreTrainedModel):
                         # AdaLLaVA 原版可能需要 contiguous() 和 transpose
                         # 这里的 scheduler 是 driving.py 传进来的 self.scheduler.forward
                         execution_plan = scheduler(latency_token_feat.contiguous(), latency).transpose(0, 1)
-
+                        
             # === [关键修改 3] 计划执行 (Plan Execution) ===
             # 默认不跳过
             drop_states = None
