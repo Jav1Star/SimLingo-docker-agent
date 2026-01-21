@@ -23,6 +23,7 @@ class SimpleScheduler_L(nn.Module):
         super().__init__()
         self.num_prefix_layers = config.num_prefix_layers
         self.num_hidden_layers = config.num_hidden_layers
+        # 剩余可选层数
         num_sub_layer = config.num_hidden_layers - config.num_prefix_layers
         self.num_attention_heads = config.num_attention_heads
         self.is_hard = is_hard

@@ -157,17 +157,17 @@ class LingoInternVLModel(nn.Module):
                     # 生成 Embedding: [BS, Hidden]
                     # 直接传处理好的 Tensor 给 scheduler
                     latency_embed = self.scheduler.latency_encoding(latency_tensor)
-                """ if latency is not None:
-                    print(f"DEBUG_CTX [2/3] LLM Input: type={type(latency)}")
-                    # 确保转为 Tensor [Batch_Size]
-                    if not isinstance(latency, torch.Tensor):
-                        latency_tensor = torch.tensor([latency] * BS, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
-                    else:
-                        print(f"DEBUG_CTX [2/3] LLM Input Shape: {latency.shape}, dim={latency.ndim}")
-                        latency_tensor = latency.to(inputs_embeds.device).to(inputs_embeds.dtype)
+                # if latency is not None:
+                #     print(f"DEBUG_CTX [2/3] LLM Input: type={type(latency)}")
+                #     # 确保转为 Tensor [Batch_Size]
+                #     if not isinstance(latency, torch.Tensor):
+                #         latency_tensor = torch.tensor([latency] * BS, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
+                #     else:
+                #         print(f"DEBUG_CTX [2/3] LLM Input Shape: {latency.shape}, dim={latency.ndim}")
+                #         latency_tensor = latency.to(inputs_embeds.device).to(inputs_embeds.dtype)
                     
-                    # 生成 Embedding: [BS, Hidden]
-                    latency_embed = self.scheduler.latency_encoding(latency_tensor) """
+                #     # 生成 Embedding: [BS, Hidden]
+                #     latency_embed = self.scheduler.latency_encoding(latency_tensor)
                 
                 # === [Step B] 准备重构序列 ===
                 # 文本
