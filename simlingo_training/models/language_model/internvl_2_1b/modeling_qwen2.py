@@ -1229,7 +1229,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             # === [AdaLLaVA Modification] 透传参数 ===
             latency=latency,
             latency_token_position=latency_token_position,
-            scheduler=scheduler_fn,
+            scheduler=scheduler_fn, # 在QWEN2Model中起作用
             # ========================================
         )
 

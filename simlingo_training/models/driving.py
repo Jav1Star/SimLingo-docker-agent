@@ -14,14 +14,16 @@ from torch import Tensor, nn
 from torch.optim import AdamW
 from hydra.utils import get_original_cwd
 
-
+from .adaptors.adaptors import replace_placeholder_tokens
 from simlingo_training.models.adaptors.adaptors import DrivingAdaptor, LanguageAdaptor, WaypointInputAdaptor, AdaptorList
 from simlingo_training.models.utils import summarise_losses
 from simlingo_training.utils.custom_types import (DrivingExample, DrivingInput,
                                                 DrivingLabel, DrivingOutput,
                                                 TrainingOutput)
 
-
+# [新增] 导入本地 Scheduler
+# 请确保此路径指向您存放 simple_scheduler.py 的正确位置
+from .scheduler.simple_scheduler import SimpleScheduler_L
 pprint = PrettyPrinter().pprint
 
 def decode_uint8(encoded: torch.Tensor) -> List[str]:
@@ -59,7 +61,8 @@ class DrivingModel(pl.LightningModule):
         
         self.cfg_data_module = cfg_data_module
         
-        self.vision_model = hydra.utils.instantiate(
+        # 根据config与代码，发现都是加载完整的InterVL2-1B，然后丢掉冗余部分来实现，可能需要手动清一下cuda cache
+        self.vision_model = hydra.utils.instantiate( 
             self.vision_model,
             cfg_data_module=cfg_data_module,
             processor=self.processor,
@@ -94,6 +97,13 @@ class DrivingModel(pl.LightningModule):
             hidden_size2=512,
             # norm_layer=NormZeroOne(min_max=(-32.0, 32.0)),
         )
+        
+        # LLM scheduler:
+        self.scheduler = SimpleScheduler_L(
+            config=self.language_model.config, 
+            tau=5, 
+            is_hard=True
+        )
 
         if 'tokenizer' in self.processor.__dict__:
             self.tokenizer = self.processor.tokenizer
@@ -102,10 +112,10 @@ class DrivingModel(pl.LightningModule):
 
 
     def forward(self,
-        example: DrivingExample,
+        example: DrivingExample, # TODO 
         return_language: Optional[bool] = None,
         prompt_ids: Optional[Tensor] = None,
-        # [新增] 接收外部传入的 latency 参数 (如来自 Agent)
+        # [新增] 接收外部传入的 latency 参数
         latency: Optional[float] = None,
     ) -> DrivingOutput:
         """
@@ -118,14 +128,15 @@ class DrivingModel(pl.LightningModule):
             driving_input = example
         
         if driving_input is not None:
-            adaptor_dict = self.adaptors(example, inference=True)
-            # TODO 检查，这里是全部都替换了？为什么全部包装在image_encoder的方法里
-            adaptor_dict = self.vision_model.image_encoder.replace_placeholder_tokens(
+            adaptor_dict = self.adaptors(example, inference=True) # TODO
+            # 将其从img_encoder中提取出来，使用参数的形式传入image,wp,scheduler encoder
+            adaptor_dict = replace_placeholder_tokens(
                     adaptor_dict = adaptor_dict,
                     pixel_values = driving_input.camera_images,
                     placeholder_values = driving_input.prompt_inference.placeholder_values,
+                    image_encoder = self.vision_model.image_encoder,
                     wp_encoder = self.wp_encoder,
-                    # [修改 1] 传入 latency 给 encoder，让它生成 token 并打包参数
+                    scheduler = self.scheduler, # 传入 scheduler
                     latency = latency,
                 )
             
@@ -155,8 +166,8 @@ class DrivingModel(pl.LightningModule):
 
             # [修改 2] 从 adaptor_dict 中提取参数
             # 注意：这些参数现在已经在 replace_placeholder_tokens 里打包好了
-            # TODO check，adaptor_dict里没有这些key，目前
-            scheduler_fn = adaptor_dict.get('scheduler')
+            # TODO check，adaptor_dict里没有这些key
+            scheduler_fn = self.scheduler.forward
             latency_token_pos = adaptor_dict.get('latency_token_position')
             latency_val = adaptor_dict.get('latency')
 
@@ -189,7 +200,8 @@ class DrivingModel(pl.LightningModule):
                     eos = self.tokenizer.eos_token_id
 
                 # BUG: input_embeds, cot
-                sampled_tokens, input_embeds = self.language_model.greedy_sample(
+                # TODO: 看language_model推理的输入，以及scheduler与开关是否起作用
+                sampled_tokens, input_embeds = self.language_model.greedy_sample( 
                     input_embed,
                     eos_token_id=eos,
                     max_new_tokens=100,
@@ -203,9 +215,10 @@ class DrivingModel(pl.LightningModule):
                     scheduler=scheduler_fn,
                 )
                 
+                # 获得驾驶输入，拼接CoT与驾驶输入，进行驾驶决策推理
                 inputs_driving = self.adaptors.driving(driving_input)
                 input_embed_concat = torch.cat((input_embeds, inputs_driving["inputs"][b_idx].unsqueeze(0)), dim=1)
-                features, logits = self.language_model.forward(
+                features, logits = self.language_model.forward( 
                     input_embed_concat,
                     # 传入 AdaLLaVA 参数
                     latency=current_latency, # [修改] 使用 current_latency
@@ -273,13 +286,15 @@ class DrivingModel(pl.LightningModule):
         
         # 1. 调用 Vision Encoder 预处理
         # 注意：这里我们传入 adaptor_dict.get('labels')，确保传入的是 Language Tensor Labels
-        adaptor_dict = self.vision_model.image_encoder.replace_placeholder_tokens(
-            adaptor_dict = adaptor_dict,
-            pixel_values = driving_input.camera_images,
-            placeholder_values = driving_input.prompt.placeholder_values,
-            wp_encoder = self.wp_encoder,
-            latency = latency, 
-            labels = adaptor_dict.get('labels') # 传入字典里的 Label Tensor
+        adaptor_dict = replace_placeholder_tokens(
+                adaptor_dict = adaptor_dict,
+                pixel_values = driving_input.camera_images,
+                placeholder_values = driving_input.prompt_inference.placeholder_values,
+                image_encoder = self.vision_model.image_encoder,
+                wp_encoder = self.wp_encoder,
+                scheduler = self.scheduler, # 传入 scheduler
+                latency = latency,
+                labels = adaptor_dict.get('labels') # 传入字典里的 Label Tensor
         )
 
         # === [核心修改] 重构输入序列与更新账本 ===
@@ -327,7 +342,7 @@ class DrivingModel(pl.LightningModule):
             # 传递 AdaLLaVA 参数
             latency=adaptor_dict.get('latency'),
             latency_token_position=adaptor_dict.get('latency_token_position'),
-            scheduler=adaptor_dict.get('scheduler'),
+            scheduler=self.scheduler.forward, # 传的是foward函数，挺奇怪。TODO: 对梯度回传的影响？
         )
         
         # 3. 返回结果

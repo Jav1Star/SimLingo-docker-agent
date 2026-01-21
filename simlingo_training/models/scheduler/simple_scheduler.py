@@ -21,6 +21,9 @@ class FeedForward(nn.Module):
 class SimpleScheduler_L(nn.Module):
     def __init__(self, config, tau=5, is_hard=True, threshold=0.5, bias=True):
         super().__init__()
+        if not hasattr(config, 'num_prefix_layers'):
+            config.num_prefix_layers = 2
+            print("\033[91m" + f"num_prefix_layers not found in config, set to default 2." + "\033[0m")
         self.num_prefix_layers = config.num_prefix_layers
         self.num_hidden_layers = config.num_hidden_layers
         num_sub_layer = config.num_hidden_layers - config.num_prefix_layers

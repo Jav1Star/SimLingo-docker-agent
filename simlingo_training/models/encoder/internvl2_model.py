@@ -3,14 +3,12 @@ from torch import nn
 from typing import List, Optional
 from transformers import AutoModel
 
-# [新增] 导入本地 Scheduler
-# 请确保此路径指向您存放 simple_scheduler.py 的正确位置
-from ..scheduler.simple_scheduler import SimpleScheduler_L
+
 
 class LingoInternVLModel(nn.Module):
     def __init__(self, variant, *args, **kwargs):
         super().__init__()
-        self.model = AutoModel.from_pretrained(variant, trust_remote_code=True)
+        self.model = AutoModel.from_pretrained(variant, trust_remote_code=True) # <class 'transformers_modules.OpenGVLab.InternVL2-1B.0d75ccd166b1d0b79446ae6c5d1a4a667f1e6187.modeling_internvl_chat.InternVLChatModel'>
         try:
             self.num_embeddings = self.model.language_model.model.embed_tokens.num_embeddings
         except:
@@ -18,25 +16,9 @@ class LingoInternVLModel(nn.Module):
         self.use_global_img = None
         self.processor = None
         
-        # === [新增 1] 初始化 Scheduler (大脑) ===
-        # 获取 LLM 的配置以确保维度匹配
-        """ === [在这里设定 num_prefix_layers] === """
-        llm_config = self.model.language_model.config
-        
-        # AdaLLaVA 需要 num_prefix_layers 参数，如果 config 里没有，默认为 0
-        """  手动设置为2，前两层用于生成scheduler计划 """
-        if not hasattr(llm_config, 'num_prefix_layers'):
-            llm_config.num_prefix_layers = 2
-            
-        # 初始化 L-Mode (按层) 调度器 # TODO 这为什么有
-        self.scheduler = SimpleScheduler_L(
-            config=llm_config,
-            tau=5, 
-            is_hard=True
-        )
+
         
     def replace_placeholder_tokens(
-        self,
         adaptor_dict: torch.LongTensor = None,
         pixel_values: torch.FloatTensor = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
@@ -44,26 +26,26 @@ class LingoInternVLModel(nn.Module):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         placeholder_values: Optional[List[dict]] = None,
+        image_encoder: Optional[nn.Module] = None,
         wp_encoder: Optional[nn.Module] = None,
+        scheduer: Optional[nn.Module] = None, # scheduler作为参数传入
         latency: Optional[float] = None,  # [新增参数] 接收外部传入的 Latency 目标
         labels: Optional[torch.LongTensor] = None, # [新增参数] 接收 Labels 用于同步对齐
     ):
         
-        if 'tokenizer' in self.processor.__dict__:
-            self.tokenizer = self.processor.tokenizer
+        if 'tokenizer' in image_encoder.processor.__dict__:
+            image_encoder.tokenizer = image_encoder.processor.tokenizer
         else:
-            self.tokenizer = self.processor
+            image_encoder.tokenizer = image_encoder.processor
 
         IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
-        img_context_token_id = self.tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
-        self.img_context_token_id = img_context_token_id
+        img_context_token_id = image_encoder.tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
+        image_encoder.img_context_token_id = img_context_token_id
         # ================= [新增] 统一预处理 Latency =================
         # 将 Latency 提前转为 1-d Tensor，供后续所有步骤复用
-        """ TODO: 这里代码可以优化一下, 确认ref_tensor到底用谁做参考 """
         latency_tensor = None
         if latency is not None:
-            # 获取当前设备的参考 Tensor (用于对齐 device 和 dtype)
-            # 注意：此时 inputs_embeds 可能还是 None，我们用 input_ids 或 adaptor_dict 里的东西做参考
+            # 参考其他输入 Tensor 对齐 device 和 dtype.
             ref_tensor = adaptor_dict.get('language_inputs', None)
             if ref_tensor is None and 'language__ids' in adaptor_dict:
                 print(f"internvl2_model.py bug: language_inputs is None, using language__ids as ref_tensor") 
@@ -71,7 +53,7 @@ class LingoInternVLModel(nn.Module):
             if ref_tensor is None:
                 print(f"internvl2_model.py: ref_tensor is None, 'language__ids' is not in adaptor_dict")
             
-            device = ref_tensor.device if ref_tensor is not None else self.device
+            device = ref_tensor.device if ref_tensor is not None else image_encoder.device
             dtype = ref_tensor.dtype if ref_tensor is not None and ref_tensor.is_floating_point() else torch.float32
 
             # 确保转为 1-d Tensor [Batch_Size]
@@ -88,11 +70,11 @@ class LingoInternVLModel(nn.Module):
                     latency_tensor = latency.to(device).to(dtype)
         # ===========================================================
         
-        output_attentions = output_attentions if output_attentions is not None else self.model.config.output_attentions
+        output_attentions = output_attentions if output_attentions is not None else image_encoder.model.config.output_attentions
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.model.config.output_hidden_states
+            output_hidden_states if output_hidden_states is not None else image_encoder.model.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.model.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else image_encoder.model.config.use_return_dict
 
         if inputs_embeds is None:
             # 1. Extract the input embeddings
@@ -100,7 +82,7 @@ class LingoInternVLModel(nn.Module):
             input_ids = adaptor_dict['language__ids']
             
             # 2a replace placeholder (Waypoint 逻辑保持不变)
-            smallest_added_id = self.tokenizer.additional_special_tokens_ids[0]
+            smallest_added_id = image_encoder.tokenizer.additional_special_tokens_ids[0]
             special_ids = torch.tensor(list(set(input_ids[(input_ids >= smallest_added_id)].tolist())), device=input_ids.device)
             special_ids = special_ids.view(-1, 1, 1)
             batch_size, seq_len = input_ids.shape
@@ -144,7 +126,7 @@ class LingoInternVLModel(nn.Module):
                     elif pixel_values_tmp.dim() != 4:
                         raise ValueError(f"pixel_values of shape {pixel_values_tmp.shape}, expect to be of 4 or 5 dimensions")
                     
-                    image_features = self.model.extract_feature(pixel_values_tmp)
+                    image_features = image_encoder.model.extract_feature(pixel_values_tmp)
                     image_features = image_features.reshape(-1, C_embed)
                     all_image_features.append(image_features)
 
@@ -156,7 +138,7 @@ class LingoInternVLModel(nn.Module):
                 if latency_tensor is not None: # <--- 改用 latency_tensor 判断
                     # 生成 Embedding: [BS, Hidden]
                     # 直接传处理好的 Tensor 给 scheduler
-                    latency_embed = self.scheduler.latency_encoding(latency_tensor)
+                    latency_embed = image_encoder.scheduler.latency_encoding(latency_tensor)
                 """ if latency is not None:
                     print(f"DEBUG_CTX [2/3] LLM Input: type={type(latency)}")
                     # 确保转为 Tensor [Batch_Size]
@@ -167,7 +149,7 @@ class LingoInternVLModel(nn.Module):
                         latency_tensor = latency.to(inputs_embeds.device).to(inputs_embeds.dtype)
                     
                     # 生成 Embedding: [BS, Hidden]
-                    latency_embed = self.scheduler.latency_encoding(latency_tensor) """
+                    latency_embed = image_encoder.scheduler.latency_encoding(latency_tensor) """
                 
                 # === [Step B] 准备重构序列 ===
                 # 文本
@@ -186,7 +168,7 @@ class LingoInternVLModel(nn.Module):
                 latency_token_positions = [] 
 
                 for b in range(BS):
-                    mask_indices = (input_ids[b] == self.img_context_token_id)
+                    mask_indices = (input_ids[b] == image_encoder.img_context_token_id)
                     
                     if mask_indices.any():
                         indices = torch.nonzero(mask_indices).squeeze()
@@ -298,7 +280,7 @@ class LingoInternVLModel(nn.Module):
                     # adaptor_dict['latency'] = latency 
                     # 修改后：存入韩式开头已经处理好的 1-d Tensor
                     adaptor_dict['latency'] = latency_tensor
-                    adaptor_dict['scheduler'] = self.scheduler.forward
+                    adaptor_dict['scheduler'] = image_encoder.scheduler.forward
 
             # pixel_values is not None but is empty ---> text only cases
             elif pixel_values is not None and input_ids.shape[1] != 1 and pixel_values.size(0) == 0:

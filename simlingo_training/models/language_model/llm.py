@@ -129,7 +129,7 @@ class LLM(nn.Module):
         self.vocab_size = self.model.config.vocab_size
         self.hidden_size = self.model.config.hidden_size
         self.max_position_embeddings = self.model.config.max_position_embeddings
-
+        self.config = self.model.config
 
     def forward(self,
         embeddings: Tensor,
