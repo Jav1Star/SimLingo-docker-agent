@@ -222,8 +222,33 @@ class Qwen2MLP(nn.Module):
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
 
-    def forward(self, hidden_state):
-        return self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
+    # def forward(self, hidden_state):
+    #     return self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
+    """ 针对训练的修改，实现层的“软跳过”逻辑 """
+    # drop_states 包含两个通道（index 0 给 Attention，index 1 给 MLP）
+    def forward(self, hidden_state, drop_states=None):
+        # 1. 计算中间状态 (Gate * Up)
+        intermediate = self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state)
+        
+        # 2. [AdaLLaVA 训练逻辑] 应用软跳过掩码
+        if self.training and drop_states is not None:
+            # drop_states shape: [batch, 2, num_heads]
+            # 我们使用 index 1 作为 MLP 的掩码通道
+            # 计算切片大小以将 num_heads 维度的掩码扩展到 intermediate_size
+            slicing = self.intermediate_size // drop_states.size(-1)
+            remainder = self.intermediate_size % drop_states.size(-1)
+
+            # 构造扩展掩码
+            expand = torch.cat([
+                torch.repeat_interleave(drop_states[:, 1, :remainder, None], slicing + 1, -1).flatten(1),
+                torch.repeat_interleave(drop_states[:, 1, remainder:, None], slicing, -1).flatten(1)
+            ], -1)
+            
+            # 应用掩码：(batch, seq_len, inter_dim) * (batch, 1, inter_dim)
+            intermediate = intermediate * expand.unsqueeze(1).to(intermediate.dtype)
+
+        # 3. 下投影
+        return self.down_proj(intermediate)
 
 
 # Copied from transformers.models.llama.modeling_llama.repeat_kv
@@ -278,6 +303,7 @@ class Qwen2Attention(nn.Module):
 
         self.rotary_emb = Qwen2RotaryEmbedding(config=self.config)
 
+    """ 针对训练的修改，实现层的“软跳过”逻辑 """   
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -288,6 +314,7 @@ class Qwen2Attention(nn.Module):
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        drop_states: Optional[torch.LongTensor] = None, # [新增]
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
@@ -338,6 +365,17 @@ class Qwen2Attention(nn.Module):
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
+        # === [AdaLLaVA 训练逻辑] ===
+        if self.training and drop_states is not None:
+            # drop_states shape: [batch, 2, num_heads]
+            # 使用 index 0 作为 Attention 掩码
+            # 扩展掩码以匹配 hidden_size (num_heads * head_dim)
+            mask = drop_states[:, 0].unsqueeze(1).unsqueeze(-1).repeat(1, 1, 1, self.head_dim)
+            mask = mask.flatten(2) # [batch, 1, hidden_size]
+            
+            attn_output = attn_output * mask.to(attn_output.dtype)
+        # ===========================
+
         attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
@@ -374,6 +412,7 @@ class Qwen2FlashAttention2(Qwen2Attention):
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        drop_states: Optional[torch.LongTensor] = None,  # [新增参数]
     ):
         bsz, q_len, _ = hidden_states.size()
 
@@ -459,6 +498,19 @@ class Qwen2FlashAttention2(Qwen2Attention):
         )
 
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
+
+        # === [AdaLLaVA 训练逻辑] ===
+        # 必须加在 self.o_proj 之前
+        if self.training and drop_states is not None:
+            # drop_states shape: [batch, 2, num_heads]
+            # 使用 index 0 作为 Attention 掩码
+            # 扩展掩码以匹配 hidden_size (num_heads * head_dim)
+            mask = drop_states[:, 0].unsqueeze(1).unsqueeze(-1).repeat(1, 1, 1, self.head_dim)
+            mask = mask.flatten(2) # [batch, 1, hidden_size]
+            
+            attn_output = attn_output * mask.to(attn_output.dtype)
+        # ===========================
+
         attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
@@ -485,6 +537,7 @@ class Qwen2SdpaAttention(Qwen2Attention):
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        drop_states: Optional[torch.LongTensor] = None, # [新增]
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions:
             # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
@@ -558,6 +611,16 @@ class Qwen2SdpaAttention(Qwen2Attention):
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, self.hidden_size)
 
+        # === [AdaLLaVA 训练逻辑] ===
+        if self.training and drop_states is not None:
+            # drop_states shape: [batch, 2, num_heads]
+            # 使用 index 0 作为 Attention 掩码
+            # 扩展掩码以匹配 hidden_size (num_heads * head_dim)
+            mask = drop_states[:, 0].unsqueeze(1).unsqueeze(-1).repeat(1, 1, 1, self.head_dim)
+            mask = mask.flatten(2) # [batch, 1, hidden_size]
+            
+            attn_output = attn_output * mask.to(attn_output.dtype)
+        # ===========================
         attn_output = self.o_proj(attn_output)
 
         return attn_output, None, past_key_value
@@ -597,6 +660,7 @@ class Qwen2DecoderLayer(nn.Module):
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        drop_states: Optional[torch.Tensor] = None, # [新增参数]
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
@@ -635,13 +699,18 @@ class Qwen2DecoderLayer(nn.Module):
             use_cache=use_cache,
             cache_position=cache_position,
             position_embeddings=position_embeddings,
+            drop_states=drop_states, # [新增，用于传参]
         )
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        # hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(
+            hidden_states, 
+            drop_states=drop_states # [传参]
+        )
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -933,6 +1002,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                     use_cache,
                     cache_position,
                     position_embeddings,
+                    drop_states,  # <--- [新增] 必须传入此参数
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -944,6 +1014,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                     use_cache=use_cache,
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
+                    drop_states=drop_states,  # <--- [新增] 必须传入此参数
                 )
 
             hidden_states = layer_outputs[0]
