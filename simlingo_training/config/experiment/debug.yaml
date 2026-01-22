@@ -16,6 +16,13 @@ model:
     lora_dropout: 0.1
   vision_model:
     variant: 'OpenGVLab/InternVL2-1B'
+  scheduler_model:
+    tau: 5
+    is_hard: True
+    threshold: 0.5
+    bias: True
+    num_prefix_layers: 2
+    _target_: "simlingo_training.models.scheduler.simple_scheduler.SimpleScheduler_L"
 
 data_module:
   batch_size: 2
@@ -44,4 +51,6 @@ val_every_n_epochs: 1
 
 gpus: 1
 seed: 42
+adaption_train: True
+simlingo_checkpoint: "models/simlingoCheckpoints/checkpoints/epoch=013.ckpt/pytorch_model.pt"
 name: debug

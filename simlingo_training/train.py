@@ -5,6 +5,7 @@ from omegaconf import OmegaConf
 import torch
 import wandb
 
+
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
@@ -12,8 +13,8 @@ from pytorch_lightning.callbacks import LearningRateMonitor, ModelSummary, Throu
 from pytorch_lightning.loggers import CSVLogger, WandbLogger, TensorBoardLogger
 from transformers import AutoProcessor
 
+from pathlib import Path
 from simlingo_training.utils.logging_project import setup_logging, sync_wandb
-
 from simlingo_training.config import TrainConfig
 from simlingo_training.callbacks.visualise import VisualiseCallback
 
@@ -41,6 +42,11 @@ def main(cfg: TrainConfig):
         _recursive_=False
     )
     
+    if cfg.adaption_train:
+        cfg.model.vision_model.freeze = True
+        cfg.model.language_model.adaption_train = True
+        cfg.model.language_model.num_prefix_layers = cfg.model.scheduler_model.num_prefix_layers# align
+    
     model = hydra.utils.instantiate(
         cfg.model,
         cfg_data_module=cfg.data_module,
@@ -48,13 +54,27 @@ def main(cfg: TrainConfig):
         cache_dir=cache_dir,
         _recursive_=False
         )
-    # 是否加载预训练权重
+    
+    # 是否加载checkpoint
     if cfg.checkpoint is not None:
         if os.path.isdir(cfg.checkpoint):
             state_dict = get_fp32_state_dict_from_zero_checkpoint(cfg.checkpoint)
         else:
             state_dict = torch.load(cfg.checkpoint, map_location="cpu")
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict) # 加载checkpoint应该严格匹配
+        
+    # adaption 初始训练
+    elif cfg.adaption_train:
+        # 加载simlingo预训练权重
+        current_path = Path(__file__).resolve()
+        project_path = current_path.parent.parent
+        checkpoint = os.path.join(project_path, cfg.simlingo_checkpoint)
+        if os.path.isdir(checkpoint):
+            state_dict = get_fp32_state_dict_from_zero_checkpoint(checkpoint)
+        else:
+            state_dict = torch.load(checkpoint, map_location="cpu")
+        model.load_state_dict(state_dict, strict=False)
+        
 
         
     # print config

@@ -257,7 +257,7 @@ def main(args):
     configs = [ # TODO 设置
         {
             "agent": "simlingo",
-            "checkpoint": f"{SimlingoPATH}/outputs/simlingo/checkpoints/epoch=013.ckpt/pytorch_model.pt",
+            "checkpoint": f"{SimlingoPATH}/models/simlingoCheckpoints/checkpoints/epoch=013.ckpt/pytorch_model.pt",
             "benchmark": "bench2drive",
             "route_path": f"{SimlingoPATH}/leaderboard/data/bench2drive_split",
             #"seeds": [3],

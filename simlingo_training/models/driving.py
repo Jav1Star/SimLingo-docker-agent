@@ -21,9 +21,7 @@ from simlingo_training.utils.custom_types import (DrivingExample, DrivingInput,
                                                 DrivingLabel, DrivingOutput,
                                                 TrainingOutput)
 
-# [新增] 导入本地 Scheduler
-# 请确保此路径指向您存放 simple_scheduler.py 的正确位置
-from .scheduler.simple_scheduler import SimpleScheduler_L
+
 pprint = PrettyPrinter().pprint
 
 def decode_uint8(encoded: torch.Tensor) -> List[str]:
@@ -75,7 +73,8 @@ class DrivingModel(pl.LightningModule):
             cache_dir=cache_dir,
             _recursive_=False
         )
-
+         
+    
         self.all_predictions = {}
         self.all_losses = {}
         
@@ -97,18 +96,31 @@ class DrivingModel(pl.LightningModule):
             hidden_size2=512,
             # norm_layer=NormZeroOne(min_max=(-32.0, 32.0)),
         )
-        
-        # LLM scheduler:
-        self.scheduler = SimpleScheduler_L(
-            config=self.language_model.config, 
-            tau=5, 
-            is_hard=True
-        )
-
         if 'tokenizer' in self.processor.__dict__:
             self.tokenizer = self.processor.tokenizer
         else:
             self.tokenizer = self.processor
+        if not self.adaption_train:
+            self.scheduler = None
+        else:
+            # language model alignment for scheduler
+            self.scheduler_model.num_hidden_layers = self.language_model.config.num_hidden_layers
+            self.scheduler_model.num_attention_heads = self.language_model.config.num_attention_heads
+            self.scheduler_model.hidden_size = self.language_model.config.hidden_size
+            # 初始化Scheduler
+            self.scheduler = hydra.utils.instantiate(
+                self.scheduler_model, # model config
+                _recursive_=False
+            )
+            
+            # 冻结除language model和scheduler外的所有参数
+            # language model内部初始化的时候已实现adaption_train判断以及部分冻结
+            self.vision_model.requires_grad_(False)
+            self.wp_encoder.requires_grad_(False)
+            self.adaptors.driving.requires_grad_(False)
+            
+            self.scheduler.requires_grad_(True)
+            
 
 
     def forward(self,
@@ -812,8 +824,12 @@ class DrivingModel(pl.LightningModule):
 
 
     def configure_optimizers(self):
+        # [修改] 仅优化 requires_grad=True 的参数 TODO: check when adaption_train = Ture and = False
+        params = [p for p in self.parameters() if p.requires_grad]
+        print(f"Optimizer optimization over {len(params)} tensors (filtered from total).")
+        
         optimizer = AdamW(
-            self.parameters(),
+            params,
             lr=self.lr,
             weight_decay=self.weight_decay,
             betas=self.betas,
@@ -822,7 +838,7 @@ class DrivingModel(pl.LightningModule):
             max_steps = self.trainer.estimated_stepping_batches
         else:
             max_steps = self.trainer.max_steps
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer, max_lr=self.lr, total_steps=max_steps, pct_start=self.pct_start, verbose=False
         )
-        return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "frequency": 1, "interval": "step"}}
+        return {"optimizer": optimizer, "lr_scheduler": {"scheduler": lr_scheduler, "frequency": 1, "interval": "step"}}

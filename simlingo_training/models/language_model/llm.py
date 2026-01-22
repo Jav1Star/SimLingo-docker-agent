@@ -88,18 +88,6 @@ class LLM(nn.Module):
             # InternVL 的结构是 Wrapper -> language_model (Qwen2) -> embed_tokens
             # self.model.embed_tokens = self.model.language_model.get_input_embeddings()
             self.model.embed_tokens = self.model.get_input_embeddings()
-
-            # 5. [关键] 初始化 Scheduler
-            # 我们需要获取 LLM 的配置 (包含 num_prefix_layers)
-            # llm_config = self.model.config.llm_config
-            # 既然 self.model 已经是 Qwen2，它的 config 就是我们要的 llm_config
-            llm_config = self.model.config  # <--- 直接赋值，不要 .llm_config
-            
-            # 假设使用 SimpleScheduler_L (你也可以根据 cfg 传入的参数动态选择 L 或 H)
-            print("Initializing Scheduler for dynamic layer skipping...")
-            self.scheduler = SimpleScheduler_L(llm_config)
-            # 将 scheduler 绑定到 scheduler 属性上，或者确保它能被 forward 访问
-            # 注意：InternVL wrapper 本身没有 self.scheduler，我们需要在调用 forward 时传入    
         else:
             raise ValueError(f"Carefull: Variant {self.variant} not tested.")
             config_overrides = CONFIGS[self.variant].copy()
@@ -115,12 +103,24 @@ class LLM(nn.Module):
             from peft import LoraConfig
             
             print('Using PEFT model')
+            
+            layers_to_transform = None
+            # [修改] 如果启用了 adaptionTrain，则仅在前 num_prefix_layers 层应用 LoRA
+            if self.adaption_train:
+                num_prefix = self.num_prefix_layers
+                if num_prefix is None:
+                    raise ValueError("num_prefix_layers must be set when adaption_train is True.")
+                
+                layers_to_transform = list(range(num_prefix))
+                print(f"AdaptionTrain Enabled: LoRA restricted to first {num_prefix} layers.")
+
             peft_config = LoraConfig(
                 inference_mode=False, 
                 r=self.lora_r,
                 lora_alpha=self.lora_alpha,
                 lora_dropout=self.lora_dropout,
                 target_modules="all-linear",
+                layers_to_transform=layers_to_transform, # 指定LoRA注入的层，其他的层保持原始状态
                 # target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
             )
             self.model = get_peft_model(self.model, peft_config)

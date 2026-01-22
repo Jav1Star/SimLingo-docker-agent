@@ -180,7 +180,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             ).to(self.device)
         torch.set_default_dtype(default_dtype)
 
-        self.model.load_state_dict(torch.load(self.config_path), strict=False)
+        self.model.load_state_dict(torch.load(self.config_path), strict=False) ## TODO: adallava训练完成后，推理时应该严格加载
         self.iter = self.config_path.split("epoch=")[-1].split("/")[0]
         self.session = self.config_path.split("/")[-4]
         

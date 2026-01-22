@@ -9,26 +9,38 @@ class VLMEncoderConfig:
     variant: str = 'OpenGVLab/InternVL2-1B'
     embed_dim: int = 512
     freeze: bool = False
-
     _target_: str = "simlingo_training.models.encoder.vlm.VLMEncoderModel"
 
 
 @dataclass
-class LanguageModelConfig:
+class LanguageModelConfig: # TODO 适配 adallava
     variant: str = 'OpenGVLab/InternVL2-1B'
     lora: bool = True
     lora_alpha: int = 64
     lora_r: int = 32
     lora_dropout: float = 0.1
-
+    num_prefix_layers: Optional[int] = None
+    adaption_train: bool = False
     _target_: str = "simlingo_training.models.language_model.llm.LLM"
 
+@dataclass
+class schedulerConfig: # TODO 适配 adallava
+    tau: int = 5
+    is_hard: bool = True
+    threshold: float = 0.5
+    bias: bool = True
+    num_prefix_layers: int = 2
+    num_hidden_layers: int = 0
+    num_attention_heads: int = 0
+    hidden_size: int = 0
+    _target_: str = "simlingo_training.models.scheduler.simple_scheduler.SimpleScheduler_L"
 
 @dataclass
 class DrivingModelConfig:
     vision_model: Any
     language_model: Any
-
+    scheduler_model: Any
+    
     lr: float = 5e-2
 
     weight_decay: float = 0.1
@@ -119,7 +131,7 @@ class TrainConfig:
     data_module: Any
 
     seed: int = 42
-    gpus: int = 8
+    gpus: int = 1 # default to 1 GPU
 
     resume: bool = False
     resume_path: Optional[str] = None
@@ -130,14 +142,6 @@ class TrainConfig:
 
     enable_wandb: bool = True
     wandb_project: Optional[str] = "simlingo"
-    if debug:
-        wandb_name: Optional[str] = f"debug"
-        gpus: int = 1
-    else:
-        # wandb_name: Optional[str] = f"debug"
-        name: Optional[str] = 'test'
-        wandb_name: Optional[str] = f"{time.strftime('%Y_%m_%d_%H_%M_%S')}"
-    
     # max_steps: int = 100_000
     max_epochs: int = 20
     precision: str = "16-mixed"
@@ -146,7 +150,16 @@ class TrainConfig:
     val_every_n_epochs: int = 1
 
     checkpoint: Optional[str] = None
+    adaption_train: bool = False
+    simlingo_checkpoint: Optional[str] = None
 
+    if debug:
+        wandb_name: Optional[str] = f"debug"
+    else:
+        # wandb_name: Optional[str] = f"debug"
+        name: Optional[str] = 'test'
+        wandb_name: Optional[str] = f"{time.strftime('%Y_%m_%d_%H_%M_%S')}"
+    
 
 def register_configs():
     cs = ConfigStore.instance()

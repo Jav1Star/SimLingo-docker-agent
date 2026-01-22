@@ -19,20 +19,17 @@ class FeedForward(nn.Module):
 
 
 class SimpleScheduler_L(nn.Module):
-    def __init__(self, config, tau=5, is_hard=True, threshold=0.5, bias=True):
+    def __init__(self, **cfg):
         super().__init__()
-        if not hasattr(config, 'num_prefix_layers'):
-            config.num_prefix_layers = 2
-            print("\033[91m" + f"num_prefix_layers not found in config, set to default 2." + "\033[0m")
-        self.num_prefix_layers = config.num_prefix_layers
-        self.num_hidden_layers = config.num_hidden_layers
-        num_sub_layer = config.num_hidden_layers - config.num_prefix_layers
-        self.num_attention_heads = config.num_attention_heads
-        self.is_hard = is_hard
-        self.tau = tau
+        for key, value in cfg.items():
+            setattr(self, key, value)
+        self.num_hidden_layers = self.num_hidden_layers
+        num_sub_layer = self.num_hidden_layers - self.num_prefix_layers
+        self.num_attention_heads = self.num_attention_heads
 
-        self.mlp_head = nn.Linear(config.hidden_size, num_sub_layer, bias=bias)
-        self.scheduler_up_proj = FeedForward(256, config.hidden_size, config.hidden_size)
+
+        self.mlp_head = nn.Linear(self.hidden_size, num_sub_layer, bias=self.bias)
+        self.scheduler_up_proj = FeedForward(256, self.hidden_size, self.hidden_size)
 
     def set_tau(self, tau):
         self.tau = tau
