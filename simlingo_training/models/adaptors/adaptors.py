@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from simlingo_training.utils.custom_types import DrivingExample
-
+from ..scheduler.scheduler_utils import latency_quantizing
 
 def cross_track_error(points: Tensor, path: Tensor):
     """
@@ -274,6 +274,62 @@ class LanguageAdaptor(nn.Module):
         ).view_as(labels)
         return {"language_loss": (language_loss, labels.ne(-1))}
 
+
+class LatencyAdaptor(nn.Module):
+    def __init__(self):
+        super().__init__()
+        
+    def forward(self, example: DrivingExample, scheduler=None, latency=0, **kwargs) -> Dict[str, Tensor]:
+        """
+        Args:
+            example: 用于获取 batch_size (如果 latency 为 None 需要随机生成或默认)
+            scheduler: 必须传入，用于执行 latency_encoding
+            latency: 外部传入的 latency 值 [Batch] 或 [1] 或 float
+        """
+        
+        if latency is None: # 通过检测foward的部分。
+            latency = 1 
+        # 确保 latency 是 Tensor [Batch]
+        try:
+            driving_input = example.driving_input
+        except AttributeError:
+            driving_input = example
+        
+        bs = driving_input.camera_images.shape[0]
+        dtype = driving_input.camera_images.dtype
+        device = driving_input.camera_images.device
+        
+        # 简单的标量转 Tensor 逻辑
+        if not isinstance(latency, torch.Tensor):
+            latency_tensor = torch.full((bs,), latency, dtype=dtype, device=device)
+        else:
+            if latency.ndim == 0:
+                latency_tensor = latency.expand(bs).to(device).to(dtype)
+            else:
+                latency_tensor = latency.to(device).to(dtype)
+        
+        # 编码 (使用 Scheduler)
+        # 产生的 shape 通常是 [Batch, 1, Hidden]
+        # 注意：scheduler.latency_encoding 需要返回 unsqueeze(1) 后的结果或者在这里手动加维度
+        inputs = scheduler.latency_encoding(latency_tensor) 
+        
+        if inputs.dim() == 2:
+            inputs = inputs.unsqueeze(1) # [Batch, 1, Hidden]
+
+        # 4. 生成 Mask
+        inputs_mask = torch.ones((bs, 1), dtype=torch.bool, device=device)
+
+        return {
+            "inputs": inputs, 
+            "inputs_mask": inputs_mask,
+            "values": latency_tensor #以此保留原始值以备后用
+        }
+
+    def compute_loss(self, *args, **kwargs):
+        # Latency 通常作为条件输入，不计算自身的 Loss
+        # TODO 这能传回scheduler吗
+        return {}
+
 class AdaptorList(nn.Module):
     """
     Each adaptor is responsible for converting a driving example
@@ -285,11 +341,12 @@ class AdaptorList(nn.Module):
         self,
         driving: Optional[DrivingAdaptor] = None,
         language: Optional[LanguageAdaptor] = None,
+        latency: Optional[LatencyAdaptor] = None,
     ):
         super().__init__()
         self.driving = driving
         self.language = language
-
+        self.latency = latency
     @property
     def adaptors(self):
         dct: Dict[str, Adaptor] = {}
@@ -297,6 +354,8 @@ class AdaptorList(nn.Module):
             dct["language"] = self.language
         if self.driving is not None:
             dct["driving"] = self.driving
+        if self.latency is not None:
+            dct["latency"] = self.latency
         return dct
 
     def forward(self, example: DrivingExample, **kwargs) -> Dict[str, Tensor]:
@@ -377,7 +436,7 @@ def _gather_from_dict(d: Dict[str, Tensor], prefix: str):
         if k.startswith(prefix):
             out[k[len(prefix) :]] = v
     return out
-
+    
 def replace_placeholder_tokens(
     adaptor_dict: torch.LongTensor = None,
     pixel_values: torch.FloatTensor = None,
@@ -386,13 +445,17 @@ def replace_placeholder_tokens(
     output_hidden_states: Optional[bool] = None,
     return_dict: Optional[bool] = None,
     placeholder_values: Optional[List[dict]] = None,
-    image_encoder: Optional[nn.Module] = None,
     wp_encoder: Optional[nn.Module] = None,
-    scheduler: Optional[nn.Module] = None, # scheduler作为参数传入
-    latency: Optional[float] = None,  # [新增参数] 接收外部传入的 Latency 目标
-    labels: Optional[torch.LongTensor] = None, # [新增参数] 接收 Labels 用于同步对齐
+    image_encoder: Optional[nn.Module] = None,
 ):
-    
+    '''
+        1.原地替换adaptor_dict['language_inputs']中的<IMG_CONTEXT>占位符为图像特征。
+        因此要求inputs_ids必须包含对应ViT提取出来的token数目的占位符, 硬编码了。
+        
+        2.原地编码waypoints并替换对应占位符。waypoints的真实值在palceholder_values中。
+        
+        3.latency在LatencyAdaptor中处理了。TODO: 梯度传递是否存在问题？
+    '''
     if 'tokenizer' in image_encoder.processor.__dict__:
         image_encoder.tokenizer = image_encoder.processor.tokenizer
     else:
@@ -401,30 +464,6 @@ def replace_placeholder_tokens(
     IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
     img_context_token_id = image_encoder.tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
     image_encoder.img_context_token_id = img_context_token_id
-    # ================= [新增] 统一预处理 Latency =================
-    # 将 Latency 提前转为 1-d Tensor，供后续所有步骤复用
-    latency_tensor = None
-    if latency is not None:
-        # 参考其他输入 Tensor 对齐 device 和 dtype.
-        ref_tensor = adaptor_dict.get('language_inputs', None)
-        if ref_tensor is None:
-            raise ValueError("no language_inputs in adaptor_dict [def replace_placeholder_tokens in adaptors].")
-        
-        device = ref_tensor.device if ref_tensor is not None else image_encoder.device
-        dtype = ref_tensor.dtype if ref_tensor is not None and ref_tensor.is_floating_point() else torch.float32
-
-        # [Batch_Size]
-        bs = adaptor_dict['language_inputs'].shape[0]
-
-        if not isinstance(latency, torch.Tensor): # 标量
-            latency_tensor = torch.full((bs,), latency, device=device, dtype=dtype)
-        else:
-            # 如果已经是 Tensor，确保维度和设备正确
-            if latency.ndim == 0: # tensor标量
-                latency_tensor = latency.expand(bs).to(device).to(dtype) # [bs, 1]
-            else: # TODO 后续决策latency的时候，确保维度匹配
-                latency_tensor = latency.to(device).to(dtype)
-    # ===========================================================
     
     output_attentions = output_attentions if output_attentions is not None else image_encoder.model.config.output_attentions
     output_hidden_states = (
@@ -434,27 +473,41 @@ def replace_placeholder_tokens(
 
     if inputs_embeds is None:
         # 1. Extract the input embeddings
-        inputs_embeds = adaptor_dict['language_inputs'] # tokens embed
-        input_ids = adaptor_dict['language__ids'] # tokens id
+        # In case image_token_index is not in the embeddings (extra token but embedding don't have it)
+        # for_inputs_embeds_ids = input_ids.clone()
+        # for_inputs_embeds_ids[(input_ids >= image_encoder.num_embeddings)] = 0
+        # inputs_embeds = language_model.model.get_input_embeddings()(for_inputs_embeds_ids)
+        inputs_embeds = adaptor_dict['language_inputs']
+        input_ids = adaptor_dict['language__ids']
         
-        # 2a replace placeholder (Waypoint 逻辑保持不变)
-        smallest_added_id = image_encoder.tokenizer.additional_special_tokens_ids[0] # 普通词汇ID较小，特殊标记被分配大ID，因此获得特殊ID的最小值，凡是>=该值的，都是特殊占位ID
+        # 2a replace placeholder
+        smallest_added_id = image_encoder.tokenizer.additional_special_tokens_ids[0]
         special_ids = torch.tensor(list(set(input_ids[(input_ids >= smallest_added_id)].tolist())), device=input_ids.device)
-        special_ids = special_ids.view(-1, 1, 1) # [N,1,1], N: 占位符种类梳理
+        # special_ids = torch.tensor(list(set(ids[(ids > 50294)].tolist())), device=ids.device)
+        special_ids = special_ids.view(-1, 1, 1)
         batch_size, seq_len = input_ids.shape
-        
-        # 1.placeholder_values, 主要获得真实wps，并编码:
+
         if special_ids.size(0) > 0 and len(placeholder_values) > 0:
             wp_encoder_dtype = wp_encoder.mlp[0].weight.dtype
-            mask = input_ids == special_ids # [special token种类,bs,seq_len]?
-            cumsum_mask = torch.cumsum(mask.float(), dim=2) # 元素值为前面索引元素值的累加求和。
-            first_occurrence_mask = (cumsum_mask == 1) & mask # 筛选出“累加值为 1”且“自身是 True”的位置。表示起始位置
-            first_occurrences = torch.argmax(first_occurrence_mask.float(), dim=2) # size:[special token种类,bs],值即起始idx
-            first_occurrences = first_occurrences.transpose(0, 1)
-            special_token_pos = first_occurrences.nonzero() # 过滤掉没有token的情况
 
-            coords = [torch.tensor(placeholder_values[b_id][special_ids[key_id].item()], device=input_ids.device, dtype=wp_encoder_dtype) 
-                                    for key_id, b_id in zip(special_token_pos[:, 1], special_token_pos[:, 0])] # key_id:特殊token种类索引，b_id: batch 索引
+            # Create a mask where the special_ids are located
+            mask = input_ids == special_ids
+
+            # Convert the mask to float and use torch.cumsum to get cumulative sum along the sequence length dimension
+            cumsum_mask = torch.cumsum(mask.float(), dim=2)
+
+            # Create a mask to get the first occurrence by checking where cumsum is 1
+            first_occurrence_mask = (cumsum_mask == 1) & mask
+
+            # Use torch.argmax to get the indices of the first occurrence
+            first_occurrences = torch.argmax(first_occurrence_mask.float(), dim=2)
+            # swap the dimensions to get the batch and sequence length
+            first_occurrences = first_occurrences.transpose(0, 1)
+
+            # get coords from label.placeholder_values with batch and special_id as key
+            special_token_pos = first_occurrences.nonzero()
+
+            coords = [torch.tensor(placeholder_values[b_id][special_ids[key_id].item()], device=input_ids.device, dtype=wp_encoder_dtype) for key_id, b_id in zip(special_token_pos[:, 1], special_token_pos[:, 0])]
             coords_length_org = [len(coord) for coord in coords]
             coords = torch.cat(coords)
             wp_embeds = wp_encoder(coords.unsqueeze(0)).squeeze(0)
@@ -467,174 +520,55 @@ def replace_placeholder_tokens(
                 end = start + coords_length_org[i]
                 inputs_embeds[pos[0], start:end] = wp_embeds[i]
 
-        # 2. Merge text and images, 显式拼接 Latency Token至末尾
-        # TODO : 目前只支持单个图像输入的情况,且默认占位符的数目都一致
+        # 2. Merge text and images
         if pixel_values is not None and input_ids.shape[1] != 1 and pixel_values.size(0) > 0:
-            all_pixel_values = [pixel_values] # 单font视角
+            all_pixel_values = [pixel_values]
                 
             all_image_features = []
+            all_feature_lens = []
             _, N_embed, C_embed = inputs_embeds.shape
             
-            # ViT Ebedding Extraction
             for pixel_values_tmp in all_pixel_values:
-                BS, T, NP, C, H, W = pixel_values_tmp.shape # NP: 切片数量
+                BS, T, NP, C, H, W = pixel_values_tmp.shape
                 assert T == 1, "Only one frame is supported for now"
+                # for multi-frame support, we need to change the code here
+                
                 pixel_values_tmp = pixel_values_tmp.view(BS, NP, C, H, W)
 
                 if pixel_values_tmp.dim() == 5:
                     pixel_values_tmp = pixel_values_tmp.reshape(BS*NP, C, H, W)
                 elif pixel_values_tmp.dim() != 4:
+                    # otherwise has to be stacked from list of (num_patches, num_channels, height, width)
                     raise ValueError(f"pixel_values of shape {pixel_values_tmp.shape}, expect to be of 4 or 5 dimensions")
                 
                 image_features = image_encoder.model.extract_feature(pixel_values_tmp)
                 image_features = image_features.reshape(-1, C_embed)
+                                    
                 all_image_features.append(image_features)
 
             vit_embeds = torch.cat(all_image_features, dim=0)
-            
-            # === [Step A] 准备 Latency Embedding ===
-            # 时延
-            latency_embed = None
-            if latency_tensor is not None: # <--- 改用 latency_tensor 判断
-                # 生成 Embedding: [BS, Hidden]
-                latency_embed = scheduler.latency_encoding(latency_tensor)
-            else:
-                raise ValueError("latency tensor is None")
-            # === [Step B] 准备重构序列 ===
-            # 文本
+            inputs_embeds = inputs_embeds.reshape(BS * N_embed, C_embed)
+            input_ids = input_ids.reshape(BS * N_embed)
+            selected = (input_ids == image_encoder.img_context_token_id)
+            try:
+                inputs_embeds[selected] = inputs_embeds[selected] * 0.0 + vit_embeds.reshape(-1, C_embed)
+            except Exception as e:
+                vit_embeds = vit_embeds.reshape(-1, C)
+                print(f'warning: {e}, inputs_embeds[selected].shape={inputs_embeds[selected].shape}, '
+                    f'vit_embeds.shape={vit_embeds.shape}')
+                n_token = selected.sum()
+                inputs_embeds[selected] = inputs_embeds[selected] * 0.0 + vit_embeds[:n_token]
             inputs_embeds = inputs_embeds.reshape(BS, N_embed, C_embed)
             input_ids = input_ids.reshape(BS, N_embed)
-            # 图像
-            vit_embeds = vit_embeds.reshape(BS, -1, C_embed)
-            
-            # 获取原始 Mask (关键！)
-            # 优先用 language_inputs_mask，因为它通常是最准确的 attention mask
-            old_mask = adaptor_dict.get('language_inputs_mask', adaptor_dict.get('inputs_mask'))
-            
-            new_inputs_embeds_list = []
-            new_labels_list = []
-            new_masks_list = []  # [新增] 用于存储重构后的 Mask
-            latency_token_positions = [] 
-
-            for b in range(BS):
-                mask_indices = (input_ids[b] == image_encoder.img_context_token_id)
-                
-                if mask_indices.any():
-                    indices = torch.nonzero(mask_indices).squeeze()
-                    if indices.dim() == 0: indices = indices.unsqueeze(0)
-                    
-                    start_idx = indices[0].item()
-                    end_idx = indices[-1].item() + 1
-                    
-                    # 1. 切分 (Embeddings, Labels, AND Masks)
-                    prefix = inputs_embeds[b, :start_idx]
-                    suffix = inputs_embeds[b, end_idx:]
-                    
-                    parts_emb = [prefix, vit_embeds[b], suffix]
-                    
-                    # Labels 切分
-                    if labels is not None:
-                        prefix_label = labels[b, :start_idx]
-                        vision_label = torch.full((vit_embeds[b].shape[0],), -100, dtype=labels.dtype, device=labels.device)
-                        suffix_label = labels[b, end_idx:]
-                        parts_label = [prefix_label, vision_label, suffix_label]
-                        
-                    # === [修正点] Mask 切分与重构 ===
-                    if old_mask is not None:
-                        prefix_mask = old_mask[b, :start_idx]
-                        # Vision 部分 Mask 全为 1
-                        vision_mask = torch.ones((vit_embeds[b].shape[0],), dtype=old_mask.dtype, device=old_mask.device)
-                        suffix_mask = old_mask[b, end_idx:]
-                        parts_mask = [prefix_mask, vision_mask, suffix_mask]
-                    else:
-                        raise ValueError("old_mask is None")
-                        # 如果没有 mask，默认为全 1 (极少情况)
-                        parts_mask = [] # 后续处理
-                    
-                    # 2. 插入 Latency Token (在最后)
-                    if latency_embed is not None:
-                        # Embedding
-                        parts_emb.append(latency_embed[b].unsqueeze(0))
-                        
-                        # Label
-                        if labels is not None:
-                            parts_label.append(torch.tensor([-100], dtype=labels.dtype, device=labels.device))
-                        
-                        # Mask (补 1)
-                        if old_mask is not None:
-                            parts_mask.append(torch.tensor([1], dtype=old_mask.dtype, device=old_mask.device))
-                        
-                        # Position
-                        pos = prefix.shape[0] + vit_embeds[b].shape[0] + suffix.shape[0]
-                        latency_token_positions.append(pos)
-                    else:
-                        latency_token_positions.append(0)
-                        
-                    # 3. 拼接
-                    new_inputs_embeds_list.append(torch.cat(parts_emb, dim=0))
-                    if labels is not None:
-                        new_labels_list.append(torch.cat(parts_label, dim=0))
-                    if old_mask is not None:
-                        new_masks_list.append(torch.cat(parts_mask, dim=0))
-                        
-                else:
-                    # 纯文本情况
-                    new_inputs_embeds_list.append(inputs_embeds[b])
-                    if labels is not None:
-                        new_labels_list.append(labels[b])
-                    
-                    # 纯文本 Mask 处理
-                    parts_mask = [old_mask[b]] if old_mask is not None else []
-                    
-                    # Latency 插入
-                    if latency_embed is not None:
-                        parts_emb = [inputs_embeds[b], latency_embed[b].unsqueeze(0)]
-                        new_inputs_embeds_list[-1] = torch.cat(parts_emb, dim=0) # 更新刚才 append 的
-                        
-                        pos = inputs_embeds[b].shape[0]
-                        latency_token_positions.append(pos)
-
-                        if labels is not None:
-                            parts_label = [labels[b], torch.tensor([-100], dtype=labels.dtype, device=labels.device)]
-                            new_labels_list[-1] = torch.cat(parts_label, dim=0)
-                        
-                        if old_mask is not None:
-                            parts_mask.append(torch.tensor([1], dtype=old_mask.dtype, device=old_mask.device))
-                    else:
-                        latency_token_positions.append(0)
-                    
-                    if old_mask is not None:
-                        new_masks_list.append(torch.cat(parts_mask, dim=0))
-
-            # === [Step C] 更新回 adaptor_dict ===
-            inputs_embeds = torch.stack(new_inputs_embeds_list, dim=0)
-            adaptor_dict['language_inputs'] = inputs_embeds
-            
-            if labels is not None:
-                adaptor_dict['labels'] = torch.stack(new_labels_list, dim=0)
-            
-            # === [Step D 修正版] 更新 Mask ===
-            if old_mask is not None:
-                new_mask = torch.stack(new_masks_list, dim=0)
-                if 'language_inputs_mask' in adaptor_dict:
-                    adaptor_dict['language_inputs_mask'] = new_mask
-                if 'inputs_mask' in adaptor_dict:
-                    adaptor_dict['inputs_mask'] = new_mask
-
-            # === [Step E] 打包 AdaLLaVA 参数 ===
-            if latency is not None:
-                adaptor_dict['latency_token_position'] = torch.tensor(
-                    latency_token_positions, device=inputs_embeds.device
-                )
-                # 修改前：存入原始数据 (可能是标量)
-                # adaptor_dict['latency'] = latency 
-                # 修改后：存入韩式开头已经处理好的 1-d Tensor
-                adaptor_dict['latency'] = latency_tensor
-
         # pixel_values is not None but is empty ---> text only cases
         elif pixel_values is not None and input_ids.shape[1] != 1 and pixel_values.size(0) == 0:
+            # there are no images
             pass
         
-        # 这里不再处理adaptor_dict['inputs']
+        adaptor_dict['language_inputs'] = inputs_embeds
+        start_id = adaptor_dict['perm'][:,0]
+        
+        for b, i in enumerate(start_id):
+            adaptor_dict['inputs'][b][:len(adaptor_dict['language_inputs'][b])-i] = inputs_embeds[b][i:]
         
     return adaptor_dict

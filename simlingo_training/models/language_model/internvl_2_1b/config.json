@@ -17,7 +17,7 @@
     "architectures": [
       "Qwen2ForCausalLM"
     ],
-    "_attn_implementation": "sdpa",
+    "_attn_implementation": "flash_attention_2",
     "attention_dropout": 0.0,
     "bad_words_ids": null,
     "begin_suppress_tokens": null,

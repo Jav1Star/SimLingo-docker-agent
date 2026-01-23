@@ -23,9 +23,7 @@ class SimpleScheduler_L(nn.Module):
         super().__init__()
         for key, value in cfg.items():
             setattr(self, key, value)
-        self.num_hidden_layers = self.num_hidden_layers
         num_sub_layer = self.num_hidden_layers - self.num_prefix_layers
-        self.num_attention_heads = self.num_attention_heads
 
 
         self.mlp_head = nn.Linear(self.hidden_size, num_sub_layer, bias=self.bias)

@@ -15,7 +15,7 @@ from torch.optim import AdamW
 from hydra.utils import get_original_cwd
 
 from .adaptors.adaptors import replace_placeholder_tokens
-from simlingo_training.models.adaptors.adaptors import DrivingAdaptor, LanguageAdaptor, WaypointInputAdaptor, AdaptorList
+from simlingo_training.models.adaptors.adaptors import DrivingAdaptor, LanguageAdaptor, WaypointInputAdaptor, LatencyAdaptor,AdaptorList
 from simlingo_training.models.utils import summarise_losses
 from simlingo_training.utils.custom_types import (DrivingExample, DrivingInput,
                                                 DrivingLabel, DrivingOutput,
@@ -84,10 +84,11 @@ class DrivingModel(pl.LightningModule):
             speed_wps_mode=self.speed_wps_mode,
             predict_route_as_wps=self.predict_route_as_wps,
         )
-
+        
         self.adaptors = AdaptorList(
             language=LanguageAdaptor(self.language_model),
             driving=driving,
+            latency=LatencyAdaptor()
         )
 
         self.wp_encoder = WaypointInputAdaptor(
@@ -140,7 +141,7 @@ class DrivingModel(pl.LightningModule):
             driving_input = example
         
         if driving_input is not None:
-            adaptor_dict = self.adaptors(example, inference=True)
+            adaptor_dict = self.adaptors(example, inference=True,latency=latency,scheduler=self.scheduler)
             # 将其从img_encoder中提取出来，使用参数的形式传入image,wp,scheduler encoder
             adaptor_dict = replace_placeholder_tokens(
                     adaptor_dict = adaptor_dict,
@@ -148,25 +149,22 @@ class DrivingModel(pl.LightningModule):
                     placeholder_values = driving_input.prompt_inference.placeholder_values,
                     image_encoder = self.vision_model.image_encoder,
                     wp_encoder = self.wp_encoder,
-                    scheduler = self.scheduler, # 传入 scheduler
-                    latency = latency,
                 )
             
-
-            # 手动更新 split_sizes. split_sizez作用于所有[{key}_input]
-            # language_input中，包括了text, pic, and latency; driving_input中，包括了wps task token
-            new_split_sizes = []
-            for key in self.adaptors.adaptors.keys():
-                input_tensor = adaptor_dict[f"{key}_inputs"]
-                new_split_sizes.append(input_tensor.size(1))
-            adaptor_dict['split_sizes'] = torch.tensor(new_split_sizes, device=adaptor_dict['split_sizes'].device)
-
+            input_embeds_all = adaptor_dict["language_inputs"] ### 这块只拿language inputs, 为什么?
+            # 拼接上latency:
+            input_embeds_all = torch.cat((input_embeds_all, adaptor_dict['latency_inputs']), dim=1)
             
-            input_embeds_all = adaptor_dict["language_inputs"]
             attention_masks = adaptor_dict['language_inputs_mask']
-            latency_token_pos = adaptor_dict.get('latency_token_position')
-            latency_tensor = adaptor_dict.get('latency')
-
+            
+            latency_value = adaptor_dict.get('latency_values')
+            latency_token_pos = None
+            if latency_value is not None:
+                latency_token_pos = torch.full(
+                    size = (input_embeds_all.size(0),),
+                    fill_value = adaptor_dict['split_sizes'][0], # 只使用了language inputs
+                    device = input_embeds_all.device
+                )
 
         if self.predict_language:
             # per batch item because of padding
@@ -175,8 +173,9 @@ class DrivingModel(pl.LightningModule):
                 attention_mask = attention_mask.unsqueeze(0)
                 
                 # 提取当前样本的latency
-                if isinstance(latency_tensor, torch.Tensor) and latency_tensor.dim() > 0:
-                    current_latency = latency_tensor[b_idx:b_idx+1] # -> 1-d tensor [1]
+                current_latency = None
+                if latency_value is not None:    
+                    current_latency = latency_value[b_idx:b_idx+1] # -> 1-d tensor [1]
                 # ================================================
                 
                 if self.language_model.variant == 'OpenGVLab/InternVL2-4B':
@@ -187,8 +186,7 @@ class DrivingModel(pl.LightningModule):
                     eos = self.tokenizer.eos_token_id
 
                 # BUG: input_embeds, cot
-                # TODO: 看language_model推理的输入，以及scheduler与开关是否起作用
-                sampled_tokens, input_embeds = self.language_model.greedy_sample( 
+                sampled_tokens, input_embeds = self.language_model.greedy_sample(
                     input_embed,
                     eos_token_id=eos,
                     max_new_tokens=100,
@@ -198,9 +196,9 @@ class DrivingModel(pl.LightningModule):
                     # position_ids=position_ids,
                     # 传入 AdaLLaVA 参数
                     latency=current_latency, # [修改] 使用 current_latency
-                    latency_token_position=latency_token_pos[b_idx].unsqueeze(0) if latency_token_pos is not None else None,
+                    latency_token_position = latency_token_pos,
                     scheduler=self.scheduler.forward,
-                )
+                    )
                 
                 # 获得驾驶输入，拼接CoT与驾驶输入，进行驾驶决策推理
                 inputs_driving = self.adaptors.driving(driving_input)
@@ -233,9 +231,6 @@ class DrivingModel(pl.LightningModule):
                                 
                 self.language.append(self.tokenizer.batch_decode(sampled_tokens, skip_special_tokens=True)[0])
         else:
-            """ TODO: 这里没做关于latency的张量处理 """
-            print("fff driving.py def forward DEBUG_CTX: Non-language output mode")
-            # single forward pass same as during training so we can use the same function
             # 单次前向传播 (用于验证或非语言输出模式)
             # 注意：这里的 forward_model 也需要传递 latency
             features = self.forward_model(driving_input, adaptor_dict, latency=latency) # <--- 记得传 latency
@@ -253,95 +248,60 @@ class DrivingModel(pl.LightningModule):
                       driving_input: DrivingInput, 
                       adaptor_dict: Dict, 
                       driving_labels: DrivingLabel = None,
-                      # [新增] 训练时传入 latency
-                      latency: Optional[float] = None
                       ) -> Tensor:
         """
         Forward model conditioned on the given driving input.
         """
-
-        # === [新增] 训练时的随机采样逻辑 ===
-        # 如果是训练模式，且外部没指定 latency，我们就在这里随机生成
-        if self.training and latency is None:
-            import random
-            # 策略：50% 概率全速 (1.0), 50% 概率随机加速 (0.25~1.0)
-            if random.random() < 0.5:
-                 latency = 1.0
-            else:
-                 latency = random.uniform(0.25, 1.0)
-        # ============================================
-        
-        # 1. 调用 Vision Encoder 预处理
-        # 注意：这里我们传入 adaptor_dict.get('labels')，确保传入的是 Language Tensor Labels
         adaptor_dict = replace_placeholder_tokens(
                 adaptor_dict = adaptor_dict,
                 pixel_values = driving_input.camera_images,
                 placeholder_values = driving_input.prompt_inference.placeholder_values,
                 image_encoder = self.vision_model.image_encoder,
                 wp_encoder = self.wp_encoder,
-                scheduler = self.scheduler, # 传入 scheduler
-                latency = latency,
-                labels = adaptor_dict.get('labels') # 传入字典里的 Label Tensor
         )
-
-        # === [核心修改] 重构输入序列与更新账本 ===
-        # 废弃旧的 adaptor_dict['inputs']，因为它太短了装不下新数据 TODO: ????为什么跟foward这么不一致
-        # 我们遍历 adaptors，把变长后的 Language 和不变的 Driving 重新拼起来
-
-        new_inputs_list = []
-        new_masks_list = []
-        new_split_sizes = []
+        position_ids = None
+        adaptor_embeds = adaptor_dict["inputs"]
+        adaptor_mask = adaptor_dict['inputs_mask']
         
-        # 遍历 Adaptors (通常顺序是: language -> driving)
-        for key in self.adaptors.adaptors.keys():
-            # 获取最新的组件 (language_inputs 已经是变长后的了)
-            feat = adaptor_dict[f"{key}_inputs"]
-            mask = adaptor_dict[f"{key}_inputs_mask"]
-            
-            new_inputs_list.append(feat)
-            new_masks_list.append(mask)
-            # [关键] 记录新的长度！
-            new_split_sizes.append(feat.shape[1])
-            
-        # A. 重构全局输入 (Concatenate)
-        input_embeds = torch.cat(new_inputs_list, dim=1)
-        attention_mask = torch.cat(new_masks_list, dim=1)
+        latency_value = adaptor_dict.get('latency_values')
+        latency_embeds = adaptor_dict.get('latency_inputs')
+        latency_token_position = torch.full(
+            size = (latency_embeds.size(0),),
+            fill_value = adaptor_dict['split_sizes'][0]+adaptor_dict['split_sizes'][1], # latency在最后
+            device = latency_embeds.device
+        )
         
-        # B. [解决问题的关键] 更新 split_sizes
-        # 这确保了后续 compute_loss 能正确切分特征
-        adaptor_dict['split_sizes'] = torch.tensor(new_split_sizes, device=input_embeds.device)
-        
-        # =======================================================
 
+        input_embeds = adaptor_embeds
         input_embeds = input_embeds.to(
             dtype=self.language_model.model.dtype
         )
+        attention_mask = adaptor_mask
 
-        # 2. 调用 LLM
-        # 注意：这里我们不再传入 labels 给 LLM，避免因 Driving 部分缺少 Label 导致的形状不匹配。
-        # 真正的 Loss 计算发生在 forward_loss -> adaptors.compute_loss 中，那里会处理对齐。
         outputs = self.language_model.model(
             attention_mask=attention_mask,
-            inputs_embeds=input_embeds, # <--- 使用重构后的输入
-            # labels=final_labels,      # <--- 建议注释掉或传 None，防止 Shape Mismatch
+            position_ids=position_ids,
+            inputs_embeds=input_embeds,
             output_hidden_states=True,
             return_dict=True,
-            # 传递 AdaLLaVA 参数
-            latency=adaptor_dict.get('latency'),
-            latency_token_position=adaptor_dict.get('latency_token_position'),
-            scheduler=self.scheduler.forward, # 传的是foward函数，挺奇怪。TODO: 对梯度回传的影响？
+            # AdaLLaVA
+            latency = latency_value,
+            scheduler = self.scheduler.forward,
+            latency_token_position = latency_token_position
         )
-        
-        # 3. 返回结果
-        # 直接返回完整特征，不需要手动 split。
-        # 后续的 adaptors.compute_loss 会利用我们更新过的 split_sizes 自动完成切分。
         features = outputs.hidden_states[-1]
         logits = outputs[0]
 
-        return features, logits
+        vision_features, adaptor_features = features.split(
+            [features.size(1) - adaptor_embeds.size(1), adaptor_embeds.size(1)], dim=1
+        )
+        vision_logits, adaptor_logits = logits.split(
+            [logits.size(1) - adaptor_embeds.size(1), adaptor_embeds.size(1)], dim=1
+        )
+        return adaptor_features, adaptor_logits
     
 
-    def forward_loss(self, example: DrivingExample, per_sample=False) -> TrainingOutput:
+    def forward_loss(self, example: DrivingExample, per_sample=False,latency=None) -> TrainingOutput:
         """
         Forward pass of the model for a driving input, followed by
         computing the next token cross-entropy loss.
@@ -351,12 +311,21 @@ class DrivingModel(pl.LightningModule):
             text_ids: Text ids tensor of shape [B, T]. These are input to the model and used in the loss.
             text_mask: Text mask tensor of shape [B, T].
         """
-
-        adaptor_dict = self.adaptors(example)
+        # === [新增] 训练时的随机采样逻辑 ===
+        # 如果是Adallava训练模式，且外部没指定 latency，我们就在这里随机生成 TODO 后面包装成可以参数指定latency生成模式的
+        if self.adaption_train and latency is None:
+            import random
+            # 策略：50% 概率全速 (1.0), 50% 概率随机加速 (0.25~1.0)
+            if random.random() < 0.5:
+                 latency = 1.0
+            else:
+                 latency = random.uniform(0.25, 1.0)
+        adaptor_dict = self.adaptors(example, latency=latency, scheduler=self.scheduler)
         adaptor_embeds = adaptor_dict["inputs"]
         adaptor_mask = adaptor_dict['inputs_mask']
 
         adaptor_features, adaptor_logits = self.forward_model(example.driving_input, adaptor_dict, driving_labels=example.driving_label)
+        # TODO: check adaptor_dict split_sizes
         loss_dict = self.adaptors.compute_loss(adaptor_features, adaptor_logits, adaptor_dict, example)
 
         loss_dict_only_losses = {k:v for k, v in loss_dict.items() if k.endswith("loss")}

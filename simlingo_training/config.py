@@ -13,7 +13,7 @@ class VLMEncoderConfig:
 
 
 @dataclass
-class LanguageModelConfig: # TODO 适配 adallava
+class LanguageModelConfig:
     variant: str = 'OpenGVLab/InternVL2-1B'
     lora: bool = True
     lora_alpha: int = 64
@@ -24,7 +24,7 @@ class LanguageModelConfig: # TODO 适配 adallava
     _target_: str = "simlingo_training.models.language_model.llm.LLM"
 
 @dataclass
-class schedulerConfig: # TODO 适配 adallava
+class schedulerConfig:
     tau: int = 5
     is_hard: bool = True
     threshold: float = 0.5
@@ -48,7 +48,9 @@ class DrivingModelConfig:
     pct_start: float = 0.05
     speed_wps_mode: str = '2d'
     predict_route_as_wps: bool = True
-
+    
+    adaption_train: bool = False
+    
     _target_: str = "simlingo_training.models.driving.DrivingModel"
 
 
@@ -121,7 +123,6 @@ class DrivingDataModuleConfig:
     train_partitions: Optional[Dict[str, float]] = None
     train_partitions_dreamer: Optional[Dict[str, float]] = None
     use_global_img: bool = False
-    
     _target_: str = "simlingo_training.dataloader.datamodule.DataModule"
 
 

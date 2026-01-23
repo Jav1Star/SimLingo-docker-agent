@@ -113,15 +113,22 @@ class LLM(nn.Module):
                 
                 layers_to_transform = list(range(num_prefix))
                 print(f"AdaptionTrain Enabled: LoRA restricted to first {num_prefix} layers.")
-
+            target_modules_for_qwen = [ # 等效于"all-linear"
+                        "q_proj",    # Attention Query
+                        "k_proj",    # Attention Key
+                        "v_proj",    # Attention Value
+                        "o_proj",    # Attention Output
+                        "gate_proj", # MLP Gate
+                        "up_proj",   # MLP Up-projection
+                        "down_proj"  # MLP Down-projection
+                    ]
             peft_config = LoraConfig(
                 inference_mode=False, 
                 r=self.lora_r,
                 lora_alpha=self.lora_alpha,
                 lora_dropout=self.lora_dropout,
-                target_modules="all-linear",
                 layers_to_transform=layers_to_transform, # 指定LoRA注入的层，其他的层保持原始状态
-                # target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+                target_modules=target_modules_for_qwen,
             )
             self.model = get_peft_model(self.model, peft_config)
             self.model.print_trainable_parameters()

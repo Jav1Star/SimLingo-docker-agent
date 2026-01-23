@@ -43,7 +43,10 @@ def main(cfg: TrainConfig):
     )
     
     if cfg.adaption_train:
+        cfg.model.adaption_train = True
+    
         cfg.model.vision_model.freeze = True
+    
         cfg.model.language_model.adaption_train = True
         cfg.model.language_model.num_prefix_layers = cfg.model.scheduler_model.num_prefix_layers# align
     
@@ -159,6 +162,7 @@ def main(cfg: TrainConfig):
             callbacks=callbacks,
             devices=cfg.gpus,
             # enable_checkpointing=False,
+            num_sanity_val_steps=4,
             gradient_clip_val=0.3,
             # gradient_clip_algorithm="value",
             # log_every_n_steps=10,
