@@ -2,7 +2,7 @@ import os
 import sys
 from pathlib import Path
 import runpy
-
+sys.path.append(os.getcwd())
 # ================= 配置区域 =================
 # 1. 你的 Carla 路径 (参考你提供的脚本)
 CARLA_ROOT = "/data/carla0915" 
@@ -11,11 +11,7 @@ PROJECT_DIR  = "/home/yangyujia/simlingo-adaption"
 # 2. 想要调试的参数覆盖 (Overrides)
 # 这里的写法等同于命令行参数
 DEBUG_ARGS = [
-    "experiment=debug",         # 实验配置文件名
-    "name=debug_session",                # 实验名称
-    "data_module.batch_size=2",          # 调小 batch size      
-    "gpus=1",                            # [关键] 单卡调试，禁用 DDP 分布式
-    "debug=True",                        # 开启 debug 模式
+    "experiment=adaption_train",         # 实验配置文件名
     # 如果路径有问题，可以在这里强制指定绝对路径来测试：
     # "data_module.base_dataset.data_path=/data/simlingo" 
 ]

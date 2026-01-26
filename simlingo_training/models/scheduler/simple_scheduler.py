@@ -28,6 +28,8 @@ class SimpleScheduler_L(nn.Module):
 
         self.mlp_head = nn.Linear(self.hidden_size, num_sub_layer, bias=self.bias)
         self.scheduler_up_proj = FeedForward(256, self.hidden_size, self.hidden_size)
+        
+        self.init_weights()
 
     def set_tau(self, tau):
         self.tau = tau
@@ -84,6 +86,28 @@ class SimpleScheduler_L(nn.Module):
     def get_random_latency(self, batch_size):
         latency = torch.randint(self.num_prefix_layers, self.num_hidden_layers + 1, (batch_size,)) / self.num_hidden_layers
         return latency
+
+    def init_weights(self):
+            """
+            根据 Transformer 架构中常见的初始化策略：
+            1. 线性层权重使用正态分布初始化
+            2. Bias 初始化为 0
+            """
+            # 初始化调度器头部 (mlp_head)
+            nn.init.normal_(self.mlp_head.weight, mean=0.0, std=0.02)
+            if self.mlp_head.bias is not None:
+                nn.init.zeros_(self.mlp_head.bias)
+
+            # 初始化延迟编码器 (scheduler_up_proj)
+            # 遍历子模块进行针对性初始化
+            for m in self.scheduler_up_proj.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.normal_(m.weight, mean=0.0, std=0.02)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+                elif isinstance(m, nn.LayerNorm):
+                    nn.init.zeros_(m.bias)
+                    nn.init.ones_(m.weight)
     
 
 class SimpleScheduler_H(nn.Module):

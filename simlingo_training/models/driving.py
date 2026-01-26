@@ -101,6 +101,7 @@ class DrivingModel(pl.LightningModule):
             self.tokenizer = self.processor.tokenizer
         else:
             self.tokenizer = self.processor
+            
         if not self.adaption_train:
             self.scheduler = None
         else:
@@ -133,6 +134,9 @@ class DrivingModel(pl.LightningModule):
     ) -> DrivingOutput:
         """
         Samples a trajectory from the model.
+        推理阶段, 若predict_language = ture, 则先生成CoT，再直接拼接CoT跟wps, 然后提取wps token
+        若predict_language = false, 则是prompt+wps前向传播,后提取wps token
+        
         """
         self.speed_wps, self.route, self.language = None, None, []
         try:
@@ -142,7 +146,7 @@ class DrivingModel(pl.LightningModule):
         
         if driving_input is not None:
             adaptor_dict = self.adaptors(example, inference=True,latency=latency,scheduler=self.scheduler)
-            # 将其从img_encoder中提取出来，使用参数的形式传入image,wp,scheduler encoder
+
             adaptor_dict = replace_placeholder_tokens(
                     adaptor_dict = adaptor_dict,
                     pixel_values = driving_input.camera_images,
@@ -200,9 +204,11 @@ class DrivingModel(pl.LightningModule):
                     scheduler=self.scheduler.forward,
                     )
                 
+                # TODO: 这块latency没有输入。
                 # 获得驾驶输入，拼接CoT与驾驶输入，进行驾驶决策推理
-                inputs_driving = self.adaptors.driving(driving_input)
-                input_embed_concat = torch.cat((input_embeds, inputs_driving["inputs"][b_idx].unsqueeze(0)), dim=1)
+                inputs_driving = self.adaptors.driving(driving_input) # 冗余？此时adaptor_dict中应该已经包含了
+                # TODO: 这是直接拼接CoT和wps?那么跟训练的prompt+wps模式，相差有点大了。
+                input_embed_concat = torch.cat((input_embeds, inputs_driving["inputs"][b_idx].unsqueeze(0)), dim=1) 
                 features, logits = self.language_model.forward( 
                     input_embed_concat,
                     # 传入 AdaLLaVA 参数
@@ -211,8 +217,8 @@ class DrivingModel(pl.LightningModule):
                     scheduler=self.scheduler.forward,
                     )
 
+                # 放弃维护adaptor中的split_size，此处手动计算，提取出wps tokens来预测。因为推理阶段无需再调用adaptor的 compute loss 了
                 len_driving = inputs_driving["inputs"].size(1)
-
                 driving_features = features[:, -len_driving:]
                 driving_logits = logits[:, -len_driving:]
                 predictions = self.adaptors.driving.get_predictions(driving_features, driving_logits)
@@ -232,7 +238,6 @@ class DrivingModel(pl.LightningModule):
                 self.language.append(self.tokenizer.batch_decode(sampled_tokens, skip_special_tokens=True)[0])
         else:
             # 单次前向传播 (用于验证或非语言输出模式)
-            # 注意：这里的 forward_model 也需要传递 latency
             features = self.forward_model(driving_input, adaptor_dict, latency=latency) # <--- 记得传 latency
             outputs_by_adaptor = self.adaptors.split_outputs_by_adaptor(adaptor_dict, features)
             predictions = self.adaptors.driving.get_predictions(outputs_by_adaptor['driving'])
@@ -251,6 +256,7 @@ class DrivingModel(pl.LightningModule):
                       ) -> Tensor:
         """
         Forward model conditioned on the given driving input.
+        
         """
         adaptor_dict = replace_placeholder_tokens(
                 adaptor_dict = adaptor_dict,
@@ -325,7 +331,7 @@ class DrivingModel(pl.LightningModule):
         adaptor_mask = adaptor_dict['inputs_mask']
 
         adaptor_features, adaptor_logits = self.forward_model(example.driving_input, adaptor_dict, driving_labels=example.driving_label)
-        # TODO: check adaptor_dict split_sizes
+
         loss_dict = self.adaptors.compute_loss(adaptor_features, adaptor_logits, adaptor_dict, example)
 
         loss_dict_only_losses = {k:v for k, v in loss_dict.items() if k.endswith("loss")}

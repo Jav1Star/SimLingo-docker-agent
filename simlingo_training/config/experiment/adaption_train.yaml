@@ -16,14 +16,22 @@ model:
     lora_dropout: 0.1
   vision_model:
     variant: 'OpenGVLab/InternVL2-1B'
+  scheduler_model:
+    tau: 5
+    is_hard: True
+    threshold: 0.5
+    bias: True
+    num_prefix_layers: 10 # 10 out of 24
+    _target_: "simlingo_training.models.scheduler.simple_scheduler.SimpleScheduler_L"
+
 
 data_module:
   batch_size: 8 #12
   num_workers: 8
   # dreamer_dataset: null
   base_dataset:
-    data_path: /data/simlingo
-    bucket_path: /data/simlingo
+    data_path: data/simlingo
+    bucket_path: data/simlingo
     pred_len: 11
     cut_bottom_quarter: True #图像预处理操作，裁剪掉图像底部的 1/4。在自动驾驶中，底部通常是本车的引擎盖，包含信息量较少，裁剪可减少干扰。
     use_commentary: True
@@ -42,11 +50,13 @@ data_module:
 max_epochs: 2
 val_every_n_epochs: 1
 
-debug: False
+debug: True
 gpus: 2
 seed: 9876
-name: simlingo_seed_9876
+name: adaption_train_seed_9876
 resume: False
+adaption_train: True
+simlingo_checkpoint: "models/simlingoCheckpoints/checkpoints/epoch=013.ckpt/pytorch_model.pt"
 
 hydra:
   run:

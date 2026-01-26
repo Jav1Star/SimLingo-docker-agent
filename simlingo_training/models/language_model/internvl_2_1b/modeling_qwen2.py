@@ -231,7 +231,7 @@ class Qwen2MLP(nn.Module):
         intermediate = self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state)
         
         # 2. [AdaLLaVA 训练逻辑] 应用软跳过掩码
-        if self.training and drop_states is not None:
+        if drop_states is not None: # 如果是推理，在Model阶段已被跳过，不会来到这里
             # drop_states shape: [batch, 2, num_heads]
             # 我们使用 index 1 作为 MLP 的掩码通道
             # 计算切片大小以将 num_heads 维度的掩码扩展到 intermediate_size
@@ -366,7 +366,7 @@ class Qwen2Attention(nn.Module):
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
         # === [AdaLLaVA 训练逻辑] ===
-        if self.training and drop_states is not None:
+        if drop_states is not None:
             # drop_states shape: [batch, 2, num_heads]
             # 使用 index 0 作为 Attention 掩码
             # 扩展掩码以匹配 hidden_size (num_heads * head_dim)
@@ -501,7 +501,7 @@ class Qwen2FlashAttention2(Qwen2Attention):
 
         # === [AdaLLaVA 训练逻辑] ===
         # 必须加在 self.o_proj 之前
-        if self.training and drop_states is not None:
+        if drop_states is not None:
             # drop_states shape: [batch, 2, num_heads]
             # 使用 index 0 作为 Attention 掩码
             # 扩展掩码以匹配 hidden_size (num_heads * head_dim)
@@ -612,7 +612,7 @@ class Qwen2SdpaAttention(Qwen2Attention):
         attn_output = attn_output.view(bsz, q_len, self.hidden_size)
 
         # === [AdaLLaVA 训练逻辑] ===
-        if self.training and drop_states is not None:
+        if drop_states is not None:
             # drop_states shape: [batch, 2, num_heads]
             # 使用 index 0 作为 Attention 掩码
             # 扩展掩码以匹配 hidden_size (num_heads * head_dim)

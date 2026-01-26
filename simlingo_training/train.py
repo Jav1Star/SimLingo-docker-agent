@@ -18,6 +18,59 @@ from simlingo_training.utils.logging_project import setup_logging, sync_wandb
 from simlingo_training.config import TrainConfig
 from simlingo_training.callbacks.visualise import VisualiseCallback
 
+def check_gradient(cfg,model):
+    # 注册 Hook 以检查 Scheduler 梯度
+    if cfg.adaption_train:
+        def print_grad(name):
+            def hook(grad):
+                if grad is not None:
+                    grad_norm = grad.norm().item()
+                    print(f"[Gradient Hook] {name} grad norm: {grad_norm}, shape: {grad.shape}")
+                else:
+                    print(f"[Gradient Hook] {name} has None gradient")
+            return hook
+
+        # 我们需要访问 model 内部的 scheduler 实例
+        # 注意：model 是 DrivingModel，它内部持有 language_model，scheduler 可能在 language_model 或 DrivingModel 中
+        # 根据 driving.py，scheduler 是 DrivingModel 的成员 self.scheduler
+        if hasattr(model, 'scheduler'):
+            # 注册给 scheduler 的 MLP head 输出权重
+            if hasattr(model.scheduler, 'mlp_head'):
+                model.scheduler.mlp_head.weight.register_hook(print_grad("Scheduler MLP Head Weight"))
+            
+            # 注册给 scheduler_up_proj
+            if hasattr(model.scheduler, 'scheduler_up_proj'):
+                 # 假设 scheduler_up_proj 是 FeedForward，取第二层线性层检查
+                 if hasattr(model.scheduler.scheduler_up_proj, 'net'):
+                     model.scheduler.scheduler_up_proj.net[-1].weight.register_hook(print_grad("Scheduler UpProj Last Layer Weight"))
+
+        # [新增] 检查 LLM 各层是否参与训练 (根据 num_prefix_layers)
+        # 使用更健壮的 named_parameters 遍历方法，不依赖具体的模型嵌套结构
+        print("[Gradient Hook Setup] Scanning language model for trainable parameters...")
+        lm = model.language_model
+        
+        monitored_layers = set()
+        
+        # 遍历所有参数，寻找可训练的参数
+        for name, param in lm.named_parameters():
+            if param.requires_grad:
+                # name 示例: model.layers.0.self_attn.q_proj.lora_A.default.weight
+                if "layers" in name and "lora" in name: 
+                    import re
+                    # 提取层索引
+                    match = re.search(r"layers\.(\d+)\.", name)
+                    if match:
+                        layer_idx = int(match.group(1))
+                        # 为了避免日志刷屏，我们只监听 q_proj 的 lora_B (它直接影响输出)
+                        if "q_proj" in name and "lora_B" in name:
+                            monitored_layers.add(layer_idx)
+                            print(f"[Gradient Hook Setup] Hooking LLM Layer {layer_idx}: {name}")
+                            param.register_hook(print_grad(f"LLM L{layer_idx} {name.split('.')[-2]}")) # print "lora_B"
+        
+        if monitored_layers:
+            print(f"[Gradient Hook Setup] Monitored LLM Layers (q_proj LoRA): {sorted(list(monitored_layers))}")
+        else:
+            print("[Gradient Hook Setup] No trainable LLM layers found for monitoring.")
 
 @hydra.main(config_path=f"config", config_name="config", version_base="1.1")
 def main(cfg: TrainConfig):
@@ -84,6 +137,10 @@ def main(cfg: TrainConfig):
     print(OmegaConf.to_yaml(cfg))
     os.environ["WANDB_DISABLE_CODE"] = "True"
     
+    ## check gradient
+    #check_gradient(cfg,model)
+
+
     if cfg.overfit > 0:
         overfit = cfg.overfit
         
@@ -147,7 +204,7 @@ def main(cfg: TrainConfig):
         checkpoint_callback, 
         model_summary, 
         # ThroughputMonitor(batch_size_fn=lambda batch: batch.driving_input.camera_images.size(0)), 
-        VisualiseCallback(interval=1000, val_interval=1000) # 每隔一定步数可视化预测结果
+        VisualiseCallback(interval=1000, val_interval=1000) # 每隔一定步数可视化预测结果， 可视化路径点对比图和文本预测对比图
     ]
     if not cfg.debug: 
         callbacks.append(lr_monitor)

@@ -74,7 +74,10 @@ class LLM(nn.Module):
             
             # 2. 加载 Wrapper 模型 (InternVLChatModel)
             # 直接使用本地自定义类来初始化
-            self.model = InternVLChatModel.from_pretrained(local_model_path) # TODO: 加载simlingo权重。
+            self.model = InternVLChatModel.from_pretrained(
+                local_model_path, 
+                torch_dtype=torch.bfloat16
+            )
             
             # === [关键修复] 去壳：只保留语言模型部分 ===
             # 这样 self.model 就变成了 Qwen2ForCausalLM (你修改过的那个类)
