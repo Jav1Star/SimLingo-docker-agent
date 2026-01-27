@@ -26,8 +26,8 @@ model:
 
 
 data_module:
-  batch_size: 8 
-  num_workers: 8
+  batch_size: 1 #12
+  num_workers: 1
   # dreamer_dataset: null
   base_dataset:
     data_path: data/simlingo
@@ -50,14 +50,10 @@ data_module:
 max_epochs: 2
 val_every_n_epochs: 1
 
-debug: False
-gpus: 2
+debug: True
+gpus: 1
 seed: 9876
 name: adaption_train_seed_9876
 resume: False
 adaption_train: True
 simlingo_checkpoint: "models/simlingoCheckpoints/checkpoints/epoch=013.ckpt/pytorch_model.pt"
-
-hydra:
-  run:
-    dir: outputs/${wandb_name}_${name}

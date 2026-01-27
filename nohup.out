@@ -1,0 +1,69 @@
+Added to sys.path: /data/carla0915/PythonAPI/carla
+Added to sys.path: /home/yangyujia/simlingo-adaption/leaderboard
+Added to sys.path: /home/yangyujia/simlingo-adaption/scenario_runner
+Starting Training Debug with args:
+['/home/yangyujia/simlingo-adaption/simlingo_training/train.py', 'experiment=adaption_train']
+--------------------------------------------------
+Traceback (most recent call last):
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/deepspeed/runtime/compiler.py", line 9, in <module>
+    from torch.compiler import is_compiling as torch_is_compiling
+ImportError: cannot import name 'is_compiling' from 'torch.compiler' (/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/torch/compiler/__init__.py)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "start_train.py", line 82, in <module>
+    main()
+  File "start_train.py", line 74, in main
+    runpy.run_path(str(script_path), run_name="__main__")
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/runpy.py", line 265, in run_path
+    return _run_module_code(code, init_globals, run_name,
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/runpy.py", line 97, in _run_module_code
+    _run_code(code, mod_globals, init_globals,
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/runpy.py", line 87, in _run_code
+    exec(code, run_globals)
+  File "/home/yangyujia/simlingo-adaption/simlingo_training/train.py", line 9, in <module>
+    from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/deepspeed/__init__.py", line 25, in <module>
+    from . import ops
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/deepspeed/ops/__init__.py", line 6, in <module>
+    from . import adam
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/deepspeed/ops/adam/__init__.py", line 6, in <module>
+    from .cpu_adam import DeepSpeedCPUAdam
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/deepspeed/ops/adam/cpu_adam.py", line 8, in <module>
+    from deepspeed.utils import logger
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/deepspeed/utils/__init__.py", line 6, in <module>
+    from .logging import logger, log_dist
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/deepspeed/utils/logging.py", line 10, in <module>
+    from deepspeed.runtime.compiler import is_compile_supported, is_compiling
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/deepspeed/runtime/compiler.py", line 12, in <module>
+    from torch._dynamo.external_utils import is_compiling as torch_is_compiling
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/torch/_dynamo/__init__.py", line 2, in <module>
+    from . import allowed_functions, convert_frame, eval_frame, resume_execution
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/torch/_dynamo/convert_frame.py", line 62, in <module>
+    from .output_graph import OutputGraph
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/torch/_dynamo/output_graph.py", line 89, in <module>
+    from .variables.builder import GraphArg, TrackedFake, VariableBuilder, wrap_fx_proxy
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/torch/_dynamo/variables/builder.py", line 143, in <module>
+    from .optimizer import OptimizerVariable
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/torch/_dynamo/variables/optimizer.py", line 5, in <module>
+    from ..decorators import mark_static_address
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/torch/_dynamo/decorators.py", line 141, in <module>
+    def graph_break():
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/torch/_dynamo/decorators.py", line 109, in inner
+    allowed_functions._allowed_function_ids.remove(id(fn))
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/torch/_dynamo/allowed_functions.py", line 88, in remove
+    function_ids = self()
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/torch/_dynamo/allowed_functions.py", line 69, in __call__
+    value = self.lazy_initializer()
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/torch/_dynamo/allowed_functions.py", line 417, in _allowed_function_ids
+    return gen_allowed_objs_and_ids().object_ids
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/torch/_dynamo/allowed_functions.py", line 375, in gen_allowed_objs_and_ids
+    _find_torch_objects(torch)
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/torch/_dynamo/allowed_functions.py", line 363, in _find_torch_objects
+    _find_torch_objects(obj)
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/torch/_dynamo/allowed_functions.py", line 363, in _find_torch_objects
+    _find_torch_objects(obj)
+  File "/home/yangyujia/miniconda3/envs/simlingo/lib/python3.8/site-packages/torch/_dynamo/allowed_functions.py", line 335, in _find_torch_objects
+    if id(obj) not in torch_object_ids:
+KeyboardInterrupt

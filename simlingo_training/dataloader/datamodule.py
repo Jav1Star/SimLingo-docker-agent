@@ -157,7 +157,7 @@ class DataModule(LightningDataModule):
                 if len(bucket_list) != len(datasets):
                     # print in red
                     print(f"\033[91mDatasets with 0 samples: {set(datasets.keys()) - set(bucket_list)}\033[00m")
-                    print(f"\033[91mContinue without this bucket.\033[00m")
+                    print(f"\033[91m \nContinue with these bucket {set(bucket_list)}.\033[00m")
                 datasets = {key: value for key, value in datasets.items() if value.__len__() > 0}
 
                 self.train_dataset = torch.utils.data.ConcatDataset([datasets[bucket] for bucket in bucket_list])

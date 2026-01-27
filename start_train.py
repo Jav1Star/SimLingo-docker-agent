@@ -10,11 +10,9 @@ PROJECT_DIR  = "/home/yangyujia/simlingo-adaption"
 
 # 2. 想要调试的参数覆盖 (Overrides)
 # 这里的写法等同于命令行参数
-DEBUG_ARGS = [
-    "experiment=adaption_train",         # 实验配置文件名
-    # 如果路径有问题，可以在这里强制指定绝对路径来测试：
-    # "data_module.base_dataset.data_path=/data/simlingo" 
-]
+# DEBUG_ARGS = [
+#     "experiment=adaption_train",         # 实验配置文件名
+# ]
 # ===========================================
 
 def setup_environment():
@@ -53,16 +51,19 @@ def setup_environment():
         os.environ[key] = val
 
 def main():
+    # 获取命令行传递的额外参数
+    extra_args = sys.argv[1:]
+
     setup_environment()
 
     # 模拟命令行参数 sys.argv
-    # 脚本名 + 我们定义的参数
+    # 脚本名 + 我们定义的参数 + 命令行传入的额外参数
     script_path = os.path.join(PROJECT_DIR, "simlingo_training", "train.py")
     if not os.path.exists(script_path):
         print(f"Error: 找不到训练脚本: {script_path}")
         return
-    sys.argv = [str(script_path)] + DEBUG_ARGS
-    
+    #sys.argv = [str(script_path)] + DEBUG_ARGS + extra_args
+    sys.argv = [str(script_path)]  + extra_args
     print(f"Starting Training Debug with args:\n{sys.argv}")
     print("-" * 50)
 

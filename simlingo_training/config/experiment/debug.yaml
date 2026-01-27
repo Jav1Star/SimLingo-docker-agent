@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /data_module: carla_no_buckets #carla_no_buckets #carla_bucket_v12
+  - /data_module: carla_bucket_v12_dreamer #carla_no_buckets #carla_bucket_v12
   - /model/vision_model: vlm 
   - /data_module/base_dataset: dataset
 
@@ -25,8 +25,8 @@ model:
     _target_: "simlingo_training.models.scheduler.simple_scheduler.SimpleScheduler_L"
 
 data_module:
-  batch_size: 8
-  num_workers: 8
+  batch_size: 1
+  num_workers: 1
   # dreamer_dataset: null
   base_dataset:
     data_path: data/simlingo
@@ -49,7 +49,8 @@ data_module:
 max_epochs: 15
 val_every_n_epochs: 1
 
-gpus: 2
+debug: True
+gpus: 1
 seed: 42
 adaption_train: True
 simlingo_checkpoint: "models/simlingoCheckpoints/checkpoints/epoch=013.ckpt/pytorch_model.pt"
