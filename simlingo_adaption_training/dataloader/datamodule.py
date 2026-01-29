@@ -12,11 +12,11 @@ from torch.utils.data import DataLoader
 from transformers import AutoProcessor
 
 # Local/project specific imports
-# from simlingo_training.dataloader.dataset_driving import Data_Driving # is called directly by hydra.utils.instantiate, keeping here to make it easier to find
-# from simlingo_training.dataloader.dataset_dreamer import Data_Dreamer # is called directly by hydra.utils.instantiate, keeping here to make it easier to find
-from simlingo_training.utils.custom_types import DrivingExample, DrivingInput, DrivingLabel, LanguageLabel
-from simlingo_training.utils.internvl2_utils import preprocess_image_batch, get_custom_chat_template, get_num_image_tokens_per_patch
-from simlingo_training.utils.projection import get_camera_intrinsics, get_camera_extrinsics
+# from simlingo_adaption_training.dataloader.dataset_driving import Data_Driving # is called directly by hydra.utils.instantiate, keeping here to make it easier to find
+# from simlingo_adaption_training.dataloader.dataset_dreamer import Data_Dreamer # is called directly by hydra.utils.instantiate, keeping here to make it easier to find
+from simlingo_adaption_training.utils.custom_types import DrivingExample, DrivingInput, DrivingLabel, LanguageLabel
+from simlingo_adaption_training.utils.internvl2_utils import preprocess_image_batch, get_custom_chat_template, get_num_image_tokens_per_patch
+from simlingo_adaption_training.utils.projection import get_camera_intrinsics, get_camera_extrinsics
 
 def encode_uint8(strings: List[str], common_length: int) -> torch.Tensor:
     max_len = max(len(s) for s in strings)
@@ -157,7 +157,7 @@ class DataModule(LightningDataModule):
                 if len(bucket_list) != len(datasets):
                     # print in red
                     print(f"\033[91mDatasets with 0 samples: {set(datasets.keys()) - set(bucket_list)}\033[00m")
-                    print(f"\033[91mContinue without this bucket.\033[00m")
+                    print(f"\033[91m \nContinue with these bucket {set(bucket_list)}.\033[00m")
                 datasets = {key: value for key, value in datasets.items() if value.__len__() > 0}
 
                 self.train_dataset = torch.utils.data.ConcatDataset([datasets[bucket] for bucket in bucket_list])

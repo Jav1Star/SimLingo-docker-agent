@@ -8,6 +8,7 @@ model:
   lr: 3e-5
   predict_route_as_wps: True
   speed_wps_mode: 2d
+  computation_budget: 'random' # fixed, random
   language_model:
     variant: 'OpenGVLab/InternVL2-1B'
     lora: True
@@ -22,7 +23,7 @@ model:
     threshold: 0.5
     bias: True
     num_prefix_layers: 10 # 10 out of 24
-    _target_: "simlingo_training.models.scheduler.simple_scheduler.SimpleScheduler_L"
+    _target_: "simlingo_adaption_training.models.scheduler.simple_scheduler.SimpleScheduler_L"
 
 
 data_module:
@@ -47,7 +48,7 @@ data_module:
 
     use_safety_flag: True
 
-max_epochs: 2
+max_epochs: 5
 val_every_n_epochs: 1
 
 debug: False
@@ -56,7 +57,7 @@ seed: 9876
 name: adaption_train_seed_9876
 resume: False
 adaption_train: True
-simlingo_checkpoint: "models/simlingoCheckpoints/checkpoints/epoch=013.ckpt/pytorch_model.pt"
+simlingo_checkpoint: "models/simlingoWithoutPEFT/merged_driving_model.pth"
 
 hydra:
   run:

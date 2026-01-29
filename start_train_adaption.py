@@ -11,7 +11,7 @@ PROJECT_DIR  = "/home/yangyujia/simlingo-adaption"
 # 2. 想要调试的参数覆盖 (Overrides)
 # 这里的写法等同于命令行参数
 DEBUG_ARGS = [
-    "experiment=debug",         # 实验配置文件名
+    "experiment=adaption_train",         # 实验配置文件名
 ]
 # ===========================================
 
@@ -58,7 +58,7 @@ def main():
 
     # 模拟命令行参数 sys.argv
     # 脚本名 + 我们定义的参数 + 命令行传入的额外参数
-    script_path = os.path.join(PROJECT_DIR, "simlingo_training", "train.py")
+    script_path = os.path.join(PROJECT_DIR, "simlingo_adaption_training", "train.py")
     if not os.path.exists(script_path):
         print(f"Error: 找不到训练脚本: {script_path}")
         return

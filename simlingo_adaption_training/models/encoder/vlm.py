@@ -1,7 +1,7 @@
 
 
 from torch import nn
-from simlingo_training.models.encoder.internvl2_model import LingoInternVLModel
+from simlingo_adaption_training.models.encoder.internvl2_model import LingoInternVLModel
 
 class VLMEncoderModel(nn.Module):
     def __init__(self,
@@ -27,7 +27,7 @@ class VLMEncoderModel(nn.Module):
         self.image_encoder.processor = processor
         self.image_encoder.use_global_img = self.use_global_img
         
-        self.image_encoder.language_model = None
+        self.image_encoder.language_model = None # 在这里丢掉了language model部分
         self.image_encoder.model.language_model = None
         
         print("\033[91m" + f"Using {self.variant} as the image encoder." + "\033[0m")

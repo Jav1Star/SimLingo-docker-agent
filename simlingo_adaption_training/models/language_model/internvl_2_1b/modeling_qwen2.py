@@ -973,7 +973,6 @@ class Qwen2Model(Qwen2PreTrainedModel):
                         # execution_plan: [Layers, Batch, 2, Heads]
                         execution_plan = scheduler(latency_token_feat.contiguous(), latency).transpose(0, 1)
             
-            # TODO: > num_prefix_layers的层是否需要剔除掉latency token?
             # === [AdaLLaVA Modification] 当前层开关决策与实现 ===
             drop_states = None
             if execution_plan is not None and idx >= num_prefix_layers:

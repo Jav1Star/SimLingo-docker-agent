@@ -6,6 +6,7 @@ from pathlib import Path
 from pprint import PrettyPrinter
 from typing import Dict, Optional, Tuple, List
 
+from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 import hydra
 import numpy as np
 import pytorch_lightning as pl
@@ -14,10 +15,10 @@ from torch import Tensor, nn
 from torch.optim import AdamW
 from hydra.utils import get_original_cwd
 
-
-from simlingo_training.models.adaptors.adaptors import DrivingAdaptor, LanguageAdaptor, WaypointInputAdaptor, AdaptorList
-from simlingo_training.models.utils import summarise_losses
-from simlingo_training.utils.custom_types import (DrivingExample, DrivingInput,
+from .adaptors.adaptors import replace_placeholder_tokens
+from simlingo_adaption_training.models.adaptors.adaptors import DrivingAdaptor, LanguageAdaptor, WaypointInputAdaptor, LatencyAdaptor,AdaptorList
+from simlingo_adaption_training.models.utils import summarise_losses
+from simlingo_adaption_training.utils.custom_types import (DrivingExample, DrivingInput,
                                                 DrivingLabel, DrivingOutput,
                                                 TrainingOutput)
 
@@ -59,7 +60,8 @@ class DrivingModel(pl.LightningModule):
         
         self.cfg_data_module = cfg_data_module
         
-        self.vision_model = hydra.utils.instantiate(
+        # 根据config与代码，发现都是加载完整的InterVL2-1B，然后丢掉冗余部分来实现，可能需要手动清一下cuda cache
+        self.vision_model = hydra.utils.instantiate( 
             self.vision_model,
             cfg_data_module=cfg_data_module,
             processor=self.processor,
@@ -72,7 +74,8 @@ class DrivingModel(pl.LightningModule):
             cache_dir=cache_dir,
             _recursive_=False
         )
-
+         
+    
         self.all_predictions = {}
         self.all_losses = {}
         
@@ -82,11 +85,7 @@ class DrivingModel(pl.LightningModule):
             speed_wps_mode=self.speed_wps_mode,
             predict_route_as_wps=self.predict_route_as_wps,
         )
-
-        self.adaptors = AdaptorList(
-            language=LanguageAdaptor(self.language_model),
-            driving=driving,
-        )
+        
 
         self.wp_encoder = WaypointInputAdaptor(
             token_size=self.language_model.hidden_size,
@@ -94,20 +93,65 @@ class DrivingModel(pl.LightningModule):
             hidden_size2=512,
             # norm_layer=NormZeroOne(min_max=(-32.0, 32.0)),
         )
-
         if 'tokenizer' in self.processor.__dict__:
             self.tokenizer = self.processor.tokenizer
         else:
             self.tokenizer = self.processor
 
-
+        
+        if not self.adaption_train:
+            self.scheduler = None
+            
+        else:
+            # language model alignment for scheduler, init
+            self.scheduler_model.num_hidden_layers = self.language_model.config.num_hidden_layers
+            self.scheduler_model.num_attention_heads = self.language_model.config.num_attention_heads
+            self.scheduler_model.hidden_size = self.language_model.config.hidden_size
+             
+            self.scheduler = hydra.utils.instantiate(
+                self.scheduler_model, # model config
+                _recursive_=False
+            )
+            
+            current_path = Path(__file__).resolve()
+            project_path = current_path.parent.parent.parent
+            self.simlingo_checkpoint = os.path.join(project_path, self.simlingo_checkpoint)
+            if os.path.isdir(self.simlingo_checkpoint):
+                state_dict = get_fp32_state_dict_from_zero_checkpoint(self.simlingo_checkpoint)
+            else:
+                state_dict = torch.load(self.simlingo_checkpoint, map_location="cpu")
+            self.load_state_dict(state_dict,strict=False) # 加载simlingo原始参数
+            
+        self.language_model.get_lora_model() # 构造llm的PEFT模型
+        self.adaptors = AdaptorList(
+            language=LanguageAdaptor(self.language_model), # 依赖language_model的peft参数
+            driving=driving, # 此处该参数还没有被加载进来
+            latency=LatencyAdaptor()
+        )
+        
+        
+        if self.adaption_train:
+            self.load_state_dict(state_dict,strict=False) # 此处language参数应该不匹配了。主要是为了加载adaptor的参数。
+            # 冻结除language model和scheduler外的所有参数
+            # language model内部初始化的时候已实现adaption_train判断以及部分冻结
+            self.vision_model.requires_grad_(False)
+            self.wp_encoder.requires_grad_(False)
+            self.adaptors.driving.requires_grad_(False)
+            
+            self.scheduler.requires_grad_(True)
+        
     def forward(self,
-        example: DrivingExample,
+        example: DrivingExample, # TODO 
         return_language: Optional[bool] = None,
         prompt_ids: Optional[Tensor] = None,
+        # [新增] 接收外部传入的 latency 参数
+        latency: Optional[float] = None,
     ) -> DrivingOutput:
         """
         Samples a trajectory from the model.
+        推理阶段, 若predict_language = ture, 则先生成CoT，再直接拼接CoT跟wps, 然后提取wps token
+        若predict_language = false, 则是prompt+wps前向传播,后提取wps token
+        
         """
         self.speed_wps, self.route, self.language = None, None, []
         try:
@@ -116,23 +160,44 @@ class DrivingModel(pl.LightningModule):
             driving_input = example
         
         if driving_input is not None:
-            adaptor_dict = self.adaptors(example, inference=True)
-            adaptor_dict = self.vision_model.image_encoder.replace_placeholder_tokens(
+            adaptor_dict = self.adaptors(example, inference=True,latency=latency,scheduler=self.scheduler)
+
+            adaptor_dict = replace_placeholder_tokens(
                     adaptor_dict = adaptor_dict,
                     pixel_values = driving_input.camera_images,
                     placeholder_values = driving_input.prompt_inference.placeholder_values,
+                    image_encoder = self.vision_model.image_encoder,
                     wp_encoder = self.wp_encoder,
                 )
             
-            input_embeds_all = adaptor_dict["language_inputs"]
+            input_embeds_all = adaptor_dict["language_inputs"] ### 这块只拿language inputs, 为什么?
+            # 拼接上latency:
+            if adaptor_dict.get('latency_inputs') is not None:
+                input_embeds_all = torch.cat((input_embeds_all, adaptor_dict['latency_inputs']), dim=1)
+            
             attention_masks = adaptor_dict['language_inputs_mask']
-
+            
+            latency_value = adaptor_dict.get('latency_values')
+            latency_token_pos = None
+            if latency_value is not None:
+                latency_token_pos = torch.full(
+                    size = (input_embeds_all.size(0),),
+                    fill_value = adaptor_dict['split_sizes'][0], # 只使用了language inputs
+                    device = input_embeds_all.device
+                )
 
         if self.predict_language:
             # per batch item because of padding
             for b_idx, (input_embed, attention_mask) in enumerate(zip(input_embeds_all, attention_masks)):
                 input_embed = input_embed.unsqueeze(0)
                 attention_mask = attention_mask.unsqueeze(0)
+                
+                # 提取当前样本的latency
+                current_latency = None
+                if latency_value is not None:    
+                    current_latency = latency_value[b_idx:b_idx+1] # -> 1-d tensor [1]
+                # ================================================
+                
                 if self.language_model.variant == 'OpenGVLab/InternVL2-4B':
                     eos = self.tokenizer.added_tokens_encoder['<|end|>']
                 elif self.language_model.variant == 'OpenGVLab/InternVL2-2B':
@@ -149,14 +214,27 @@ class DrivingModel(pl.LightningModule):
                     logit_matrix=self.adaptors.language.lm_head.weight,
                     attention_mask=attention_mask,
                     # position_ids=position_ids,
-                )
+                    # 传入 AdaLLaVA 参数
+                    latency=current_latency, # [修改] 使用 current_latency
+                    latency_token_position = latency_token_pos,
+                    scheduler=self.scheduler.forward,
+                    )
                 
-                inputs_driving = self.adaptors.driving(driving_input)
-                input_embed_concat = torch.cat((input_embeds, inputs_driving["inputs"][b_idx].unsqueeze(0)), dim=1)
-                features, logits = self.language_model.forward(input_embed_concat)
+                # TODO: 这块latency没有输入。
+                # 获得驾驶输入，拼接CoT与驾驶输入，进行驾驶决策推理
+                inputs_driving = self.adaptors.driving(driving_input) # 冗余？此时adaptor_dict中应该已经包含了
+                # TODO: 这是直接拼接CoT和wps?那么跟训练的prompt+wps模式，相差有点大了。
+                input_embed_concat = torch.cat((input_embeds, inputs_driving["inputs"][b_idx].unsqueeze(0)), dim=1) 
+                features, logits = self.language_model.forward( 
+                    input_embed_concat,
+                    # 传入 AdaLLaVA 参数
+                    latency=current_latency, # [修改] 使用 current_latency
+                    latency_token_position=latency_token_pos[b_idx].unsqueeze(0) if latency_token_pos is not None else None,
+                    scheduler=self.scheduler.forward,
+                    )
 
+                # 放弃维护adaptor中的split_size，此处手动计算，提取出wps tokens来预测。因为推理阶段无需再调用adaptor的 compute loss 了
                 len_driving = inputs_driving["inputs"].size(1)
-
                 driving_features = features[:, -len_driving:]
                 driving_logits = logits[:, -len_driving:]
                 predictions = self.adaptors.driving.get_predictions(driving_features, driving_logits)
@@ -175,8 +253,8 @@ class DrivingModel(pl.LightningModule):
                                 
                 self.language.append(self.tokenizer.batch_decode(sampled_tokens, skip_special_tokens=True)[0])
         else:
-            # single forward pass same as during training so we can use the same function
-            features = self.forward_model(driving_input, adaptor_dict)
+            # 单次前向传播 (用于验证或非语言输出模式)
+            features = self.forward_model(driving_input, adaptor_dict, latency=latency) # <--- 记得传 latency
             outputs_by_adaptor = self.adaptors.split_outputs_by_adaptor(adaptor_dict, features)
             predictions = self.adaptors.driving.get_predictions(outputs_by_adaptor['driving'])
 
@@ -191,22 +269,33 @@ class DrivingModel(pl.LightningModule):
                       driving_input: DrivingInput, 
                       adaptor_dict: Dict, 
                       driving_labels: DrivingLabel = None,
-                    #   language_embeds: Tensor = None
                       ) -> Tensor:
         """
         Forward model conditioned on the given driving input.
-        """
         
-        adaptor_dict = self.vision_model.image_encoder.replace_placeholder_tokens(
-            adaptor_dict = adaptor_dict,
-            pixel_values = driving_input.camera_images,
-            placeholder_values = driving_input.prompt.placeholder_values,
-            wp_encoder = self.wp_encoder,
+        """
+        adaptor_dict = replace_placeholder_tokens(
+                adaptor_dict = adaptor_dict,
+                pixel_values = driving_input.camera_images,
+                placeholder_values = driving_input.prompt_inference.placeholder_values,
+                image_encoder = self.vision_model.image_encoder,
+                wp_encoder = self.wp_encoder,
         )
-
         position_ids = None
         adaptor_embeds = adaptor_dict["inputs"]
         adaptor_mask = adaptor_dict['inputs_mask']
+        
+        latency_value = adaptor_dict.get('latency_values')
+        latency_embeds = adaptor_dict.get('latency_inputs')
+        if latency_embeds is not None:
+            latency_token_position = torch.full(
+                size = (latency_embeds.size(0),),
+                fill_value = adaptor_dict['split_sizes'][0]+adaptor_dict['split_sizes'][1], # latency在最后
+                device = latency_embeds.device
+            )
+        else:
+            latency_token_position = None
+        
 
         input_embeds = adaptor_embeds
         input_embeds = input_embeds.to(
@@ -220,6 +309,10 @@ class DrivingModel(pl.LightningModule):
             inputs_embeds=input_embeds,
             output_hidden_states=True,
             return_dict=True,
+            # AdaLLaVA
+            latency = latency_value,
+            scheduler = self.scheduler.forward,
+            latency_token_position = latency_token_position
         )
         features = outputs.hidden_states[-1]
         logits = outputs[0]
@@ -233,7 +326,7 @@ class DrivingModel(pl.LightningModule):
         return adaptor_features, adaptor_logits
     
 
-    def forward_loss(self, example: DrivingExample, per_sample=False) -> TrainingOutput:
+    def forward_loss(self, example: DrivingExample, per_sample=False,latency=None) -> TrainingOutput:
         """
         Forward pass of the model for a driving input, followed by
         computing the next token cross-entropy loss.
@@ -243,12 +336,26 @@ class DrivingModel(pl.LightningModule):
             text_ids: Text ids tensor of shape [B, T]. These are input to the model and used in the loss.
             text_mask: Text mask tensor of shape [B, T].
         """
+        # === [新增] 训练时的随机采样逻辑 ===
+        # 如果是Adallava训练模式，且外部没指定 latency，我们就在这里随机生成 TODO 后面包装成可以参数指定latency生成模式的
+        # if self.adaption_train and latency is None:
 
-        adaptor_dict = self.adaptors(example)
+        if self.adaption_train:
+            if self.computation_budget == 'random':
+                import random
+                # 策略：50% 概率全速 (1.0), 50% 概率随机减速 (0.25~1.0)
+                if random.random() < 0.5:
+                     latency = 1.0
+                else:
+                     latency = random.uniform(0.25, 1.0)
+            if self.computation_budget == 'fixed':
+                latency = 1.0 # test
+        adaptor_dict = self.adaptors(example, latency=latency, scheduler=self.scheduler)
         adaptor_embeds = adaptor_dict["inputs"]
         adaptor_mask = adaptor_dict['inputs_mask']
 
         adaptor_features, adaptor_logits = self.forward_model(example.driving_input, adaptor_dict, driving_labels=example.driving_label)
+
         loss_dict = self.adaptors.compute_loss(adaptor_features, adaptor_logits, adaptor_dict, example)
 
         loss_dict_only_losses = {k:v for k, v in loss_dict.items() if k.endswith("loss")}
@@ -716,8 +823,12 @@ class DrivingModel(pl.LightningModule):
 
 
     def configure_optimizers(self):
+        # [修改] 仅优化 requires_grad=True 的参数 TODO: check when adaption_train = Ture and = False
+        params = [p for p in self.parameters() if p.requires_grad]
+        print(f"Optimizer optimization over {len(params)} tensors (filtered from total).")
+        
         optimizer = AdamW(
-            self.parameters(),
+            params,
             lr=self.lr,
             weight_decay=self.weight_decay,
             betas=self.betas,
@@ -726,7 +837,7 @@ class DrivingModel(pl.LightningModule):
             max_steps = self.trainer.estimated_stepping_batches
         else:
             max_steps = self.trainer.max_steps
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer, max_lr=self.lr, total_steps=max_steps, pct_start=self.pct_start, verbose=False
         )
-        return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "frequency": 1, "interval": "step"}}
+        return {"optimizer": optimizer, "lr_scheduler": {"scheduler": lr_scheduler, "frequency": 1, "interval": "step"}}

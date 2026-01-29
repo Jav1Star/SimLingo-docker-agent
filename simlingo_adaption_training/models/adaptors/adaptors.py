@@ -4,8 +4,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from simlingo_training.utils.custom_types import DrivingExample
-
+from simlingo_adaption_training.utils.custom_types import DrivingExample
+from ..scheduler.scheduler_utils import latency_quantizing
 
 def cross_track_error(points: Tensor, path: Tensor):
     """
@@ -114,7 +114,7 @@ class DrivingAdaptor(nn.Module):
                 nn.Linear(hidden_size, mlp_dim*2), nn.SiLU(True),nn.Linear(mlp_dim*2, mlp_dim), nn.SiLU(True), nn.Linear(mlp_dim, 2, bias=False)
             )
             
-            self.queries = {'route': self.query_embeds_wps}
+            self.queries = {'route': self.query_embeds_wps} # route predict token, learnable token
             self.sizes = {'route': self.future_waypoints}
             self.heads["route"] = self.route_head
             self.order.append('route')
@@ -126,7 +126,7 @@ class DrivingAdaptor(nn.Module):
         else:
             raise ValueError(f"speed_wps_mode must be '1d' or '2d', not {speed_wps_mode}")
         self.future_speed_waypoints = 10 #TODO: read from config
-        self.query_embeds_speed = nn.Parameter(0.02 * torch.randn((1, self.future_speed_waypoints, hidden_size)))
+        self.query_embeds_speed = nn.Parameter(0.02 * torch.randn((1, self.future_speed_waypoints, hidden_size))) # speed predict token, learnable token
         self.speed_wps_head = nn.Sequential(
                 nn.Linear(hidden_size, mlp_dim), nn.SiLU(True), nn.Linear(mlp_dim, dim, bias=False)
             )
@@ -146,9 +146,10 @@ class DrivingAdaptor(nn.Module):
         except AttributeError:
             driving_input = driving_example
         
-        b = driving_input.camera_images.shape[0]
+        b = driving_input.camera_images.shape[0] # plt / wandb
         inputs = None
 
+        # self.queries,即包括了route和speed_wps的query_embeds,即对应的任务query tokens.
         for input_type in self.order:
             query_embed = self.queries[input_type]
             if inputs is None:
@@ -247,11 +248,11 @@ class LanguageAdaptor(nn.Module):
             label = driving_input.prompt_inference
         else:
             label = driving_input.prompt
-            
+        
         if label is not None:
-            ids = label.phrase_ids.long()
-            ids_valid = label.phrase_valid  # true => is fed into model
-            ids_mask = label.loss_masking # true => takes part in loss
+            ids = label.phrase_ids.long() # 文本对应的token编号. 自然语言文本为：label.language_string
+            ids_valid = label.phrase_valid  # true => is fed into model; 掩码：哪些位置是真字，哪些是填充
+            ids_mask = label.loss_masking # true => takes part in loss; 掩码：计算 Loss 时要算哪些词
 
         inputs = self.embed_tokens(ids.clamp(min=0, max=self.embed_tokens.num_embeddings - 1))
         return {"inputs": inputs, "inputs_mask": ids_valid, "_ids": ids, "_ids_mask": ids_mask}
@@ -273,6 +274,62 @@ class LanguageAdaptor(nn.Module):
         ).view_as(labels)
         return {"language_loss": (language_loss, labels.ne(-1))}
 
+
+class LatencyAdaptor(nn.Module):
+    def __init__(self):
+        super().__init__()
+        
+    def forward(self, example: DrivingExample, scheduler=None, latency=0, **kwargs) -> Dict[str, Tensor]:
+        """
+        Args:
+            example: 用于获取 batch_size (如果 latency 为 None 需要随机生成或默认)
+            scheduler: 必须传入，用于执行 latency_encoding
+            latency: 外部传入的 latency 值 [Batch] 或 [1] 或 float
+        """
+        
+        if latency is None: # 通过检测foward的部分。
+            latency = 1 
+        # 确保 latency 是 Tensor [Batch]
+        try:
+            driving_input = example.driving_input
+        except AttributeError:
+            driving_input = example
+        
+        bs = driving_input.camera_images.shape[0]
+        dtype = driving_input.camera_images.dtype
+        device = driving_input.camera_images.device
+        
+        # 简单的标量转 Tensor 逻辑
+        if not isinstance(latency, torch.Tensor):
+            latency_tensor = torch.full((bs,), latency, dtype=dtype, device=device)
+        else:
+            if latency.ndim == 0:
+                latency_tensor = latency.expand(bs).to(device).to(dtype)
+            else:
+                latency_tensor = latency.to(device).to(dtype)
+        
+        # 编码 (使用 Scheduler)
+        # 产生的 shape 通常是 [Batch, 1, Hidden]
+        # 注意：scheduler.latency_encoding 需要返回 unsqueeze(1) 后的结果或者在这里手动加维度
+        inputs = scheduler.latency_encoding(latency_tensor) 
+        
+        if inputs.dim() == 2:
+            inputs = inputs.unsqueeze(1) # [Batch, 1, Hidden]
+
+        # 4. 生成 Mask
+        inputs_mask = torch.ones((bs, 1), dtype=torch.bool, device=device)
+
+        return {
+            "inputs": inputs, 
+            "inputs_mask": inputs_mask,
+            "values": latency_tensor #以此保留原始值以备后用
+        }
+
+    def compute_loss(self, *args, **kwargs):
+        # Latency 通常作为条件输入，不计算自身的 Loss
+        # TODO 这能传回scheduler吗
+        return {}
+
 class AdaptorList(nn.Module):
     """
     Each adaptor is responsible for converting a driving example
@@ -284,11 +341,12 @@ class AdaptorList(nn.Module):
         self,
         driving: Optional[DrivingAdaptor] = None,
         language: Optional[LanguageAdaptor] = None,
+        latency: Optional[LatencyAdaptor] = None,
     ):
         super().__init__()
         self.driving = driving
         self.language = language
-
+        self.latency = latency
     @property
     def adaptors(self):
         dct: Dict[str, Adaptor] = {}
@@ -296,6 +354,8 @@ class AdaptorList(nn.Module):
             dct["language"] = self.language
         if self.driving is not None:
             dct["driving"] = self.driving
+        if self.latency is not None:
+            dct["latency"] = self.latency
         return dct
 
     def forward(self, example: DrivingExample, **kwargs) -> Dict[str, Tensor]:
@@ -311,7 +371,7 @@ class AdaptorList(nn.Module):
             adaptor_input_dict = adaptor.forward(example, **kwargs)
             inputs_list.append(adaptor_input_dict["inputs"])
             inputs_mask_list.append(adaptor_input_dict["inputs_mask"])
-            input_dict.update({key + "_" + k: v for k, v in adaptor_input_dict.items()})
+            input_dict.update({key + "_" + k: v for k, v in adaptor_input_dict.items()}) # all
 
         inputs = torch.cat(inputs_list, dim=1)
         inputs_mask = torch.cat(inputs_mask_list, dim=1)
@@ -376,3 +436,139 @@ def _gather_from_dict(d: Dict[str, Tensor], prefix: str):
         if k.startswith(prefix):
             out[k[len(prefix) :]] = v
     return out
+    
+def replace_placeholder_tokens(
+    adaptor_dict: torch.LongTensor = None,
+    pixel_values: torch.FloatTensor = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    output_attentions: Optional[bool] = None,
+    output_hidden_states: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+    placeholder_values: Optional[List[dict]] = None,
+    wp_encoder: Optional[nn.Module] = None,
+    image_encoder: Optional[nn.Module] = None,
+):
+    '''
+        1.原地替换adaptor_dict['language_inputs']中的<IMG_CONTEXT>占位符为图像特征。
+        因此要求inputs_ids必须包含对应ViT提取出来的token数目的占位符, 硬编码了。
+        
+        2.原地编码waypoints并替换对应占位符。waypoints的真实值在palceholder_values中。
+        
+        3.latency在LatencyAdaptor中处理了。TODO: 梯度传递是否存在问题？
+    '''
+    if 'tokenizer' in image_encoder.processor.__dict__:
+        image_encoder.tokenizer = image_encoder.processor.tokenizer
+    else:
+        image_encoder.tokenizer = image_encoder.processor
+
+    IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
+    img_context_token_id = image_encoder.tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
+    image_encoder.img_context_token_id = img_context_token_id
+    
+    output_attentions = output_attentions if output_attentions is not None else image_encoder.model.config.output_attentions
+    output_hidden_states = (
+        output_hidden_states if output_hidden_states is not None else image_encoder.model.config.output_hidden_states
+    )
+    return_dict = return_dict if return_dict is not None else image_encoder.model.config.use_return_dict
+
+    if inputs_embeds is None:
+        # 1. Extract the input embeddings
+        # In case image_token_index is not in the embeddings (extra token but embedding don't have it)
+        # for_inputs_embeds_ids = input_ids.clone()
+        # for_inputs_embeds_ids[(input_ids >= image_encoder.num_embeddings)] = 0
+        # inputs_embeds = language_model.model.get_input_embeddings()(for_inputs_embeds_ids)
+        inputs_embeds = adaptor_dict['language_inputs']
+        input_ids = adaptor_dict['language__ids']
+        
+        # 2a replace placeholder
+        smallest_added_id = image_encoder.tokenizer.additional_special_tokens_ids[0]
+        special_ids = torch.tensor(list(set(input_ids[(input_ids >= smallest_added_id)].tolist())), device=input_ids.device)
+        # special_ids = torch.tensor(list(set(ids[(ids > 50294)].tolist())), device=ids.device)
+        special_ids = special_ids.view(-1, 1, 1)
+        batch_size, seq_len = input_ids.shape
+
+        if special_ids.size(0) > 0 and len(placeholder_values) > 0:
+            wp_encoder_dtype = wp_encoder.mlp[0].weight.dtype
+
+            # Create a mask where the special_ids are located
+            mask = input_ids == special_ids
+
+            # Convert the mask to float and use torch.cumsum to get cumulative sum along the sequence length dimension
+            cumsum_mask = torch.cumsum(mask.float(), dim=2)
+
+            # Create a mask to get the first occurrence by checking where cumsum is 1
+            first_occurrence_mask = (cumsum_mask == 1) & mask
+
+            # Use torch.argmax to get the indices of the first occurrence
+            first_occurrences = torch.argmax(first_occurrence_mask.float(), dim=2)
+            # swap the dimensions to get the batch and sequence length
+            first_occurrences = first_occurrences.transpose(0, 1)
+
+            # get coords from label.placeholder_values with batch and special_id as key
+            special_token_pos = first_occurrences.nonzero()
+
+            coords = [torch.tensor(placeholder_values[b_id][special_ids[key_id].item()], device=input_ids.device, dtype=wp_encoder_dtype) for key_id, b_id in zip(special_token_pos[:, 1], special_token_pos[:, 0])]
+            coords_length_org = [len(coord) for coord in coords]
+            coords = torch.cat(coords)
+            wp_embeds = wp_encoder(coords.unsqueeze(0)).squeeze(0)
+            wp_embeds = torch.split(wp_embeds, coords_length_org)
+
+            first_occurrences_filtered = [first_occurrences[i] for i in special_token_pos[:, 0]]
+
+            for i, (pos, first_occurrence) in enumerate(zip(special_token_pos, first_occurrences_filtered)):
+                start = first_occurrence[pos[1]]
+                end = start + coords_length_org[i]
+                inputs_embeds[pos[0], start:end] = wp_embeds[i]
+
+        # 2. Merge text and images
+        if pixel_values is not None and input_ids.shape[1] != 1 and pixel_values.size(0) > 0:
+            all_pixel_values = [pixel_values]
+                
+            all_image_features = []
+            all_feature_lens = []
+            _, N_embed, C_embed = inputs_embeds.shape
+            
+            for pixel_values_tmp in all_pixel_values:
+                BS, T, NP, C, H, W = pixel_values_tmp.shape
+                assert T == 1, "Only one frame is supported for now"
+                # for multi-frame support, we need to change the code here
+                
+                pixel_values_tmp = pixel_values_tmp.view(BS, NP, C, H, W)
+
+                if pixel_values_tmp.dim() == 5:
+                    pixel_values_tmp = pixel_values_tmp.reshape(BS*NP, C, H, W)
+                elif pixel_values_tmp.dim() != 4:
+                    # otherwise has to be stacked from list of (num_patches, num_channels, height, width)
+                    raise ValueError(f"pixel_values of shape {pixel_values_tmp.shape}, expect to be of 4 or 5 dimensions")
+                
+                image_features = image_encoder.model.extract_feature(pixel_values_tmp)
+                image_features = image_features.reshape(-1, C_embed)
+                                    
+                all_image_features.append(image_features)
+
+            vit_embeds = torch.cat(all_image_features, dim=0)
+            inputs_embeds = inputs_embeds.reshape(BS * N_embed, C_embed)
+            input_ids = input_ids.reshape(BS * N_embed)
+            selected = (input_ids == image_encoder.img_context_token_id)
+            try:
+                inputs_embeds[selected] = inputs_embeds[selected] * 0.0 + vit_embeds.reshape(-1, C_embed)
+            except Exception as e:
+                vit_embeds = vit_embeds.reshape(-1, C)
+                print(f'warning: {e}, inputs_embeds[selected].shape={inputs_embeds[selected].shape}, '
+                    f'vit_embeds.shape={vit_embeds.shape}')
+                n_token = selected.sum()
+                inputs_embeds[selected] = inputs_embeds[selected] * 0.0 + vit_embeds[:n_token]
+            inputs_embeds = inputs_embeds.reshape(BS, N_embed, C_embed)
+            input_ids = input_ids.reshape(BS, N_embed)
+        # pixel_values is not None but is empty ---> text only cases
+        elif pixel_values is not None and input_ids.shape[1] != 1 and pixel_values.size(0) == 0:
+            # there are no images
+            pass
+        
+        adaptor_dict['language_inputs'] = inputs_embeds
+        start_id = adaptor_dict['perm'][:,0]
+        
+        for b, i in enumerate(start_id):
+            adaptor_dict['inputs'][b][:len(adaptor_dict['language_inputs'][b])-i] = inputs_embeds[b][i:]
+        
+    return adaptor_dict

@@ -9,8 +9,7 @@ class VLMEncoderConfig:
     variant: str = 'OpenGVLab/InternVL2-1B'
     embed_dim: int = 512
     freeze: bool = False
-
-    _target_: str = "simlingo_training.models.encoder.vlm.VLMEncoderModel"
+    _target_: str = "simlingo_adaption_training.models.encoder.vlm.VLMEncoderModel"
 
 
 @dataclass
@@ -20,15 +19,28 @@ class LanguageModelConfig:
     lora_alpha: int = 64
     lora_r: int = 32
     lora_dropout: float = 0.1
+    num_prefix_layers: Optional[int] = None
+    adaption_train: bool = False
+    _target_: str = "simlingo_adaption_training.models.language_model.llm.LLM"
 
-    _target_: str = "simlingo_training.models.language_model.llm.LLM"
-
+@dataclass
+class schedulerConfig:
+    tau: int = 5
+    is_hard: bool = True
+    threshold: float = 0.5
+    bias: bool = True
+    num_prefix_layers: int = 2
+    num_hidden_layers: int = 0
+    num_attention_heads: int = 0
+    hidden_size: int = 0
+    _target_: str = "simlingo_adaption_training.models.scheduler.simple_scheduler.SimpleScheduler_L"
 
 @dataclass
 class DrivingModelConfig:
     vision_model: Any
     language_model: Any
-
+    scheduler_model: Any
+    
     lr: float = 5e-2
 
     weight_decay: float = 0.1
@@ -36,8 +48,12 @@ class DrivingModelConfig:
     pct_start: float = 0.05
     speed_wps_mode: str = '2d'
     predict_route_as_wps: bool = True
-
-    _target_: str = "simlingo_training.models.driving.DrivingModel"
+    
+    adaption_train: bool = False
+    simlingo_checkpoint: Optional[str] = None
+    computation_budget: str = 'fixed' # fixed, random
+    
+    _target_: str = "simlingo_adaption_training.models.driving.DrivingModel"
 
 
 @dataclass
@@ -76,22 +92,22 @@ class DatasetBaseConfig:
 @dataclass
 class DrivingDatasetConfig:
     # base: DatasetBaseConfig = field(default_factory=DatasetBaseConfig)
-    _target_: str = "simlingo_training.dataloader.dataset_driving.Data_Driving"
+    _target_: str = "simlingo_adaption_training.dataloader.dataset_driving.Data_Driving"
     
 @dataclass
 class DreamerDatasetConfig:
     # base: DatasetBaseConfig = field(default_factory=DatasetBaseConfig)
-    _target_: str = "simlingo_training.dataloader.dataset_dreamer.Data_Dreamer"
+    _target_: str = "simlingo_adaption_training.dataloader.dataset_dreamer.Data_Dreamer"
     
 @dataclass
 class QADatasetConfig:
     # base: DatasetBaseConfig = field(default_factory=DatasetBaseConfig)
-    _target_: str = "simlingo_training.dataloader.dataset_eval_qa_comm.Data_Eval"
+    _target_: str = "simlingo_adaption_training.dataloader.dataset_eval_qa_comm.Data_Eval"
     
 @dataclass
 class InstEvalDatasetConfig:
     # base: DatasetBaseConfig = field(default_factory=DatasetBaseConfig)
-    _target_: str = "simlingo_training.dataloader.dataset_eval_dreamer.Eval_Dreamer"
+    _target_: str = "simlingo_adaption_training.dataloader.dataset_eval_dreamer.Eval_Dreamer"
 
 @dataclass
 class DrivingDataModuleConfig:
@@ -109,8 +125,7 @@ class DrivingDataModuleConfig:
     train_partitions: Optional[Dict[str, float]] = None
     train_partitions_dreamer: Optional[Dict[str, float]] = None
     use_global_img: bool = False
-    
-    _target_: str = "simlingo_training.dataloader.datamodule.DataModule"
+    _target_: str = "simlingo_adaption_training.dataloader.datamodule.DataModule"
 
 
 @dataclass
@@ -119,7 +134,7 @@ class TrainConfig:
     data_module: Any
 
     seed: int = 42
-    gpus: int = 8
+    gpus: int = 1 # default to 1 GPU
 
     resume: bool = False
     resume_path: Optional[str] = None
@@ -130,14 +145,6 @@ class TrainConfig:
 
     enable_wandb: bool = True
     wandb_project: Optional[str] = "simlingo"
-    if debug:
-        wandb_name: Optional[str] = f"debug"
-        gpus: int = 1
-    else:
-        # wandb_name: Optional[str] = f"debug"
-        name: Optional[str] = 'test'
-        wandb_name: Optional[str] = f"{time.strftime('%Y_%m_%d_%H_%M_%S')}"
-    
     # max_steps: int = 100_000
     max_epochs: int = 20
     precision: str = "16-mixed"
@@ -146,7 +153,16 @@ class TrainConfig:
     val_every_n_epochs: int = 1
 
     checkpoint: Optional[str] = None
+    adaption_train: bool = False
+    simlingo_checkpoint: Optional[str] = None
 
+    if debug:
+        wandb_name: Optional[str] = f"debug"
+    else:
+        # wandb_name: Optional[str] = f"debug"
+        name: Optional[str] = 'test'
+        wandb_name: Optional[str] = f"{time.strftime('%Y_%m_%d_%H_%M_%S')}"
+    
 
 def register_configs():
     cs = ConfigStore.instance()

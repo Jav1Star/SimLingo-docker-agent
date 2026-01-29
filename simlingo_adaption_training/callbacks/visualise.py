@@ -14,7 +14,7 @@ from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.utilities import rank_zero_only
 from hydra.utils import get_original_cwd
 
-from simlingo_training.utils.custom_types import DrivingExample
+from simlingo_adaption_training.utils.custom_types import DrivingExample
 
 _STEPS_TO_FIRST_IDX: Dict[int, int] = {}
 
@@ -217,9 +217,9 @@ def visualise_waypoints(batch: DrivingExample, waypoints, route=False, language_
             lines_wrap = len(textwrap.wrap(wrapped_text, width=80))
             lines_wrap_pred = len(textwrap.wrap(wrapped_pred_text, width=80))
         
-            white_draw.text((10, y_curr), f'{i} GT: {wrapped_text}', fill="black", font=ImageFont.truetype(f"{repo_root}/arial.ttf", 20))
+            white_draw.text((10, y_curr), f'{i} GT: {wrapped_text}', fill="black", font=ImageFont.truetype(f"{repo_root}/simlingo_adaption_training/arial.ttf", 20))
             y_curr += 20*lines_wrap
-            white_draw.text((10, y_curr), f'{i} Pred: {wrapped_pred_text}', fill="black", font=ImageFont.truetype(f"{repo_root}/arial.ttf", 20))
+            white_draw.text((10, y_curr), f'{i} Pred: {wrapped_pred_text}', fill="black", font=ImageFont.truetype(f"{repo_root}/simlingo_adaption_training/arial.ttf", 20))
             y_curr += 20*lines_wrap_pred + 20
         ax = fig.add_subplot(rows, cols, i + 1)
         # Predicted waypoints

@@ -14,8 +14,8 @@ import re
 import gzip
 
 import torch
-from simlingo_training.utils.custom_types import DatasetOutput
-from simlingo_training.dataloader.dataset_base import BaseDataset
+from simlingo_adaption_training.utils.custom_types import DatasetOutput
+from simlingo_adaption_training.dataloader.dataset_base import BaseDataset
 
 
 VIZ_DATA = False
@@ -263,7 +263,8 @@ class Data_Driving(BaseDataset):  # pylint: disable=locally-disabled, invalid-na
         # recalculate the probabilties after warmup (when more than 1000 samples have been sampled)
         # we do this in case we dont have qa or commentary for every sample otherwise it would lead to undersampling one of those
         if sum(self.num_sampled_per_type.values()) > 10000 and sum(self.num_sampled_per_type.values()) % 10000 == 0:
-            self.prompt_probabilities = {key: 1/value for key, value in self.num_sampled_per_type.items()}
+            # avoid division by zero
+            self.prompt_probabilities = {key: 1/(value + 1e-6) for key, value in self.num_sampled_per_type.items()}
             self.prompt_probabilities = {key: value/sum(self.prompt_probabilities.values()) for key, value in self.prompt_probabilities.items()}
             print(f"Prompt probabilities: {self.prompt_probabilities}")
             print(f"Number of samples per type: {self.num_sampled_per_type}")
@@ -326,7 +327,7 @@ class Data_Driving(BaseDataset):  # pylint: disable=locally-disabled, invalid-na
 
 if __name__ == "__main__":
     from hydra import compose, initialize
-    from simlingo_training.config import TrainConfig
+    from simlingo_adaption_training.config import TrainConfig
     
     # seed all
     seed = 42
