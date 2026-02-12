@@ -86,6 +86,7 @@ def get_weather_id(weather_conditions):
             return case.items()[0][1]
     return None
 
+
 class LeaderboardEvaluator(object):
     """
     Main class of the Leaderboard. Everything is handled from here,
@@ -210,13 +211,10 @@ class LeaderboardEvaluator(object):
         self.carla_path = os.environ["CARLA_ROOT"]
         if not args.no_server_launch:
             args.port = find_free_port(args.port)
-        if args.gpu_rank == 0:
-            gpu_rank = 2  
-        elif args.gpu_rank == 1:
-            gpu_rank = 3 # vulkan识别的gpu编号不一致，甚至有点动态变化。奇怪
+        
         
         if not args.no_server_launch:
-            cmd1 = f"{os.path.join(self.carla_path, 'CarlaUE4.sh')} -RenderOffScreen -nosound -carla-rpc-port={args.port} -graphicsadapter={gpu_rank}"
+            cmd1 = f"{os.path.join(self.carla_path, 'CarlaUE4.sh')} -RenderOffScreen -nosound -carla-rpc-port={args.port} -graphicsadapter={args.gpu_rank}"
             self.server = subprocess.Popen(cmd1, shell=True, preexec_fn=os.setsid)
             print(cmd1, self.server.returncode, flush=True)
             atexit.register(os.killpg, self.server.pid, signal.SIGKILL)

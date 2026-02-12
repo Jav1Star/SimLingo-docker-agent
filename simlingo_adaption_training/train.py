@@ -180,7 +180,7 @@ def main(cfg: TrainConfig):
 
     # 模型权重保存回调函数
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
-        save_top_k=-1, # 保留每个epoch的模型权重
+        save_top_k=2, # 保留每个epoch的模型权重
         monitor="val/loss",
         mode="min",
         dirpath="./checkpoints",
@@ -197,8 +197,8 @@ def main(cfg: TrainConfig):
         checkpoint_callback, 
         model_summary, 
         # ThroughputMonitor(batch_size_fn=lambda batch: batch.driving_input.camera_images.size(0)), 
-        #VisualiseCallback(interval=1000, val_interval=1000) # 每隔interval可视化预测结果， 可视化路径点对比图和文本预测对比图
-        VisualiseCallback(interval=1, val_interval=1) # 每隔一定步数可视化预测结果， 可视化路径点对比图和文本预测对比图
+        VisualiseCallback(interval=2000, val_interval=2000) # 每隔interval可视化预测结果， 可视化路径点对比图和文本预测对比图 # 很影响速度
+        #VisualiseCallback(interval=1, val_interval=1) # 每隔一定步数可视化预测结果， 可视化路径点对比图和文本预测对比图
     ]
     if not cfg.debug: 
         callbacks.append(lr_monitor)

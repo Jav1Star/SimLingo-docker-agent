@@ -110,7 +110,7 @@ def main(cfg: TrainConfig):
 
     # 模型权重保存回调函数
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
-        save_top_k=-1,
+        save_top_k=2,
         monitor=None,
         dirpath="./checkpoints",
         filename="{epoch:03d}",
@@ -126,7 +126,7 @@ def main(cfg: TrainConfig):
         checkpoint_callback, 
         model_summary, 
         # ThroughputMonitor(batch_size_fn=lambda batch: batch.driving_input.camera_images.size(0)), 
-        VisualiseCallback(interval=1, val_interval=1) # 每隔一定步数可视化预测结果
+        VisualiseCallback(interval=2000, val_interval=2000) # 每隔一定步数可视化预测结果
     ]
     if not cfg.debug: 
         callbacks.append(lr_monitor)

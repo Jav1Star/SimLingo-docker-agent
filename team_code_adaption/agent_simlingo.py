@@ -1,5 +1,5 @@
 """
-partially taken from https://github.com/autonomousvision/carla_garage/blob/leaderboard_2/team_code/sensor_agent.py
+partially taken from https://github.com/autonomousvision/carla_garage/blob/leaderboard_2/team_code_adaption/sensor_agent.py
 (MIT licence)
 """
 
@@ -34,7 +34,7 @@ from scipy.optimize import fsolve
 from transformers import AutoConfig, AutoProcessor
 
 import scenario_logger
-import team_code.transfuser_utils as t_u
+import team_code_adaption.transfuser_utils as t_u
 from scenario_logger import ScenarioLogger
 # # --- DEBUG: 打印 sys.path 的内容 ---
 # print("--- EVALUATOR: sys.path after insert ---", flush=True)
@@ -44,11 +44,11 @@ from scenario_logger import ScenarioLogger
 # print(os.environ.get('PYTHONPATH'))
 # print("------------------------------------", flush=True)
 # # ------------------------------------
-from simlingo_training.utils.custom_types import DrivingInput, LanguageLabel
-from simlingo_training.utils.internvl2_utils import build_transform, dynamic_preprocess
-from team_code.config_simlingo import GlobalConfig
-from team_code.nav_planner import LateralPIDController, RoutePlanner
-from team_code.simlingo_utils import (
+from simlingo_adaption_training.utils.custom_types import DrivingInput, LanguageLabel
+from simlingo_adaption_training.utils.internvl2_utils import build_transform, dynamic_preprocess
+from team_code_adaption.config_simlingo import GlobalConfig
+from team_code_adaption.nav_planner import LateralPIDController, RoutePlanner
+from team_code_adaption.simlingo_utils import (
     get_camera_extrinsics,
     get_camera_intrinsics,
     get_rotation_matrix,
@@ -171,6 +171,9 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         cache_dir = f"pretrained/{(cfg.model.vision_model.variant.split('/')[1])}"
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.bfloat16)
+        
+        # cfg.model config for adaption_train
+        self.adaption_config(cfg)
         self.model = hydra.utils.instantiate(
                 cfg.model,
                 cfg_data_module=cfg.data_module,
@@ -180,7 +183,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             ).to(self.device)
         torch.set_default_dtype(default_dtype)
 
-        self.model.load_state_dict(torch.load(self.config_path), strict=False) ## TODO: adallava训练完成后，推理时应该严格加载
+        self.model.load_state_dict(torch.load(self.config_path), strict=True) ## TODO: adallava训练完成后，推理时应该严格加载
         self.iter = self.config_path.split("epoch=")[-1].split("/")[0]
         self.session = self.config_path.split("/")[-4]
         
@@ -244,7 +247,16 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         if DEBUG:
             self.save_path_img = self.debug_save_path + '/images'
             Path(self.save_path_img).mkdir(parents=True, exist_ok=True)
-            
+          
+    def adaption_config(self,cfg):
+        if cfg.adaption_train:
+            cfg.model.adaption_train = True
+            cfg.model.simlingo_checkpoint = cfg.simlingo_checkpoint
+            cfg.model.vision_model.freeze = True
+        
+            cfg.model.language_model.adaption_train = True # adaption,需要加载simlingo预训练权重
+            cfg.model.language_model.num_prefix_layers = cfg.model.scheduler_model.num_prefix_layers# align
+        
     def input_thread(self):
         while self.running:
             user_input = input("Enter a command for the vehicle. 1: turn left, 2: turn right, 3: lane change left, 4: lane change right, 5: stop, 6: accelerate: ")
@@ -597,7 +609,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         repo_id = self.cfg.model.vision_model.variant
         repo_name = repo_id.split('/')[-1]
         
-        # 获取工作区根目录 (team_code/agent_simlingo.py -> 上两级 -> simlingo-adaption)
+        # 获取工作区根目录 (team_code_adaption/agent_simlingo.py -> 上两级 -> simlingo-adaption)
         workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         local_model_path = os.path.join(workspace_root, "models", repo_name)
 
@@ -719,11 +731,11 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         # initialize DrivingInput with dict self.DrivingInput
         model_input = DrivingInput(**self.DrivingInput)
-        latency_target = self.latency_input_process() # TODO: 很多行的最好都弄成函数，特别是后期我们可能要大改的。
+        latency_target = self.latency_input_process()
         # 3. 传入处理好的 Tensor
         pred_speed_wps, pred_route, language = self.model(
             model_input, 
-            latency=latency_target 
+            latency=latency_target
         )
         
         # ================= [修改结束] ================
@@ -913,37 +925,9 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             del self.processor
 
     def latency_input_process(self):
-        # ================= [修改开始] =================
-        
-        # 1. 定义 Latency 策略
-        # 策略 A: 固定值 (最简单，用于测试)
-        # latency_target = 1.0  # 全速/全精度模式
-        
-        # 策略 B: 从 Config 中读取 (推荐，方便在 config.yaml 中修改)
-        # 你需要在你的 config 文件中添加 inference_latency 字段，或者在这里给默认值
-        # 假设我们默认想跑快一点 (0.75)
-        # latency_target = getattr(self.cfg, 'inference_latency', 1.0) 
-        
-        # 1. 获取配置中的 float 值
-        latency_val = getattr(self.cfg, 'inference_latency', 0.5) 
-        
-        # 2. [关键] 手动构建 Tensor 并匹配 Batch Sizeg
-        # model_input 是一个 DrivingInput 对象，里面的 "camera_images" 是 [1, T, ...]
-        # 我们可以用它的 batch size 作为参考
-        batch_size = self.DrivingInput["camera_images"].shape[0] # 通常是 1
-        
-        # 构建一个形状为 [batch_size] 的 Tensor，填满 latency_val
-        # 注意：必须放到 self.device (GPU) 上，否则模型内部会报 device mismatch
-        latency_target = torch.full(
-            (batch_size,), 
-            latency_val, 
-            dtype=torch.float32, # 或者 self.model.dtype 如果能获取到
-            device=self.device
-        )
-        print(f"DEBUG_CTX [1/3] Agent Output: shape={latency_target.shape}, dim={latency_target.ndim}") # 期望: [1], 1
-        return latency_target
-        
-        # ================= [修改结束] =================
+        #value = getattr(self.cfg, 'inference_latency', 1.0)
+        value = 0.75 # TODO 非常不优雅，应该在start_eval中，或者cfg中，使用参数控制。这里的cfg用的到底是哪里的？
+        return value
 # Filter Functions
 def bicycle_model_forward(x, dt, steer, throttle, brake):
     # Kinematic bicycle model.

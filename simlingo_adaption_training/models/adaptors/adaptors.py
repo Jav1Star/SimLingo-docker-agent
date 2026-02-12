@@ -327,7 +327,6 @@ class LatencyAdaptor(nn.Module):
 
     def compute_loss(self, *args, **kwargs):
         # Latency 通常作为条件输入，不计算自身的 Loss
-        # TODO 这能传回scheduler吗
         return {}
 
 class AdaptorList(nn.Module):

@@ -139,13 +139,14 @@ class DrivingModel(pl.LightningModule):
             self.adaptors.driving.requires_grad_(False)
             
             self.scheduler.requires_grad_(True)
-        
+            
+    @torch.no_grad()
     def forward(self,
         example: DrivingExample, # TODO 
         return_language: Optional[bool] = None,
         prompt_ids: Optional[Tensor] = None,
         # [新增] 接收外部传入的 latency 参数
-        latency: Optional[float] = None,
+        latency: Optional[float] = None, # agent_simlingo中传入
     ) -> DrivingOutput:
         """
         Samples a trajectory from the model.
@@ -159,18 +160,25 @@ class DrivingModel(pl.LightningModule):
         except AttributeError:
             driving_input = example
         
-        if driving_input is not None:
-            adaptor_dict = self.adaptors(example, inference=True,latency=latency,scheduler=self.scheduler)
+        adaptor_dict = self.adaptors(example, inference=True,latency=latency,scheduler=self.scheduler)
+        # 单次前向传播 (用于验证或非语言输出模式)
+        features, logits = self.forward_model(driving_input, adaptor_dict)
+        outputs_by_adaptor = self.adaptors.split_outputs_by_adaptor(adaptor_dict, features)
+        predictions = self.adaptors.driving.get_predictions(outputs_by_adaptor['driving'])
 
+        for k, v in predictions.items():
+            if v is not None:
+                setattr(self, k, v)
+        """    
+        if self.predict_language:
             adaptor_dict = replace_placeholder_tokens(
-                    adaptor_dict = adaptor_dict,
-                    pixel_values = driving_input.camera_images,
-                    placeholder_values = driving_input.prompt_inference.placeholder_values,
-                    image_encoder = self.vision_model.image_encoder,
-                    wp_encoder = self.wp_encoder,
-                )
-            
-            input_embeds_all = adaptor_dict["language_inputs"] ### 这块只拿language inputs, 为什么?
+                        adaptor_dict = adaptor_dict,
+                        pixel_values = driving_input.camera_images,
+                        placeholder_values = driving_input.prompt_inference.placeholder_values,
+                        image_encoder = self.vision_model.image_encoder,
+                        wp_encoder = self.wp_encoder,
+                    )
+            input_embeds_all = adaptor_dict["language_inputs"] ### 这块只拿language inputs,生成CoT不需要驾驶输入。跟训练时逻辑不一致
             # 拼接上latency:
             if adaptor_dict.get('latency_inputs') is not None:
                 input_embeds_all = torch.cat((input_embeds_all, adaptor_dict['latency_inputs']), dim=1)
@@ -185,8 +193,6 @@ class DrivingModel(pl.LightningModule):
                     fill_value = adaptor_dict['split_sizes'][0], # 只使用了language inputs
                     device = input_embeds_all.device
                 )
-
-        if self.predict_language:
             # per batch item because of padding
             for b_idx, (input_embed, attention_mask) in enumerate(zip(input_embeds_all, attention_masks)):
                 input_embed = input_embed.unsqueeze(0)
@@ -254,14 +260,14 @@ class DrivingModel(pl.LightningModule):
                 self.language.append(self.tokenizer.batch_decode(sampled_tokens, skip_special_tokens=True)[0])
         else:
             # 单次前向传播 (用于验证或非语言输出模式)
-            features = self.forward_model(driving_input, adaptor_dict, latency=latency) # <--- 记得传 latency
+            features = self.forward_model(driving_input, adaptor_dict)
             outputs_by_adaptor = self.adaptors.split_outputs_by_adaptor(adaptor_dict, features)
             predictions = self.adaptors.driving.get_predictions(outputs_by_adaptor['driving'])
 
             for k, v in predictions.items():
                 if v is not None:
                     setattr(self, k, v)
-
+        """
         return self.speed_wps, self.route, self.language
 
 

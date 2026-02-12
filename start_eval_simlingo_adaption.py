@@ -8,28 +8,11 @@ import argparse
 from collections import deque
 from tqdm.autonotebook import tqdm
 
-"""
-本脚本为在本地工作站（单机，双 4090 GPU）上运行 Bench2Drive 评测的调度器。
-
-关键改动（相对 HPC 版 start_eval_simlingo_forHPC.py）：
-- 去除 Slurm 提交，改为本地子进程管理与 GPU 轮转并行。
-- 强制优先使用 Bench2Drive 内置的 leaderboard 包，避免被 simlingo 根目录下的同名 leaderboard 冲突。
-- 修正端口参数：--port 使用 CARLA 世界端口，--traffic-manager-port 使用 TM 端口。
-- 支持双卡并发，默认读取环境变量 SIMLINGO_MAX_JOBS 控制并行数。
-- 失败重试与可视化目录清理逻辑与 HPC 版对齐；修复重试时日志文件句柄未关闭导致的泄漏。
-
-使用说明：
-1) 确认 CARLA 安装目录、权重路径、路由文件等字段在 configs 中已正确设置。
-2) 可通过环境变量 SIMLINGO_MAX_JOBS 控制并行任务数（不超过 GPU 数量）。
-3) 日志与结果默认写入 eval_results/Bench2Drive/... 路径，viz 子目录每次提交前会清空。
-4) 如遇导入报错（TickRuntimeError 等），本脚本已通过 PYTHONPATH 顺序与工作目录设置避免冲突。
-"""
 
 
-GPU_IDS = [0]  # 本地双 4090；如需限制，可通过环境变量 SIMLINGO_MAX_JOBS 控制并行
-MAX_PARALLEL_JOBS = 1
+VULKAN_GPU_ID = {0: 2, 1: 0}  # 映射到 Vulkan 适配的 GPU ID, 太诡异了，每次只能试试
 POLL_INTERVAL_S = float(os.getenv("SIMLINGO_POLL_INTERVAL", "5.0"))
-
+MAX_PARALLEL_JOBS = 2
 carla_world_ports = set(range(10000, 20000, 50))
 carla_tm_ports = set(range(30000, 40000, 50))
 
@@ -111,7 +94,7 @@ def launch_job(job, gpu_id, world_port, tm_port):
         f"--traffic-manager-seed={job['seed']}",
         f"--port={world_port}",                 # 世界端口（与 CARLA server 对应）
         f"--traffic-manager-port={tm_port}",    # 交通管理器端口
-        f"--gpu-rank={gpu_id}" # carla目前只能在0上启动
+        f"--gpu-rank={VULKAN_GPU_ID[gpu_id]}" # carla需要vulkaninfo --summary中对应的device编号
     ]
 
     if cfg.get("no_server_launch"):
@@ -138,6 +121,19 @@ def launch_job(job, gpu_id, world_port, tm_port):
 
 
 def finalize_job(job):
+    # 1. 强制清理该任务占用的端口 (杀死残留 CARLA)
+    ports = job.get("ports", set())
+    for port in ports:
+        try:
+            # 使用 fuser 强杀占用端口的进程 (-k: kill, -9: SIGKILL)
+            subprocess.run(
+                ["fuser", "-k", "-9", f"{port}/tcp"], 
+                stdout=subprocess.DEVNULL, 
+                stderr=subprocess.DEVNULL
+            )
+        except Exception:
+            pass
+        
     for handle_key in ("_stdout_handle", "_stderr_handle"):
         handle = job.pop(handle_key, None)
         if handle:
@@ -253,11 +249,18 @@ def main(args):
              carla_tm_ports = {args.remote_carla_port + 8000}
         no_server_launch = True
         print(f"Using remote CARLA at port {args.remote_carla_port}")
-
-    configs = [ # TODO 设置
+    global GPU_IDS
+    GPU_IDS = 0
+    if args.gpu is not None:
+        if isinstance(args.gpu, int):
+            GPU_IDS = [args.gpu]
+        else:
+            GPU_IDS = args.gpu
+    print(f"GPU_IDS: {GPU_IDS}")
+    configs = [
         {
             "agent": "simlingo",
-            "checkpoint": f"{SimlingoPATH}/models/simlingoCheckpoints/checkpoints/epoch=013.ckpt/pytorch_model.pt",
+            "checkpoint": f"{SimlingoPATH}/outputs/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin",
             "benchmark": "bench2drive",
             "route_path": f"{SimlingoPATH}/leaderboard/data/bench2drive_split",
             #"seeds": [3],
@@ -266,8 +269,8 @@ def main(args):
             "out_root": f"{SimlingoPATH}/eval_results/Bench2Drive",
             "carla_root": "/data/carla0915",
             "repo_root": f"{SimlingoPATH}",
-            "agent_file": f"{SimlingoPATH}/team_code/agent_simlingo.py", ## TODO
-            "team_code": "team_code",
+            "agent_file": f"{SimlingoPATH}/team_code_adaption/agent_simlingo.py",
+            "team_code": "team_code_adaption",
             "agent_config": "not_used",
             "username": os.getenv("USER", "local_user"),
             "no_server_launch": no_server_launch,
@@ -424,8 +427,9 @@ if __name__ == "__main__":
     
     # 2. 添加您想要的参数
     parser.add_argument("--seed", type=int, help="用于脚本的随机种子",default=3)
-    parser.add_argument("--remote-carla-port", type=int, default=20000, help="External CARLA world port")
+    parser.add_argument("--remote-carla-port", type=int, default=None, help="External CARLA world port")
     parser.add_argument("--remote-tm-port", type=int, default=None, help="External CARLA TM port")
+    parser.add_argument("--gpu", type=int, nargs='+',default=0, help="gpu to use")
 
     # 3. 解析命令行传入的参数
     args = parser.parse_args()
