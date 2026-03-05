@@ -5,6 +5,7 @@ import time
 import ujson
 import shutil
 import argparse
+import yaml
 from collections import deque
 from tqdm.autonotebook import tqdm
 
@@ -12,7 +13,7 @@ from tqdm.autonotebook import tqdm
 
 VULKAN_GPU_ID = {0: 2, 1: 0}  # 映射到 Vulkan 适配的 GPU ID, 太诡异了，每次只能试试
 POLL_INTERVAL_S = float(os.getenv("SIMLINGO_POLL_INTERVAL", "5.0"))
-MAX_PARALLEL_JOBS = 2
+
 carla_world_ports = set(range(10000, 20000, 50))
 carla_tm_ports = set(range(30000, 40000, 50))
 
@@ -54,6 +55,82 @@ def cleanup_viz_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+def load_eval_yaml(config_path: str):
+    with open(config_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    return data
+
+
+def latency_name_from_value(latency_value: float) -> str:
+    return f"lat_{int(round(latency_value * 1000)):03d}"
+
+
+def parse_latency_profiles(data):
+    eval_cfg = data.get("eval", data)
+    latency_cfg = data.get("latency", eval_cfg.get("latency", {}))
+
+    if latency_cfg is None:
+        latency_cfg = {}
+
+    profiles = latency_cfg.get("profiles")
+    if profiles:
+        parsed = []
+        for profile in profiles:
+            value = float(profile["value"])
+            if not (0.0 <= value <= 1.0):
+                raise ValueError(f"Latency value {value} out of range [0, 1].")
+            name = profile.get("name", latency_name_from_value(value))
+            parsed.append({"name": str(name), "value": value})
+        return parsed
+
+    value = float(latency_cfg.get("value", 0.5))
+    if not (0.0 <= value <= 1.0):
+        raise ValueError(f"Latency value {value} out of range [0, 1].")
+    return [{"name": latency_name_from_value(value), "value": value}]
+
+
+def build_eval_config(args, no_server_launch):
+    eval_yaml = load_eval_yaml(args.eval_config)
+    cfg = eval_yaml.get("eval", eval_yaml)
+
+    required_keys = [
+        "agent",
+        "checkpoint",
+        "benchmark",
+        "route_path",
+        "out_root",
+        "carla_root",
+        "repo_root",
+        "agent_file",
+    ]
+    missing = [k for k in required_keys if k not in cfg]
+    if missing:
+        raise KeyError(f"Missing required keys in eval config: {missing}")
+
+    seeds = cfg.get("seeds", [3])
+    if args.seed is not None:
+        seeds = [args.seed]
+
+    eval_cfg = {
+        "agent": cfg["agent"],
+        "checkpoint": expand_path(cfg["checkpoint"]),
+        "benchmark": cfg["benchmark"],
+        "route_path": expand_path(cfg["route_path"]),
+        "seeds": seeds,
+        "tries": int(cfg.get("tries", 0)),
+        "out_root": expand_path(cfg["out_root"]),
+        "carla_root": expand_path(cfg["carla_root"]),
+        "repo_root": expand_path(cfg["repo_root"]),
+        "agent_file": expand_path(cfg["agent_file"]),
+        "team_code": cfg.get("team_code", "team_code_adaption"),
+        "agent_config": cfg.get("agent_config", "not_used"),
+        "username": cfg.get("username", os.getenv("USER", "local_user")),
+        "no_server_launch": no_server_launch,
+        "latency_profiles": parse_latency_profiles(eval_yaml),
+    }
+    return eval_cfg
+
+
 def launch_job(job, gpu_id, world_port, tm_port):
     cfg = job["cfg"]
     env = os.environ.copy()
@@ -79,6 +156,8 @@ def launch_job(job, gpu_id, world_port, tm_port):
     env["SCENARIO_RUNNER_ROOT"] = f"{repo_root}/Bench2Drive/scenario_runner"
     env["SAVE_PATH"] = job["viz_path"]
     env["LEADERBOARD_ROOT"] = f"{repo_root}/Bench2Drive/leaderboard"
+    env["SIMLINGO_EVAL_LATENCY"] = str(job["latency_value"])
+    env["SIMLINGO_EVAL_LATENCY_PROFILE"] = job["latency_profile"]
     
     command = [
         sys.executable,
@@ -122,17 +201,18 @@ def launch_job(job, gpu_id, world_port, tm_port):
 
 def finalize_job(job):
     # 1. 强制清理该任务占用的端口 (杀死残留 CARLA)
-    ports = job.get("ports", set())
-    for port in ports:
-        try:
-            # 使用 fuser 强杀占用端口的进程 (-k: kill, -9: SIGKILL)
-            subprocess.run(
-                ["fuser", "-k", "-9", f"{port}/tcp"], 
-                stdout=subprocess.DEVNULL, 
-                stderr=subprocess.DEVNULL
-            )
-        except Exception:
-            pass
+    if not no_server_launch:
+        ports = job.get("ports", set())
+        for port in ports:
+            try:
+                # 使用 fuser 强杀占用端口的进程 (-k: kill, -9: SIGKILL)
+                subprocess.run(
+                    ["fuser", "-k", "-9", f"{port}/tcp"], 
+                    stdout=subprocess.DEVNULL, 
+                    stderr=subprocess.DEVNULL
+                )
+            except Exception:
+                pass
         
     for handle_key in ("_stdout_handle", "_stderr_handle"):
         handle = job.pop(handle_key, None)
@@ -236,9 +316,8 @@ def err_log_has_error(err_file: str) -> bool:
 
 
 def main(args):
-    seed = args.seed
-    SimlingoPATH = os.path.expanduser("~/simlingo-adaption")
     # for fast test
+    global no_server_launch
     no_server_launch = False
     if args.remote_carla_port is not None:
         global carla_world_ports, carla_tm_ports
@@ -249,6 +328,7 @@ def main(args):
              carla_tm_ports = {args.remote_carla_port + 8000}
         no_server_launch = True
         print(f"Using remote CARLA at port {args.remote_carla_port}")
+    
     global GPU_IDS
     GPU_IDS = 0
     if args.gpu is not None:
@@ -256,26 +336,12 @@ def main(args):
             GPU_IDS = [args.gpu]
         else:
             GPU_IDS = args.gpu
+    else:
+        GPU_IDS = [0]
+    global MAX_PARALLEL_JOBS
+    MAX_PARALLEL_JOBS = len(GPU_IDS)
     print(f"GPU_IDS: {GPU_IDS}")
-    configs = [
-        {
-            "agent": "simlingo",
-            "checkpoint": f"{SimlingoPATH}/outputs/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin",
-            "benchmark": "bench2drive",
-            "route_path": f"{SimlingoPATH}/leaderboard/data/bench2drive_split",
-            #"seeds": [3],
-            "seeds": [seed],
-            "tries": 0,  # 重试次数,1便于调试
-            "out_root": f"{SimlingoPATH}/eval_results/Bench2Drive",
-            "carla_root": "/data/carla0915",
-            "repo_root": f"{SimlingoPATH}",
-            "agent_file": f"{SimlingoPATH}/team_code_adaption/agent_simlingo.py",
-            "team_code": "team_code_adaption",
-            "agent_config": "not_used",
-            "username": os.getenv("USER", "local_user"),
-            "no_server_launch": no_server_launch,
-        }
-    ]
+    configs = [build_eval_config(args, no_server_launch)]
 
     job_queue = []
     for cfg in configs:
@@ -287,41 +353,67 @@ def main(args):
         for seed in cfg["seeds"]:
             seed = str(seed)
 
-            base_dir = os.path.join(cfg["out_root"], cfg["agent"], cfg["benchmark"], seed)
-            os.makedirs(os.path.join(base_dir, "run"), exist_ok=True)
-            os.makedirs(os.path.join(base_dir, "res"), exist_ok=True)
-            os.makedirs(os.path.join(base_dir, "out"), exist_ok=True)
-            os.makedirs(os.path.join(base_dir, "err"), exist_ok=True)
+            for latency_profile in cfg["latency_profiles"]:
+                latency_name = latency_profile["name"]
+                latency_value = latency_profile["value"]
+                base_dir = os.path.join(cfg["out_root"], cfg["agent"], cfg["benchmark"], seed, latency_name)
+                os.makedirs(os.path.join(base_dir, "run"), exist_ok=True)
+                os.makedirs(os.path.join(base_dir, "res"), exist_ok=True)
+                os.makedirs(os.path.join(base_dir, "out"), exist_ok=True)
+                os.makedirs(os.path.join(base_dir, "err"), exist_ok=True)
 
-            for route in routes:
-                route_id = route.split("_")[-1][:-4].zfill(fill_zeros)
-                route_file = os.path.join(route_path, route)
+                for route in routes:
+                    route_id = route.split("_")[-1][:-4].zfill(fill_zeros)
+                    route_file = os.path.join(route_path, route)
 
-                viz_path = os.path.join(base_dir, "viz", route_id)
-                os.makedirs(viz_path, exist_ok=True)
-                
-                log_file = os.path.join(base_dir, "out", f"{route_id}_out.log")
-                err_file = os.path.join(base_dir, "err", f"{route_id}_err.log")
-                result_file = os.path.join(base_dir, "res", f"{route_id}_res.json")
-                # 筛选：只有 (不存在 err 文件) 或 (err 文件包含错误) 才进入队列
-                if os.path.exists(err_file) and not err_log_has_error(err_file):
-                    print(f"[skip] route {route_id} clean err log -> skip")
-                    continue
+                    viz_path = os.path.join(base_dir, "viz", route_id)
+                    os.makedirs(viz_path, exist_ok=True)
 
-                job = {
-                    "cfg": cfg,
-                    "route": route_file,
-                    "route_id": route_id,
-                    "seed": seed,
-                    "viz_path": viz_path,
-                    "result_file": result_file,
-                    "log_file": log_file,
-                    "err_file": err_file,
-                    "tries_initial": cfg["tries"],
-                    "tries_remaining": cfg["tries"],
-                    "status": "pending",
-                }
-                job_queue.append(job)
+                    log_file = os.path.join(base_dir, "out", f"{route_id}_out.log")
+                    err_file = os.path.join(base_dir, "err", f"{route_id}_err.log")
+                    result_file = os.path.join(base_dir, "res", f"{route_id}_res.json")
+                    # 修改后的筛选：基于 res.json 的 status 字段判断
+                    should_skip = False
+                    if os.path.exists(result_file):
+                        try:
+                            with open(result_file, "r", encoding="utf-8") as f:
+                                res_data = ujson.load(f)
+                            # 检查 ["_checkpoint"]["global_record"]["status"]
+                            # 如果没有该字段，默认为 "Failed"
+                            status = "Failed"
+                            if "_checkpoint" in res_data and "global_record" in res_data["_checkpoint"]:
+                                status = res_data["_checkpoint"]["global_record"].get("status", "Failed")
+                            if status == "Completed":
+                                should_skip = True
+                                print(f"[skip] route {route_id} latency {latency_name} status is Completed -> skip")
+                            else:
+                                # 状态是 Failed 或其他，需要重跑
+                                print(f"[queue] route {route_id} latency {latency_name} status is {status} -> queue")
+
+                        except Exception as e:
+                            # JSON 解析失败或读取错误，视为需要重跑
+                            print(f"[queue] route {route_id} latency {latency_name} json invalid ({e}) -> queue")
+                            should_skip = False
+
+                    if should_skip:
+                        continue
+
+                    job = {
+                        "cfg": cfg,
+                        "route": route_file,
+                        "route_id": route_id,
+                        "seed": seed,
+                        "latency_profile": latency_name,
+                        "latency_value": latency_value,
+                        "viz_path": viz_path,
+                        "result_file": result_file,
+                        "log_file": log_file,
+                        "err_file": err_file,
+                        "tries_initial": cfg["tries"],
+                        "tries_remaining": cfg["tries"],
+                        "status": "pending",
+                    }
+                    job_queue.append(job)
 
     pending_jobs = deque(job_queue)
     running_jobs = []
@@ -402,6 +494,7 @@ def main(args):
 
             print(
                 f"Started job {job['route_id']} on GPU {gpu_id} "
+                f"with {job['latency_profile']}={job['latency_value']} "
                 f"(tries left after launch: {job['tries_remaining']})."
             )
             job_started = True
@@ -426,10 +519,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="一个接收 seed 参数的脚本。")
     
     # 2. 添加您想要的参数
-    parser.add_argument("--seed", type=int, help="用于脚本的随机种子",default=3)
+    default_eval_config = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "configs",
+        "simlingo_adaption_eval.yaml",
+    )
+    parser.add_argument("--eval-config", type=str, default=default_eval_config, help="评估配置 YAML 路径")
+    parser.add_argument("--seed", type=int, help="用于脚本的随机种子；不传则使用 eval-config 中的 seeds", default=None)
     parser.add_argument("--remote-carla-port", type=int, default=None, help="External CARLA world port")
     parser.add_argument("--remote-tm-port", type=int, default=None, help="External CARLA TM port")
-    parser.add_argument("--gpu", type=int, nargs='+',default=0, help="gpu to use")
+    parser.add_argument("--gpu", type=int, nargs='+', default=None, help="gpu to use")
 
     # 3. 解析命令行传入的参数
     args = parser.parse_args()

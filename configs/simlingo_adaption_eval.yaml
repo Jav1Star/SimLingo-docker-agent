@@ -1,0 +1,23 @@
+eval:
+  agent: simlingo
+  checkpoint: ~/simlingo-adaption/outputs/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin
+  benchmark: bench2drive
+  route_path: ~/simlingo-adaption/leaderboard/data/bench2drive_split
+  seeds: [3]
+  tries: 0
+  out_root: ~/simlingo-adaption/eval_results/Bench2Drive
+  carla_root: /data/carla0915
+  repo_root: ~/simlingo-adaption
+  agent_file: ~/simlingo-adaption/team_code_adaption/agent_simlingo.py
+  team_code: team_code_adaption
+  agent_config: not_used
+
+latency:
+  value: 0.75
+  # profiles:
+  #   - name: lat_025
+  #     value: 0.25
+  #   - name: lat_050
+  #     value: 0.50
+  #   - name: lat_075
+  #     value: 0.75

@@ -97,6 +97,8 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.device = torch.device('cuda')
         self.DrivingInput = {}
         self.config = GlobalConfig()
+        self.eval_latency = self._load_eval_latency()
+        self.eval_latency_profile = os.getenv("SIMLINGO_EVAL_LATENCY_PROFILE", "")
 
         if self.config.eval_route_as == -1:
             self.config.eval_route_as = self.model.route_as
@@ -925,8 +927,20 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             del self.processor
 
     def latency_input_process(self):
-        #value = getattr(self.cfg, 'inference_latency', 1.0)
-        value = 0.75 # TODO 非常不优雅，应该在start_eval中，或者cfg中，使用参数控制。这里的cfg用的到底是哪里的？
+        return self.eval_latency
+
+    def _load_eval_latency(self):
+        value_str = os.getenv("SIMLINGO_EVAL_LATENCY", "").strip()
+        if value_str == "":
+            return 0.5
+
+        try:
+            value = float(value_str)
+        except ValueError as exc:
+            raise ValueError(f"Invalid SIMLINGO_EVAL_LATENCY: {value_str}") from exc
+
+        if not (0.0 <= value <= 1.0):
+            raise ValueError(f"SIMLINGO_EVAL_LATENCY must be in [0,1], got {value}")
         return value
 # Filter Functions
 def bicycle_model_forward(x, dt, steer, throttle, brake):
