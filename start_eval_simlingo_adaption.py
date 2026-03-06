@@ -61,37 +61,21 @@ def load_eval_yaml(config_path: str):
     return data
 
 
-def latency_name_from_value(latency_value: float) -> str:
-    return f"lat_{int(round(latency_value * 1000)):03d}"
-
-
-def parse_latency_profiles(data):
+def parse_latency_settings(data):
     eval_cfg = data.get("eval", data)
-    latency_cfg = data.get("latency", eval_cfg.get("latency", {}))
-
-    if latency_cfg is None:
-        latency_cfg = {}
-
-    profiles = latency_cfg.get("profiles")
-    if profiles:
-        parsed = []
-        for profile in profiles:
-            value = float(profile["value"])
-            if not (0.0 <= value <= 1.0):
-                raise ValueError(f"Latency value {value} out of range [0, 1].")
-            name = profile.get("name", latency_name_from_value(value))
-            parsed.append({"name": str(name), "value": value})
-        return parsed
-
-    value = float(latency_cfg.get("value", 0.5))
-    if not (0.0 <= value <= 1.0):
-        raise ValueError(f"Latency value {value} out of range [0, 1].")
-    return [{"name": latency_name_from_value(value), "value": value}]
+    latency_cfg = data.get("latency", eval_cfg.get("latency", {})) or {}
+    # 从 yaml 读取 latency 模式配置（random/fixed/rule_based）
+    mode = str(latency_cfg.get("mode", "no mode in config")).strip().lower()
+    fix_latency = float(latency_cfg.get("fix_latency", 1.0))
+    if mode == "fixed" and not (0.0 <= fix_latency <= 1.0):
+        raise ValueError(f"latency.fix_latency must be in [0, 1] for fixed mode, got {fix_latency}")
+    return mode, fix_latency
 
 
 def build_eval_config(args, no_server_launch):
     eval_yaml = load_eval_yaml(args.eval_config)
     cfg = eval_yaml.get("eval", eval_yaml)
+    latency_mode, fix_latency = parse_latency_settings(eval_yaml)
 
     required_keys = [
         "agent",
@@ -126,7 +110,8 @@ def build_eval_config(args, no_server_launch):
         "agent_config": cfg.get("agent_config", "not_used"),
         "username": cfg.get("username", os.getenv("USER", "local_user")),
         "no_server_launch": no_server_launch,
-        "latency_profiles": parse_latency_profiles(eval_yaml),
+        "latency_mode": latency_mode,
+        "fix_latency": fix_latency,
     }
     return eval_cfg
 
@@ -156,8 +141,9 @@ def launch_job(job, gpu_id, world_port, tm_port):
     env["SCENARIO_RUNNER_ROOT"] = f"{repo_root}/Bench2Drive/scenario_runner"
     env["SAVE_PATH"] = job["viz_path"]
     env["LEADERBOARD_ROOT"] = f"{repo_root}/Bench2Drive/leaderboard"
-    env["SIMLINGO_EVAL_LATENCY"] = str(job["latency_value"])
-    env["SIMLINGO_EVAL_LATENCY_PROFILE"] = job["latency_profile"]
+    # 通过环境变量把 mode 与固定延迟值传给 agent
+    env["SIMLINGO_EVAL_LATENCY_MODE"] = str(job["latency_mode"])
+    env["SIMLINGO_EVAL_FIXED_LATENCY"] = str(job["fix_latency"])
     
     command = [
         sys.executable,
@@ -352,68 +338,67 @@ def main(args):
 
         for seed in cfg["seeds"]:
             seed = str(seed)
+            # 输出目录按 mode 分层；fixed 模式再细分到 lat_xxx
+            base_dir = os.path.join(cfg["out_root"], cfg["agent"], cfg["benchmark"], seed, cfg["latency_mode"])
+            if cfg["latency_mode"] == "fixed":
+                base_dir = os.path.join(base_dir, f"lat_{cfg['fix_latency']:.3f}")
+            os.makedirs(os.path.join(base_dir, "run"), exist_ok=True)
+            os.makedirs(os.path.join(base_dir, "res"), exist_ok=True)
+            os.makedirs(os.path.join(base_dir, "out"), exist_ok=True)
+            os.makedirs(os.path.join(base_dir, "err"), exist_ok=True)
 
-            for latency_profile in cfg["latency_profiles"]:
-                latency_name = latency_profile["name"]
-                latency_value = latency_profile["value"]
-                base_dir = os.path.join(cfg["out_root"], cfg["agent"], cfg["benchmark"], seed, latency_name)
-                os.makedirs(os.path.join(base_dir, "run"), exist_ok=True)
-                os.makedirs(os.path.join(base_dir, "res"), exist_ok=True)
-                os.makedirs(os.path.join(base_dir, "out"), exist_ok=True)
-                os.makedirs(os.path.join(base_dir, "err"), exist_ok=True)
+            for route in routes:
+                route_id = route.split("_")[-1][:-4].zfill(fill_zeros)
+                route_file = os.path.join(route_path, route)
 
-                for route in routes:
-                    route_id = route.split("_")[-1][:-4].zfill(fill_zeros)
-                    route_file = os.path.join(route_path, route)
+                viz_path = os.path.join(base_dir, "viz", route_id)
+                os.makedirs(viz_path, exist_ok=True)
 
-                    viz_path = os.path.join(base_dir, "viz", route_id)
-                    os.makedirs(viz_path, exist_ok=True)
+                log_file = os.path.join(base_dir, "out", f"{route_id}_out.log")
+                err_file = os.path.join(base_dir, "err", f"{route_id}_err.log")
+                result_file = os.path.join(base_dir, "res", f"{route_id}_res.json")
+                # 修改后的筛选：基于 res.json 的 status 字段判断
+                should_skip = False
+                if os.path.exists(result_file):
+                    try:
+                        with open(result_file, "r", encoding="utf-8") as f:
+                            res_data = ujson.load(f)
+                        # 检查 ["_checkpoint"]["global_record"]["status"]
+                        # 如果没有该字段，默认为 "Failed"
+                        status = "Failed"
+                        if "_checkpoint" in res_data and "global_record" in res_data["_checkpoint"]:
+                            status = res_data["_checkpoint"]["global_record"].get("status", "Failed")
+                        if status == "Completed":
+                            should_skip = True
+                            print(f"[skip] route {route_id} mode {cfg['latency_mode']} status is Completed -> skip")
+                        else:
+                            # 状态是 Failed 或其他，需要重跑
+                            print(f"[queue] route {route_id} mode {cfg['latency_mode']} status is {status} -> queue")
 
-                    log_file = os.path.join(base_dir, "out", f"{route_id}_out.log")
-                    err_file = os.path.join(base_dir, "err", f"{route_id}_err.log")
-                    result_file = os.path.join(base_dir, "res", f"{route_id}_res.json")
-                    # 修改后的筛选：基于 res.json 的 status 字段判断
-                    should_skip = False
-                    if os.path.exists(result_file):
-                        try:
-                            with open(result_file, "r", encoding="utf-8") as f:
-                                res_data = ujson.load(f)
-                            # 检查 ["_checkpoint"]["global_record"]["status"]
-                            # 如果没有该字段，默认为 "Failed"
-                            status = "Failed"
-                            if "_checkpoint" in res_data and "global_record" in res_data["_checkpoint"]:
-                                status = res_data["_checkpoint"]["global_record"].get("status", "Failed")
-                            if status == "Completed":
-                                should_skip = True
-                                print(f"[skip] route {route_id} latency {latency_name} status is Completed -> skip")
-                            else:
-                                # 状态是 Failed 或其他，需要重跑
-                                print(f"[queue] route {route_id} latency {latency_name} status is {status} -> queue")
+                    except Exception as e:
+                        # JSON 解析失败或读取错误，视为需要重跑
+                        print(f"[queue] route {route_id} mode {cfg['latency_mode']} json invalid ({e}) -> queue")
+                        should_skip = False
 
-                        except Exception as e:
-                            # JSON 解析失败或读取错误，视为需要重跑
-                            print(f"[queue] route {route_id} latency {latency_name} json invalid ({e}) -> queue")
-                            should_skip = False
+                if should_skip:
+                    continue
 
-                    if should_skip:
-                        continue
-
-                    job = {
-                        "cfg": cfg,
-                        "route": route_file,
-                        "route_id": route_id,
-                        "seed": seed,
-                        "latency_profile": latency_name,
-                        "latency_value": latency_value,
-                        "viz_path": viz_path,
-                        "result_file": result_file,
-                        "log_file": log_file,
-                        "err_file": err_file,
-                        "tries_initial": cfg["tries"],
-                        "tries_remaining": cfg["tries"],
-                        "status": "pending",
-                    }
-                    job_queue.append(job)
+                job = {
+                    "cfg": cfg,
+                    "route": route_file,
+                    "route_id": route_id,
+                    "seed": seed,
+                    "latency_mode": cfg["latency_mode"],
+                    "fix_latency": cfg["fix_latency"],
+                    "viz_path": viz_path,
+                    "result_file": result_file,
+                    "log_file": log_file,
+                    "err_file": err_file,
+                    "tries_initial": cfg["tries"],
+                    "tries_remaining": cfg["tries"],
+                    "status": "pending",
+                }
+                job_queue.append(job)
 
     pending_jobs = deque(job_queue)
     running_jobs = []
@@ -494,7 +479,7 @@ def main(args):
 
             print(
                 f"Started job {job['route_id']} on GPU {gpu_id} "
-                f"with {job['latency_profile']}={job['latency_value']} "
+                f"with mode={job['latency_mode']} fix_latency={job['fix_latency']} "
                 f"(tries left after launch: {job['tries_remaining']})."
             )
             job_started = True
@@ -526,7 +511,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--eval-config", type=str, default=default_eval_config, help="评估配置 YAML 路径")
     parser.add_argument("--seed", type=int, help="用于脚本的随机种子；不传则使用 eval-config 中的 seeds", default=None)
-    parser.add_argument("--remote-carla-port", type=int, default=None, help="External CARLA world port")
+    parser.add_argument("--remote-carla-port", type=int, default=20000, help="External CARLA world port")
     parser.add_argument("--remote-tm-port", type=int, default=None, help="External CARLA TM port")
     parser.add_argument("--gpu", type=int, nargs='+', default=None, help="gpu to use")
 

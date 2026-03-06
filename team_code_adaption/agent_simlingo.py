@@ -97,8 +97,28 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.device = torch.device('cuda')
         self.DrivingInput = {}
         self.config = GlobalConfig()
-        self.eval_latency = self._load_eval_latency()
-        self.eval_latency_profile = os.getenv("SIMLINGO_EVAL_LATENCY_PROFILE", "")
+        self.eval_latency_mode = os.getenv("SIMLINGO_EVAL_LATENCY_MODE")
+        if self.eval_latency_mode is None:
+            raise ValueError(f"Missing latency.mode ")
+        self.eval_latency_mode = self.eval_latency_mode.strip().lower()
+        if self.eval_latency_mode not in {"random", "fixed", "rule_based"}:
+            raise ValueError(f"SIMLINGO_EVAL_LATENCY_MODE must be random/fixed/rule_based, got {self.eval_latency_mode}")
+
+        self.fixed_eval_latency = self._load_fixed_eval_latency()
+        init_latency = self.fixed_eval_latency
+        self.eval_latency = {
+            "value": init_latency,
+            "waypoint_entropy": {
+                "path_spatial_entropy": None,
+                "speed_spatial_entropy": None,
+                "mean_spatial_entropy": init_latency,
+            },
+            "history_similarity": {
+                "sim_in": 1.0,
+                "alpha": None,
+            },
+            "used_latency": init_latency,
+        }
 
         if self.config.eval_route_as == -1:
             self.config.eval_route_as = self.model.route_as
@@ -186,6 +206,8 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         torch.set_default_dtype(default_dtype)
 
         self.model.load_state_dict(torch.load(self.config_path), strict=True) ## TODO: adallava训练完成后，推理时应该严格加载
+        if hasattr(self.model, "probe_history_state"):
+            self.model.probe_history_state = {}
         self.iter = self.config_path.split("epoch=")[-1].split("/")[0]
         self.session = self.config_path.split("/")[-4]
         
@@ -737,10 +759,13 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         # 3. 传入处理好的 Tensor
         pred_speed_wps, pred_route, language = self.model(
             model_input, 
-            latency=latency_target
+            latency=latency_target,
+            ruled_based=(self.eval_latency_mode == "rule_based"),
         )
+        self._update_eval_latency_from_model_metrics()
         
         # ================= [修改结束] ================
+        # breakpoints: check self.eval_latency
         pred_speed_wps = pred_speed_wps.float() if pred_speed_wps is not None else None
         pred_route = pred_route.float() if pred_route is not None else None
 
@@ -920,27 +945,70 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         The leaderboard client doesn't properly clear up the agent after the route finishes so we need to do it here.
         Also writes logging files to disk.
         """
-
+        if hasattr(self, "model") and hasattr(self.model, "probe_history_state"):
+            self.model.probe_history_state = {}
         del self.model
         del self.config
         if hasattr(self.cfg.data_module, 'encoder') and self.cfg.data_module.encoder == 'llavanext':
             del self.processor
 
     def latency_input_process(self):
-        return self.eval_latency
+        # random 模式每帧随机采样 latency
+        if self.eval_latency_mode == "random":
+            value = random.random()
+            self.eval_latency["value"] = float(value)
+            self.eval_latency["used_latency"] = float(value)
+            return float(value)
 
-    def _load_eval_latency(self):
-        value_str = os.getenv("SIMLINGO_EVAL_LATENCY", "").strip()
-        if value_str == "":
-            return 0.5
+        # fixed 模式始终使用固定 latency
+        if self.eval_latency_mode == "fixed":
+            self.eval_latency["value"] = float(self.fixed_eval_latency)
+            self.eval_latency["used_latency"] = float(self.fixed_eval_latency)
+            return float(self.fixed_eval_latency)
 
-        try:
-            value = float(value_str)
-        except ValueError as exc:
-            raise ValueError(f"Invalid SIMLINGO_EVAL_LATENCY: {value_str}") from exc
+        # rule_based 模式使用上一帧/初始化的熵驱动 latency
+        return float(self.eval_latency["value"])
 
-        if not (0.0 <= value <= 1.0):
-            raise ValueError(f"SIMLINGO_EVAL_LATENCY must be in [0,1], got {value}")
+    def _update_eval_latency_from_model_metrics(self):
+        # 仅 rule_based 模式根据注意力熵更新记录使用的latency
+        if self.eval_latency_mode != "rule_based":
+            return
+        metrics = getattr(self.model, "latest_attention_metrics", None)
+        if not isinstance(metrics, dict):
+            return
+
+        def _as_float_or_none(value):
+            if value is None:
+                return None
+            if isinstance(value, (list, tuple)):
+                if len(value) == 0:
+                    return None
+                return float(np.mean(value))
+            return float(value)
+
+        waypoint_entropy = metrics.get("waypoint_entropy", {})
+        history_similarity = metrics.get("history_similarity", {})
+        path_spatial_entropy = waypoint_entropy.get("path_spatial_entropy")
+        speed_spatial_entropy = waypoint_entropy.get("speed_spatial_entropy")
+        mean_spatial_entropy = waypoint_entropy.get("mean_spatial_entropy")
+        sim_in = history_similarity.get("sim_in")
+        alpha = history_similarity.get("alpha")
+        used_latency = metrics.get("used_latency")
+
+
+        if mean_spatial_entropy is None:
+            return
+
+        self.eval_latency["waypoint_entropy"]["path_spatial_entropy"] = _as_float_or_none(path_spatial_entropy)
+        self.eval_latency["waypoint_entropy"]["speed_spatial_entropy"] = _as_float_or_none(speed_spatial_entropy)
+        self.eval_latency["waypoint_entropy"]["mean_spatial_entropy"] = _as_float_or_none(mean_spatial_entropy)
+        self.eval_latency["history_similarity"]["sim_in"] = _as_float_or_none(sim_in)
+        self.eval_latency["history_similarity"]["alpha"] = _as_float_or_none(alpha)
+        self.eval_latency["used_latency"] = _as_float_or_none(used_latency if used_latency is not None else mean_spatial_entropy)
+        self.eval_latency["value"] = float(np.clip(self.eval_latency["used_latency"], 0.0, 1.0))
+
+    def _load_fixed_eval_latency(self):
+        value= os.getenv("SIMLINGO_EVAL_FIXED_LATENCY")
         return value
 # Filter Functions
 def bicycle_model_forward(x, dt, steer, throttle, brake):

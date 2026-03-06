@@ -22,7 +22,7 @@
 # Force refresh cache: v1.0
 
 import math
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.utils.checkpoint
@@ -64,6 +64,160 @@ logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "Qwen/Qwen2-7B"
 _CONFIG_FOR_DOC = "Qwen2Config"
+
+
+def _to_latency_tensor(
+    latency: Optional[torch.FloatTensor], batch_size: int, device: torch.device, dtype: torch.dtype
+) -> torch.Tensor:
+    # Scheduler expects per-sample latency iterable with shape [B].
+    # Normalize scalar / python float / tensor inputs to that format.
+    if latency is None:
+        return torch.full((batch_size,), 0.5, device=device, dtype=dtype)
+    if not isinstance(latency, torch.Tensor):
+        return torch.full((batch_size,), float(latency), device=device, dtype=dtype)
+    if latency.ndim == 0:
+        return latency.to(device=device, dtype=dtype).expand(batch_size)
+    return latency.to(device=device, dtype=dtype)
+
+
+def _waypoint_attention_spatial_entropy_from_prefix(
+    prefix_attentions: List[torch.Tensor],
+    waypoint_positions: Optional[torch.LongTensor],
+    visual_positions: Optional[torch.LongTensor],
+    visual_coords: Optional[torch.FloatTensor],
+    spatial_lambda: float = 1e-3,
+    eps: float = 1e-8,
+) -> Optional[torch.Tensor]:
+    if not prefix_attentions or waypoint_positions is None or visual_positions is None or visual_coords is None:
+        return None
+
+    attn = torch.stack(prefix_attentions, dim=0).float()  # [L, B, H, Q, K]
+    _, batch_size, _, q_len, k_len = attn.shape
+    device = attn.device
+    spatial_entropy = torch.full((batch_size,), float("nan"), device=device, dtype=attn.dtype)
+
+    for b_idx in range(batch_size):
+        wp_idx = waypoint_positions[b_idx]
+        vis_idx = visual_positions[b_idx]
+        vis_coords = visual_coords[b_idx]
+        wp_idx = wp_idx[(wp_idx >= 0) & (wp_idx < q_len)]
+        valid_vis_mask = (vis_idx >= 0) & (vis_idx < k_len)
+        vis_idx = vis_idx[valid_vis_mask]
+        vis_coords = vis_coords[valid_vis_mask]
+        if wp_idx.numel() == 0 or vis_idx.numel() == 0:
+            continue
+
+        wp_idx = torch.unique(wp_idx, sorted=True)
+
+        # [L, H, Nw, Nv] -> [Nv]
+        selected = attn[:, b_idx][:, :, wp_idx][:, :, :, vis_idx]
+        v_attn = selected.mean(dim=(0, 1, 2))
+
+        vis_coords = vis_coords.to(device=device, dtype=attn.dtype)
+        # mu = sum_j V_attn,j * C_j
+        coord_center = (v_attn[:, None] * vis_coords).sum(dim=0)
+        distance = torch.sqrt(((vis_coords - coord_center) ** 2).sum(dim=-1))
+
+        # H_spatial = -sum_j V_attn,j * log(V_attn,j / (d_j + lambda))
+        ratio = v_attn / (distance + spatial_lambda + eps)
+        h_spatial = -(v_attn * torch.log(ratio + eps)).sum()
+
+        # MinMax normalization with per-sample theoretical bounds from d range.
+        d_min = distance.min()
+        d_max = distance.max()
+        h_min = -(v_attn * torch.log(v_attn / (d_min + spatial_lambda + eps) + eps)).sum()
+        h_max = -(v_attn * torch.log(v_attn / (d_max + spatial_lambda + eps) + eps)).sum()
+        h_norm = ((h_spatial - h_min) / (h_max - h_min + eps)).clamp(0.0, 1.0)
+        spatial_entropy[b_idx] = h_norm
+
+    return spatial_entropy
+
+
+def compute_rule_based_latency(
+    prefix_attentions: List[torch.Tensor],
+    inputs_embeds: Optional[torch.FloatTensor],
+    visual_token_positions: Optional[torch.LongTensor],
+    visual_token_coords: Optional[torch.FloatTensor],
+    waypoint_path_token_positions: Optional[torch.LongTensor],
+    waypoint_speed_token_positions: Optional[torch.LongTensor],
+    fallback_latency: torch.Tensor,
+    history_state: Optional[Dict[str, torch.Tensor]] = None,
+    history_alpha: float = 0.2,
+    spatial_lambda: float = 1e-3,
+    eps: float = 1e-8,
+) -> Dict[str, torch.Tensor]:
+    # waypoints spatial entropy
+    path_spatial_entropy = _waypoint_attention_spatial_entropy_from_prefix(
+        prefix_attentions=prefix_attentions,
+        waypoint_positions=waypoint_path_token_positions,
+        visual_positions=visual_token_positions,
+        visual_coords=visual_token_coords,
+        spatial_lambda=spatial_lambda,
+        eps=eps,
+    )
+    speed_spatial_entropy = _waypoint_attention_spatial_entropy_from_prefix(
+        prefix_attentions=prefix_attentions,
+        waypoint_positions=waypoint_speed_token_positions,
+        visual_positions=visual_token_positions,
+        visual_coords=visual_token_coords,
+        spatial_lambda=spatial_lambda,
+        eps=eps,
+    )
+
+    if path_spatial_entropy is None:
+        path_spatial_entropy = torch.full_like(fallback_latency, float("nan"))
+    if speed_spatial_entropy is None:
+        speed_spatial_entropy = torch.full_like(fallback_latency, float("nan"))
+
+    entropy_stack = torch.stack([path_spatial_entropy, speed_spatial_entropy], dim=0)
+    valid = torch.isfinite(entropy_stack)
+    valid_count = valid.sum(dim=0)
+    entropy_sum = torch.where(valid, entropy_stack, torch.zeros_like(entropy_stack)).sum(dim=0)
+    mean_spatial_entropy = torch.where(valid_count > 0, entropy_sum / valid_count.clamp_min(1), fallback_latency.float())
+    mean_spatial_entropy = mean_spatial_entropy.clamp(0.0, 1.0)
+
+    # history similarity
+    sim_in = torch.full_like(fallback_latency, float("nan"))
+    if inputs_embeds is not None and visual_token_positions is not None:
+        # V_global per sample (N x C -> C), then shared history state uses batch-mean V_global.
+        sample_globals = []
+        for b_idx in range(inputs_embeds.size(0)):
+            vis_idx = visual_token_positions[b_idx]
+            vis_idx = vis_idx[(vis_idx >= 0) & (vis_idx < inputs_embeds.size(1))]
+            if vis_idx.numel() == 0:
+                continue
+            sample_globals.append(inputs_embeds[b_idx, vis_idx].mean(dim=0))
+
+        if len(sample_globals) > 0:
+            v_global_batch = torch.stack(sample_globals, dim=0).mean(dim=0)
+            prev_hist = None if history_state is None else history_state.get("v_hist")
+            if prev_hist is None:
+                sim_scalar = fallback_latency.new_tensor(1.0)
+            else:
+                denom = v_global_batch.norm(p=2) * prev_hist.norm(p=2) + eps
+                cosine = (v_global_batch * prev_hist).sum() / denom
+                sim_scalar = (0.5 * (1.0 + cosine)).clamp(0.0, 1.0)
+            sim_in = torch.full_like(fallback_latency, sim_scalar)
+
+            if history_state is not None:
+                if prev_hist is None:
+                    history_state["v_hist"] = v_global_batch.detach()
+                else:
+                    history_state["v_hist"] = (
+                        history_alpha * v_global_batch + (1.0 - history_alpha) * prev_hist
+                    ).detach()
+
+    return {
+        "waypoint_entropy": {
+            "path_spatial_entropy": path_spatial_entropy,
+            "speed_spatial_entropy": speed_spatial_entropy,
+            "mean_spatial_entropy": mean_spatial_entropy,
+        },
+        "history_similarity": {
+            "sim_in": sim_in,
+            "alpha": torch.full_like(fallback_latency, float(history_alpha)),
+        },
+    }
 
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Qwen2
@@ -414,6 +568,24 @@ class Qwen2FlashAttention2(Qwen2Attention):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
         drop_states: Optional[torch.LongTensor] = None,  # [新增参数]
     ):
+        if output_attentions:
+            logger.warning_once(
+                "FlashAttention2 does not return attention weights directly. Falling back to eager attention."
+            )
+            # When attention maps are requested, route to eager attention path
+            # so `attn_weights` is explicitly computed and returned.
+            return super().forward(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
+                drop_states=drop_states,
+            )
+
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
@@ -513,10 +685,9 @@ class Qwen2FlashAttention2(Qwen2Attention):
 
         attn_output = self.o_proj(attn_output)
 
-        if not output_attentions:
-            attn_weights = None
-
-        return attn_output, attn_weights, past_key_value
+        # This branch is reached only when `output_attentions=False`,
+        # so attention weights are intentionally omitted.
+        return attn_output, None, past_key_value
 
 
 class Qwen2SdpaAttention(Qwen2Attention):
@@ -878,6 +1049,74 @@ class Qwen2Model(Qwen2PreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
+    def probe_forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        latency: Optional[torch.FloatTensor] = None,
+        visual_token_positions: Optional[torch.LongTensor] = None,
+        visual_token_coords: Optional[torch.FloatTensor] = None,
+        waypoint_path_token_positions: Optional[torch.LongTensor] = None,
+        waypoint_speed_token_positions: Optional[torch.LongTensor] = None,
+        history_state: Optional[Dict[str, torch.Tensor]] = None,
+        history_alpha: float = 0.2,
+    ) -> Dict[str, torch.Tensor]:
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
+
+        if cache_position is None:
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            cache_position = torch.arange(
+                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+            )
+        if position_ids is None:
+            position_ids = cache_position.unsqueeze(0)
+
+        causal_mask = self._update_causal_mask(
+            attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions=True
+        )
+        hidden_states = inputs_embeds
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+        num_prefix_layers = self.config.num_prefix_layers
+        entropy_layer_idx = num_prefix_layers - 1
+        prefix_last_attention = None
+
+        for idx, decoder_layer in enumerate(self.layers):
+            if idx > entropy_layer_idx:
+                break
+            layer_outputs = decoder_layer(
+                hidden_states,
+                attention_mask=causal_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_values,
+                output_attentions=(idx == entropy_layer_idx),
+                use_cache=False,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
+                drop_states=None,
+            )
+            hidden_states = layer_outputs[0]
+            if idx == entropy_layer_idx:
+                prefix_last_attention = layer_outputs[1]
+
+        fallback_latency = _to_latency_tensor(latency, hidden_states.size(0), hidden_states.device, hidden_states.dtype)
+        return compute_rule_based_latency(
+            prefix_attentions=[prefix_last_attention] if prefix_last_attention is not None else [],
+            inputs_embeds=inputs_embeds,
+            visual_token_positions=visual_token_positions,
+            visual_token_coords=visual_token_coords,
+            waypoint_path_token_positions=waypoint_path_token_positions,
+            waypoint_speed_token_positions=waypoint_speed_token_positions,
+            fallback_latency=fallback_latency,
+            history_state=history_state,
+            history_alpha=history_alpha,
+        )
+
     @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
     def forward(
         self,
@@ -955,7 +1194,9 @@ class Qwen2Model(Qwen2PreTrainedModel):
 
         # === [AdaLLaVA Modification] 初始化变量 ===
         execution_plan = None
-        # 前两层用于生成shceduler计划
+        # Keep latency in scheduler-compatible shape [B].In ruled_based mode this tensor will be replaced by entropy-derived latency.
+        latency_values = _to_latency_tensor(latency, hidden_states.size(0), hidden_states.device, torch.float32)
+        # check latency values
         num_prefix_layers = self.config.num_prefix_layers
         for idx, decoder_layer in enumerate(self.layers):
             # === [AdaLLaVA Modification] 计划生成===
@@ -968,11 +1209,11 @@ class Qwen2Model(Qwen2PreTrainedModel):
                         # 1. 提取 Latency Token 的特征
                         batch_indices = torch.arange(hidden_states.size(0), device=hidden_states.device)
                         latency_token_feat = hidden_states[batch_indices, latency_token_position] 
-                        
+
                         # 2. 调用 Scheduler 生成计划 (假设返回形状需要转置)
                         # execution_plan: [Layers, Batch, 2, Heads]
-                        execution_plan = scheduler(latency_token_feat.contiguous(), latency).transpose(0, 1)
-            
+                        execution_plan = scheduler(latency_token_feat.contiguous(), latency_values).transpose(0, 1)
+                        # print(f"plan ratio={execution_plan.float().mean().item():.4f}, target={latency_values.item():.4f}")
             # === [AdaLLaVA Modification] 当前层开关决策与实现 ===
             drop_states = None
             if execution_plan is not None and idx >= num_prefix_layers:
@@ -991,6 +1232,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
+            layer_output_attentions = output_attentions
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
@@ -998,7 +1240,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                     causal_mask,
                     position_ids,
                     past_key_values,
-                    output_attentions,
+                    layer_output_attentions,
                     use_cache,
                     cache_position,
                     position_embeddings,
@@ -1010,7 +1252,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                     attention_mask=causal_mask,
                     position_ids=position_ids,
                     past_key_value=past_key_values,
-                    output_attentions=output_attentions,
+                    output_attentions=layer_output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
@@ -1020,7 +1262,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
             hidden_states = layer_outputs[0]
 
             if use_cache:
-                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+                next_decoder_cache = layer_outputs[2 if layer_output_attentions else 1]
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
@@ -1217,6 +1459,38 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
     def get_decoder(self):
         return self.model
+
+    def probe_forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        latency: Optional[torch.FloatTensor] = None,
+        visual_token_positions: Optional[torch.LongTensor] = None,
+        visual_token_coords: Optional[torch.FloatTensor] = None,
+        waypoint_path_token_positions: Optional[torch.LongTensor] = None,
+        waypoint_speed_token_positions: Optional[torch.LongTensor] = None,
+        history_state: Optional[Dict[str, torch.Tensor]] = None,
+        history_alpha: float = 0.2,
+    ) -> Dict[str, torch.Tensor]:
+        return self.model.probe_forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            cache_position=cache_position,
+            latency=latency,
+            visual_token_positions=visual_token_positions,
+            visual_token_coords=visual_token_coords,
+            waypoint_path_token_positions=waypoint_path_token_positions,
+            waypoint_speed_token_positions=waypoint_speed_token_positions,
+            history_state=history_state,
+            history_alpha=history_alpha,
+        )
 
     @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)

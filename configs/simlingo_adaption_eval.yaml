@@ -13,11 +13,5 @@ eval:
   agent_config: not_used
 
 latency:
-  value: 0.75
-  # profiles:
-  #   - name: lat_025
-  #     value: 0.25
-  #   - name: lat_050
-  #     value: 0.50
-  #   - name: lat_075
-  #     value: 0.75
+  mode: rule_based
+  fix_latency: 1.0
