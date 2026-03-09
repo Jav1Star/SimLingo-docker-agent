@@ -208,6 +208,8 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.model.load_state_dict(torch.load(self.config_path), strict=True) ## TODO: adallava训练完成后，推理时应该严格加载
         if hasattr(self.model, "probe_history_state"):
             self.model.probe_history_state = {}
+        if hasattr(self.model, "decision_shift_state"):
+            self.model.decision_shift_state = {}
         self.iter = self.config_path.split("epoch=")[-1].split("/")[0]
         self.session = self.config_path.split("/")[-4]
         
@@ -752,6 +754,14 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         # Need to run this every step for GPS filtering
         tick_data = self.tick(input_data)
+        if self.eval_latency_mode == "rule_based":
+            self.DrivingInput["ego_xy"] = torch.tensor(tick_data["gps"], dtype=torch.float32, device=self.device).unsqueeze(0)
+            self.DrivingInput["ego_yaw"] = torch.tensor([tick_data["compass"]], dtype=torch.float32, device=self.device)
+            self.DrivingInput["timestamp"] = torch.tensor([float(timestamp)], dtype=torch.float32, device=self.device)
+        else:
+            self.DrivingInput["ego_xy"] = None
+            self.DrivingInput["ego_yaw"] = None
+            self.DrivingInput["timestamp"] = None
 
         # initialize DrivingInput with dict self.DrivingInput
         model_input = DrivingInput(**self.DrivingInput)
@@ -947,6 +957,8 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         """
         if hasattr(self, "model") and hasattr(self.model, "probe_history_state"):
             self.model.probe_history_state = {}
+        if hasattr(self, "model") and hasattr(self.model, "decision_shift_state"):
+            self.model.decision_shift_state = {}
         del self.model
         del self.config
         if hasattr(self.cfg.data_module, 'encoder') and self.cfg.data_module.encoder == 'llavanext':
@@ -973,7 +985,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         # 仅 rule_based 模式根据注意力熵更新记录使用的latency
         if self.eval_latency_mode != "rule_based":
             return
-        metrics = getattr(self.model, "latest_attention_metrics", None)
+        metrics = getattr(self.model, "scene_difficulty_metrics", None)
         if not isinstance(metrics, dict):
             return
 

@@ -1,6 +1,5 @@
 import datetime
 import json
-import math
 import os
 import random
 from pathlib import Path
@@ -18,6 +17,7 @@ from hydra.utils import get_original_cwd
 
 from .adaptors.adaptors import replace_placeholder_tokens
 from simlingo_adaption_training.models.adaptors.adaptors import DrivingAdaptor, LanguageAdaptor, WaypointInputAdaptor, LatencyAdaptor,AdaptorList
+from simlingo_adaption_training.models.metrics.driving_metrics import DrivingMetricsComputer
 from simlingo_adaption_training.models.utils import summarise_losses
 from simlingo_adaption_training.utils.custom_types import (DrivingExample, DrivingInput,
                                                 DrivingLabel, DrivingOutput,
@@ -56,10 +56,14 @@ class DrivingModel(pl.LightningModule):
         self.processor = processor
         
         self.prediction = {}
-        self.latest_attention_metrics = {}
+        self.scene_difficulty_metrics = {}
         self.probe_history_state = {}
-        self.probe_history_alpha = 0.2
+        self.probe_history_alpha = 0.6
         self.probe_entropy_weight = 0.5
+        self.decision_shift_state = {}
+        self.decision_shift_t_lap = 0.2
+        self._decision_shift_warning_emitted = False
+        self.metrics_computer = DrivingMetricsComputer(self)
         
         self.predict_language = True
         
@@ -170,11 +174,18 @@ class DrivingModel(pl.LightningModule):
         # 单次前向传播 (用于验证或非语言输出模式)
         features, logits = self.forward_model(driving_input, adaptor_dict, ruled_based=ruled_based)
         outputs_by_adaptor = self.adaptors.split_outputs_by_adaptor(adaptor_dict, features)
-        predictions = self.adaptors.driving.get_predictions(outputs_by_adaptor['driving'])
-
+        predictions = self.adaptors.driving.get_predictions(outputs_by_adaptor['driving']) 
+        # check decision_shift_metrics
         for k, v in predictions.items():
             if v is not None:
                 setattr(self, k, v)
+        if ruled_based:
+            decision_shift_metrics = self.metrics_computer.compute_decision_shift_metrics(
+                driving_input=driving_input,
+                current_speed_wps=self.speed_wps,
+                current_route=self.route,
+            )
+            self.scene_difficulty_metrics["decision_shift"] = self.metrics_computer.to_python_metrics(decision_shift_metrics) # tensor 2 python
         """    
         if self.predict_language:
             adaptor_dict = replace_placeholder_tokens(
@@ -319,7 +330,7 @@ class DrivingModel(pl.LightningModule):
         decided_latency = latency_value
         probe_metrics = {}
         if ruled_based:
-            probe_metrics = self._run_rule_based_probe(
+            probe_metrics = self.metrics_computer.run_rule_based_probe(
                 adaptor_dict=adaptor_dict,
                 driving_input=driving_input,
                 inputs_embeds=input_embeds,
@@ -328,7 +339,7 @@ class DrivingModel(pl.LightningModule):
                 cache_position=None,
                 latency_value=latency_value,
             )
-            decided_latency = self._compute_latency_from_probe_metrics(probe_metrics, latency_value)
+            decided_latency = self.metrics_computer.compute_latency_from_probe_metrics(probe_metrics, latency_value)
         # check probe_metrics and self.probe_history_state
         outputs = self.language_model.model(
             attention_mask=attention_mask,
@@ -343,9 +354,9 @@ class DrivingModel(pl.LightningModule):
         )
         if ruled_based:
             probe_metrics["used_latency"] = decided_latency
-            self.latest_attention_metrics = self._extract_rule_based_metrics(probe_metrics)
+            self.scene_difficulty_metrics = self.metrics_computer.to_python_metrics(probe_metrics)
         else:
-            self.latest_attention_metrics = {}
+            self.scene_difficulty_metrics = {}
         features = outputs.hidden_states[-1]
         logits = outputs[0]
 
@@ -356,174 +367,6 @@ class DrivingModel(pl.LightningModule):
             [logits.size(1) - adaptor_embeds.size(1), adaptor_embeds.size(1)], dim=1
         )
         return adaptor_features, adaptor_logits
-
-    def _pad_position_lists(self, pos_lists, device):
-        if len(pos_lists) == 0:
-            return None
-        max_len = max(len(x) for x in pos_lists)
-        if max_len == 0:
-            return torch.full((len(pos_lists), 1), -1, device=device, dtype=torch.long)
-        out = torch.full((len(pos_lists), max_len), -1, device=device, dtype=torch.long)
-        for idx, positions in enumerate(pos_lists):
-            if len(positions) > 0:
-                out[idx, :len(positions)] = torch.tensor(positions, device=device, dtype=torch.long)
-        return out
-
-    def _pad_coord_lists(self, coord_lists, device):
-        if len(coord_lists) == 0:
-            return None
-        max_len = max(len(x) for x in coord_lists)
-        if max_len == 0:
-            return torch.full((len(coord_lists), 1, 2), -1.0, device=device, dtype=torch.float32)
-        out = torch.full((len(coord_lists), max_len, 2), -1.0, device=device, dtype=torch.float32)
-        for idx, coords in enumerate(coord_lists):
-            if len(coords) > 0:
-                out[idx, :len(coords)] = torch.tensor(coords, device=device, dtype=torch.float32)
-        return out
-
-    def _build_rule_based_token_positions(self, adaptor_dict: Dict, driving_input: DrivingInput):
-        # perm 为模型实际输入顺序，inv_perm 用于把“原始拼接索引”映射到“实际输入索引”。
-        perm = adaptor_dict["perm"]  # [B, Seq]
-        inv_perm = perm.argsort(-1)
-        split_sizes = adaptor_dict["split_sizes"].tolist()
-        # split_sizes 对应 language/driving/latency 三段 token 的长度。
-        language_len = int(split_sizes[0])
-        driving_len = int(split_sizes[1]) if len(split_sizes) > 1 else 0
-        driving_start = language_len
-
-        language_ids = adaptor_dict["language__ids"]
-        # 视觉 token 在 language 段中由 <IMG_CONTEXT> 占位符表示。
-        img_context_token_id = self.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
-
-        # 提取每个样本中 visual token 的实际位置（置换后）。
-        visual_pos_lists = []
-        visual_coord_lists = []
-        num_patches = int(driving_input.camera_images.size(2))
-        for b_idx in range(language_ids.size(0)):
-            visual_orig = torch.nonzero(language_ids[b_idx] == img_context_token_id, as_tuple=False).squeeze(-1)
-            visual_new = inv_perm[b_idx, visual_orig].tolist() if visual_orig.numel() > 0 else []
-            visual_pos_lists.append(visual_new)
-
-            coords = []
-            if len(visual_new) > 0:
-                tokens_per_patch = len(visual_new) // num_patches
-                side = int(math.sqrt(tokens_per_patch))
-                for token_rank in range(len(visual_new)):
-                    patch_id = token_rank // tokens_per_patch
-                    local_idx = token_rank % tokens_per_patch
-                    local_r = local_idx // side
-                    local_c = local_idx % side
-                    global_c = patch_id * side + local_c
-                    r_norm = local_r / max(side - 1, 1)
-                    c_norm = global_c / max(num_patches * side - 1, 1)
-                    coords.append([r_norm, c_norm])
-            visual_coord_lists.append(coords)
-
-        # driving 段中 route 表示 path waypoint，speed_wps 表示速度 waypoint。
-        order = list(self.adaptors.driving.order)
-        sizes = self.adaptors.driving.sizes
-        path_size = int(sizes.get("route", 0))
-        speed_size = int(sizes.get("speed_wps", 0))
-        if "route" in order and order.index("route") == 0:
-            path_start = driving_start
-            speed_start = driving_start + path_size
-        else:
-            path_start = driving_start
-            speed_start = driving_start
-
-        # 计算 path/speed 两类 waypoint token 的实际位置（置换后）。
-        path_pos_lists = []
-        speed_pos_lists = []
-        for b_idx in range(inv_perm.size(0)):
-            if path_size > 0 and driving_len > 0:
-                path_orig = torch.arange(path_start, path_start + path_size, device=inv_perm.device)
-                path_new = inv_perm[b_idx, path_orig].tolist()
-            else:
-                path_new = []
-            if speed_size > 0 and driving_len > 0:
-                speed_orig = torch.arange(speed_start, speed_start + speed_size, device=inv_perm.device)
-                speed_new = inv_perm[b_idx, speed_orig].tolist()
-            else:
-                speed_new = []
-            path_pos_lists.append(path_new)
-            speed_pos_lists.append(speed_new)
-
-        # 补齐为定长张量，空位使用 -1，便于后续批量索引注意力矩阵。
-        visual_positions = self._pad_position_lists(visual_pos_lists, inv_perm.device)
-        visual_coords = self._pad_coord_lists(visual_coord_lists, inv_perm.device)
-        path_positions = self._pad_position_lists(path_pos_lists, inv_perm.device)
-        speed_positions = self._pad_position_lists(speed_pos_lists, inv_perm.device)
-        return visual_positions, visual_coords, path_positions, speed_positions
-
-    def _run_rule_based_probe(
-        self,
-        adaptor_dict: Dict,
-        driving_input: DrivingInput,
-        inputs_embeds: Tensor,
-        attention_mask: Tensor,
-        position_ids: Optional[Tensor],
-        cache_position: Optional[Tensor],
-        latency_value: Optional[Tensor],
-    ):
-        (
-            visual_token_positions,
-            visual_token_coords,
-            waypoint_path_token_positions,
-            waypoint_speed_token_positions,
-        ) = self._build_rule_based_token_positions(adaptor_dict, driving_input)
-
-        return self.language_model.model.probe_forward(
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            inputs_embeds=inputs_embeds,
-            cache_position=cache_position,
-            latency=latency_value,
-            visual_token_positions=visual_token_positions,
-            visual_token_coords=visual_token_coords,
-            waypoint_path_token_positions=waypoint_path_token_positions,
-            waypoint_speed_token_positions=waypoint_speed_token_positions,
-            history_state=self.probe_history_state,
-            history_alpha=self.probe_history_alpha,
-        )
-
-    def _compute_latency_from_probe_metrics(self, metrics, fallback_latency):
-        waypoint_entropy = metrics.get("waypoint_entropy", {}) if isinstance(metrics, dict) else {}
-        history_similarity = metrics.get("history_similarity", {}) if isinstance(metrics, dict) else {}
-
-        entropy_mean = waypoint_entropy.get("mean_spatial_entropy")
-        sim_in = history_similarity.get("sim_in")
-        if entropy_mean is None or sim_in is None:
-            return fallback_latency
-
-        if not isinstance(entropy_mean, torch.Tensor):
-            if isinstance(fallback_latency, torch.Tensor):
-                entropy_mean = torch.full_like(fallback_latency, float(entropy_mean))
-            else:
-                entropy_mean = torch.tensor(float(entropy_mean))
-        if not isinstance(sim_in, torch.Tensor):
-            if isinstance(fallback_latency, torch.Tensor):
-                sim_in = torch.full_like(fallback_latency, float(sim_in))
-            else:
-                sim_in = torch.tensor(float(sim_in))
-
-        decided_latency = self.probe_entropy_weight * entropy_mean + (1.0 - self.probe_entropy_weight) * sim_in
-        return decided_latency.clamp(0.0, 1.0)
-
-    def _extract_rule_based_metrics(self, outputs):
-        metrics = outputs if isinstance(outputs, dict) else getattr(outputs, "rule_based_metrics", None)
-        if metrics is None:
-            return {}
-
-        def _to_python(value):
-            if isinstance(value, dict):
-                return {k: _to_python(v) for k, v in value.items()}
-            if isinstance(value, torch.Tensor):
-                tensor = value.detach().cpu()
-                return float(tensor.item()) if tensor.numel() == 1 else tensor.tolist()
-            return value
-
-        return _to_python(metrics)
-    
 
     def forward_loss(self, example: DrivingExample, per_sample=False,latency=None) -> TrainingOutput:
         """

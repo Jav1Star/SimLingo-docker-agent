@@ -49,6 +49,9 @@ class DrivingInput(NamedTuple):
     target_point: torch.Tensor  # [B, 2] float32
     prompt: LanguageLabel
     prompt_inference: LanguageLabel
+    ego_xy: Optional[torch.Tensor] = None  # [B, 2] float32, optional for rule_based decision-shift
+    ego_yaw: Optional[torch.Tensor] = None  # [B] float32, optional for rule_based decision-shift
+    timestamp: Optional[torch.Tensor] = None  # [B] float32, optional for rule_based decision-shift
 
 class DrivingLabel(NamedTuple):
     waypoints: Tensor  # [B, F, 2] 11 future waypoints 0.2s apart
