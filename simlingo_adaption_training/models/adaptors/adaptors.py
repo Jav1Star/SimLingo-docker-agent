@@ -549,14 +549,20 @@ def replace_placeholder_tokens(
             inputs_embeds = inputs_embeds.reshape(BS * N_embed, C_embed)
             input_ids = input_ids.reshape(BS * N_embed)
             selected = (input_ids == image_encoder.img_context_token_id)
-            try:
-                inputs_embeds[selected] = inputs_embeds[selected] * 0.0 + vit_embeds.reshape(-1, C_embed)
-            except Exception as e:
-                vit_embeds = vit_embeds.reshape(-1, C)
-                print(f'warning: {e}, inputs_embeds[selected].shape={inputs_embeds[selected].shape}, '
-                    f'vit_embeds.shape={vit_embeds.shape}')
-                n_token = selected.sum()
-                inputs_embeds[selected] = inputs_embeds[selected] * 0.0 + vit_embeds[:n_token]
+            n_token = int(selected.sum().item())
+            vit_embeds = vit_embeds.reshape(-1, C_embed).to(
+                device=inputs_embeds.device,
+                dtype=inputs_embeds.dtype,
+            )
+            if vit_embeds.size(0) < n_token:
+                raise RuntimeError(
+                    f"Not enough vision tokens for <IMG_CONTEXT>: required={n_token}, got={vit_embeds.size(0)}"
+                )
+            if vit_embeds.size(0) > n_token:
+                print(
+                    f"warning: vision token count mismatch, required={n_token}, got={vit_embeds.size(0)}; truncating."
+                )
+            inputs_embeds[selected] = vit_embeds[:n_token]
             inputs_embeds = inputs_embeds.reshape(BS, N_embed, C_embed)
             input_ids = input_ids.reshape(BS, N_embed)
         # pixel_values is not None but is empty ---> text only cases

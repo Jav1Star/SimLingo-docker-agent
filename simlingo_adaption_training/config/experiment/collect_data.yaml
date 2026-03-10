@@ -1,0 +1,65 @@
+# @package _global_
+defaults:
+  - /data_module: carla_no_buckets
+  - /model/vision_model: vlm
+  - /data_module/base_dataset: dataset
+
+model:
+  lr: 3e-5
+  predict_route_as_wps: True
+  speed_wps_mode: 2d
+  computation_budget: 'random' # fixed, random
+  language_model:
+    variant: 'OpenGVLab/InternVL2-1B'
+    lora: True
+    lora_alpha: 64
+    lora_r: 32
+    lora_dropout: 0.1
+  vision_model:
+    variant: 'OpenGVLab/InternVL2-1B'
+  scheduler_model:
+    tau: 5
+    is_hard: True
+    threshold: 0.5
+    bias: True
+    num_prefix_layers: 10 # 10 out of 24
+    _target_: "simlingo_adaption_training.models.scheduler.simple_scheduler.SimpleScheduler_L"
+
+
+data_module:
+  batch_size: 8 
+  num_workers: 8
+  # dreamer_dataset: null
+  base_dataset:
+    data_path: data/simlingo
+    bucket_path: data/simlingo
+    pred_len: 11
+    cut_bottom_quarter: True #图像预处理操作，裁剪掉图像底部的 1/4。在自动驾驶中，底部通常是本车的引擎盖，包含信息量较少，裁剪可减少干扰。
+    use_commentary: True
+    use_qa: True
+    qa_augmentation: True
+    img_shift_augmentation: True # 图像增强
+    img_shift_augmentation_prob: 0.5
+    hist_len: 1 # 历史帧长度。仅使用当前帧作为输入
+    route_as: target_point_command # 路线表示方式：目标点+指令
+    use_lmdrive_commands: True
+    use_old_towns: True
+    use_town13: True
+
+    use_safety_flag: True
+
+max_epochs: 5
+val_every_n_epochs: 1
+
+debug: False
+gpus: 1
+seed: 9876
+name: adaption_train_seed_9876
+precision: 16-mixed
+resume: False
+adaption_train: True
+simlingo_checkpoint: "models/simlingoCheckpoints/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin"
+
+hydra:
+  run:
+    dir: outputs/${wandb_name}_${name}

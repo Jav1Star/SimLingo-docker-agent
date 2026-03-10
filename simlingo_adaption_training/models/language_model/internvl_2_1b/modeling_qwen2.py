@@ -176,36 +176,63 @@ def compute_rule_based_latency(
     mean_spatial_entropy = torch.where(valid_count > 0, entropy_sum / valid_count.clamp_min(1), fallback_latency.float())
     mean_spatial_entropy = mean_spatial_entropy.clamp(0.0, 1.0)
 
-    # history similarity
-    sim_in = torch.full_like(fallback_latency, float("nan"))
+    # history similarity (per-sample, no batch-mean mixing)
+    sim_in = fallback_latency.float().clone()
     if inputs_embeds is not None and visual_token_positions is not None:
-        # V_global per sample (N x C -> C), then shared history state uses batch-mean V_global.
-        sample_globals = []
-        for b_idx in range(inputs_embeds.size(0)):
+        batch_size = inputs_embeds.size(0)
+        hidden_size = inputs_embeds.size(-1)
+        device = inputs_embeds.device
+        dtype = inputs_embeds.dtype
+
+        v_global = torch.zeros((batch_size, hidden_size), device=device, dtype=dtype)
+        v_global_valid = torch.zeros(batch_size, device=device, dtype=torch.bool)
+        for b_idx in range(batch_size):
             vis_idx = visual_token_positions[b_idx]
             vis_idx = vis_idx[(vis_idx >= 0) & (vis_idx < inputs_embeds.size(1))]
             if vis_idx.numel() == 0:
                 continue
-            sample_globals.append(inputs_embeds[b_idx, vis_idx].mean(dim=0))
+            v_global[b_idx] = inputs_embeds[b_idx, vis_idx].mean(dim=0)
+            v_global_valid[b_idx] = True
 
-        if len(sample_globals) > 0:
-            v_global_batch = torch.stack(sample_globals, dim=0).mean(dim=0)
-            prev_hist = None if history_state is None else history_state.get("v_hist")
-            if prev_hist is None:
-                sim_scalar = fallback_latency.new_tensor(1.0)
-            else:
-                denom = v_global_batch.norm(p=2) * prev_hist.norm(p=2) + eps
-                cosine = (v_global_batch * prev_hist).sum() / denom
-                sim_scalar = (0.5 * (1.0 + cosine)).clamp(0.0, 1.0)
-            sim_in = torch.full_like(fallback_latency, sim_scalar)
+        prev_hist = torch.zeros_like(v_global)
+        prev_valid = torch.zeros(batch_size, device=device, dtype=torch.bool)
+        if history_state is not None:
+            prev_hist_raw = history_state.get("v_hist")
+            prev_valid_raw = history_state.get("v_hist_valid")
+            if isinstance(prev_hist_raw, torch.Tensor):
+                if prev_hist_raw.ndim == 1 and prev_hist_raw.numel() == hidden_size:
+                    prev_hist = prev_hist_raw.to(device=device, dtype=dtype).unsqueeze(0).expand(batch_size, -1).clone()
+                    prev_valid = torch.ones(batch_size, device=device, dtype=torch.bool)
+                elif prev_hist_raw.ndim == 2 and prev_hist_raw.size(0) == batch_size and prev_hist_raw.size(1) == hidden_size:
+                    prev_hist = prev_hist_raw.to(device=device, dtype=dtype)
+                    if isinstance(prev_valid_raw, torch.Tensor) and prev_valid_raw.numel() == batch_size:
+                        prev_valid = prev_valid_raw.to(device=device, dtype=torch.bool)
+                    else:
+                        prev_valid = torch.isfinite(prev_hist).all(dim=-1)
 
-            if history_state is not None:
-                if prev_hist is None:
-                    history_state["v_hist"] = v_global_batch.detach()
-                else:
-                    history_state["v_hist"] = (
-                        history_alpha * v_global_batch + (1.0 - history_alpha) * prev_hist
-                    ).detach()
+        denom = v_global.norm(p=2, dim=-1) * prev_hist.norm(p=2, dim=-1) + eps
+        cosine = (v_global * prev_hist).sum(dim=-1) / denom
+        cosine = cosine.clamp(-1.0, 1.0)
+        sim_from_hist = (0.5 * (1.0 + cosine)).clamp(0.0, 1.0)
+
+        has_hist = v_global_valid & prev_valid
+        first_seen = v_global_valid & (~prev_valid)
+        sim_in = torch.where(has_hist, sim_from_hist, sim_in)
+        sim_in = torch.where(first_seen, torch.ones_like(sim_in), sim_in)
+
+        if history_state is not None:
+            updated_hist = prev_hist.clone()
+            blend_mask = v_global_valid & prev_valid
+            init_mask = v_global_valid & (~prev_valid)
+            if blend_mask.any():
+                updated_hist[blend_mask] = (
+                    history_alpha * v_global[blend_mask] + (1.0 - history_alpha) * prev_hist[blend_mask]
+                )
+            if init_mask.any():
+                updated_hist[init_mask] = v_global[init_mask]
+            updated_valid = prev_valid | v_global_valid
+            history_state["v_hist"] = updated_hist.detach()
+            history_state["v_hist_valid"] = updated_valid.detach()
 
     return {
         "waypoint_entropy": {
@@ -1079,6 +1106,24 @@ class Qwen2Model(Qwen2PreTrainedModel):
         causal_mask = self._update_causal_mask(
             attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions=True
         )
+        entropy_layer_mask = causal_mask
+        if isinstance(causal_mask, torch.Tensor) and causal_mask.dim() == 2:
+            # For flash-attn configs, non-entropy layers can consume 2D masks.
+            # Entropy layer requests attention maps and may fallback to eager attention,
+            # which requires a 4D causal mask.
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            target_length = past_seen_tokens + inputs_embeds.shape[1] + 1
+            entropy_layer_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
+                attention_mask=causal_mask,
+                sequence_length=inputs_embeds.shape[1],
+                target_length=target_length,
+                dtype=inputs_embeds.dtype,
+                device=inputs_embeds.device,
+                cache_position=cache_position,
+                batch_size=inputs_embeds.shape[0],
+                config=self.config,
+                past_key_values=past_key_values,
+            )
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
@@ -1089,9 +1134,10 @@ class Qwen2Model(Qwen2PreTrainedModel):
         for idx, decoder_layer in enumerate(self.layers):
             if idx > entropy_layer_idx:
                 break
+            layer_attention_mask = entropy_layer_mask if idx == entropy_layer_idx else causal_mask
             layer_outputs = decoder_layer(
                 hidden_states,
-                attention_mask=causal_mask,
+                attention_mask=layer_attention_mask,
                 position_ids=position_ids,
                 past_key_value=past_key_values,
                 output_attentions=(idx == entropy_layer_idx),

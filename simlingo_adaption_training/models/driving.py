@@ -58,9 +58,11 @@ class DrivingModel(pl.LightningModule):
         self.prediction = {}
         self.scene_difficulty_metrics = {}
         self.probe_history_state = {}
+        self.probe_history_state_by_route = {}
         self.probe_history_alpha = 0.6
         self.probe_entropy_weight = 0.5
         self.decision_shift_state = {}
+        self.decision_shift_state_by_route = {}
         self.decision_shift_t_lap = 0.2
         self._decision_shift_warning_emitted = False
         self.metrics_computer = DrivingMetricsComputer(self)
@@ -157,6 +159,7 @@ class DrivingModel(pl.LightningModule):
         # [新增] 接收外部传入的 latency 参数
         latency: Optional[float] = None, # agent_simlingo中传入
         ruled_based: bool = False,
+        route_keys: Optional[List[str]] = None,
     ) -> DrivingOutput:
         """
         Samples a trajectory from the model.
@@ -169,10 +172,12 @@ class DrivingModel(pl.LightningModule):
             driving_input = example.driving_input
         except AttributeError:
             driving_input = example
+        if ruled_based and route_keys is None:
+            route_keys = self._extract_route_keys(example)
         
         adaptor_dict = self.adaptors(example, inference=True,latency=latency,scheduler=self.scheduler)
         # 单次前向传播 (用于验证或非语言输出模式)
-        features, logits = self.forward_model(driving_input, adaptor_dict, ruled_based=ruled_based)
+        features, logits = self.forward_model(driving_input, adaptor_dict, ruled_based=ruled_based, route_keys=route_keys)
         outputs_by_adaptor = self.adaptors.split_outputs_by_adaptor(adaptor_dict, features)
         predictions = self.adaptors.driving.get_predictions(outputs_by_adaptor['driving']) 
         # check decision_shift_metrics
@@ -184,6 +189,7 @@ class DrivingModel(pl.LightningModule):
                 driving_input=driving_input,
                 current_speed_wps=self.speed_wps,
                 current_route=self.route,
+                route_keys=route_keys,
             )
             self.scene_difficulty_metrics["decision_shift"] = self.metrics_computer.to_python_metrics(decision_shift_metrics) # tensor 2 python
         """    
@@ -293,6 +299,7 @@ class DrivingModel(pl.LightningModule):
                       adaptor_dict: Dict, 
                       driving_labels: DrivingLabel = None,
                       ruled_based: bool = False,
+                      route_keys: Optional[List[str]] = None,
                       ) -> Tensor:
         """
         Forward model conditioned on the given driving input.
@@ -338,8 +345,19 @@ class DrivingModel(pl.LightningModule):
                 position_ids=position_ids,
                 cache_position=None,
                 latency_value=latency_value,
+                route_keys=route_keys,
             )
-            decided_latency = self.metrics_computer.compute_latency_from_probe_metrics(probe_metrics, latency_value)
+            # TEMP hardcode for data collection: keep ruled_based latency fixed to 1.0.
+            # TODO: revert this to dynamic latency computation from probe metrics after data collection.
+            if latency_value is not None:
+                decided_latency = torch.ones_like(latency_value)
+            else:
+                decided_latency = torch.ones(
+                    (input_embeds.size(0),),
+                    device=input_embeds.device,
+                    dtype=input_embeds.dtype,
+                )
+            # decided_latency = self.metrics_computer.compute_latency_from_probe_metrics(probe_metrics, latency_value)
         # check probe_metrics and self.probe_history_state
         outputs = self.language_model.model(
             attention_mask=attention_mask,
@@ -368,7 +386,31 @@ class DrivingModel(pl.LightningModule):
         )
         return adaptor_features, adaptor_logits
 
-    def forward_loss(self, example: DrivingExample, per_sample=False,latency=None) -> TrainingOutput:
+    @staticmethod
+    def _measurement_to_route_key(measurement_path: str) -> str:
+        parts = measurement_path.rsplit("/measurements/", 1)
+        if len(parts) == 2:
+            return parts[0]
+        return os.path.dirname(measurement_path)
+
+    def _extract_route_keys(self, example: DrivingExample) -> Optional[List[str]]:
+        if not hasattr(example, "run_id") or example.run_id is None:
+            return None
+        try:
+            measurement_paths = decode_uint8(example.run_id)
+            return [self._measurement_to_route_key(path) for path in measurement_paths]
+        except Exception:
+            return None
+
+    def forward_loss(
+        self,
+        example: DrivingExample,
+        per_sample=False,
+        latency=None,
+        ruled_based: bool = False,
+        route_keys: Optional[List[str]] = None,
+        return_scene_metrics: bool = False,
+    ) -> TrainingOutput:
         """
         Forward pass of the model for a driving input, followed by
         computing the next token cross-entropy loss.
@@ -392,11 +434,34 @@ class DrivingModel(pl.LightningModule):
                      latency = random.uniform(0.25, 1.0)
             if self.computation_budget == 'fixed':
                 latency = 1.0 # test
+        if ruled_based and route_keys is None:
+            route_keys = self._extract_route_keys(example)
         adaptor_dict = self.adaptors(example, latency=latency, scheduler=self.scheduler)
         adaptor_embeds = adaptor_dict["inputs"]
         adaptor_mask = adaptor_dict['inputs_mask']
 
-        adaptor_features, adaptor_logits = self.forward_model(example.driving_input, adaptor_dict, driving_labels=example.driving_label)
+        adaptor_features, adaptor_logits = self.forward_model(
+            example.driving_input,
+            adaptor_dict,
+            driving_labels=example.driving_label,
+            ruled_based=ruled_based,
+            route_keys=route_keys,
+        )
+
+        if ruled_based:
+            outputs_by_adaptor = self.adaptors.split_outputs_by_adaptor(adaptor_dict, adaptor_features)
+            predictions = self.adaptors.driving.get_predictions(outputs_by_adaptor['driving'])
+            speed_wps_pred = predictions.get("speed_wps")
+            route_pred = predictions.get("route")
+            decision_shift_metrics = self.metrics_computer.compute_decision_shift_metrics(
+                driving_input=example.driving_input,
+                current_speed_wps=speed_wps_pred,
+                current_route=route_pred,
+                route_keys=route_keys,
+            )
+            self.scene_difficulty_metrics["decision_shift"] = self.metrics_computer.to_python_metrics(decision_shift_metrics)
+        else:
+            self.scene_difficulty_metrics = {}
 
         loss_dict = self.adaptors.compute_loss(adaptor_features, adaptor_logits, adaptor_dict, example)
 
@@ -405,9 +470,14 @@ class DrivingModel(pl.LightningModule):
         
         pred_labels = {k:v for k, v in loss_dict.items() if not k.endswith("loss") and not k.endswith("log")}
         if per_sample:
+            if return_scene_metrics:
+                return loss_dict_only_losses, pred_labels, self.scene_difficulty_metrics
             return loss_dict_only_losses, pred_labels
 
-        return summarise_losses(loss_dict_only_losses), loss_logs
+        output = summarise_losses(loss_dict_only_losses)
+        if return_scene_metrics:
+            return output, loss_logs, self.scene_difficulty_metrics
+        return output, loss_logs
 
     def training_step(self, batch: DrivingExample, _batch_idx: int = 0):
         output, loss_logs = self.forward_loss(batch)

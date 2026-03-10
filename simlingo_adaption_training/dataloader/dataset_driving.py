@@ -30,6 +30,18 @@ class Data_Driving(BaseDataset):  # pylint: disable=locally-disabled, invalid-na
         ):
         super().__init__(dreamer=False, **cfg)
 
+    @staticmethod
+    def _parse_frame_id(measurement_path: str):
+        file_name = os.path.basename(measurement_path)
+        if file_name.endswith(".json.gz"):
+            file_name = file_name[:-8]
+        else:
+            file_name = os.path.splitext(file_name)[0]
+        try:
+            return int(file_name)
+        except ValueError:
+            return None
+
     def __getitem__(self, index):
         """Returns the item at index idx. """
         # Disable threading because the data loader will already split in threads.
@@ -50,6 +62,27 @@ class Data_Driving(BaseDataset):  # pylint: disable=locally-disabled, invalid-na
             )
         
         data['measurement_path'] = measurement_file_current
+        frame_id = self._parse_frame_id(measurement_file_current)
+
+        ego_xy = None
+        ego_yaw = None
+        ego_matrix = current_measurement.get("ego_matrix")
+        if ego_matrix is not None:
+            ego_matrix_np = np.asarray(ego_matrix, dtype=np.float32)
+            if ego_matrix_np.ndim == 2 and ego_matrix_np.shape[0] >= 3 and ego_matrix_np.shape[1] >= 4:
+                ego_xy = (float(ego_matrix_np[0, 3]), float(ego_matrix_np[1, 3]))
+                ego_yaw = float(np.arctan2(ego_matrix_np[1, 0], ego_matrix_np[0, 0]))
+
+        timestamp = None
+        for key in ("timestamp", "time", "sim_time", "frame_time"):
+            if key in current_measurement and current_measurement[key] is not None:
+                try:
+                    timestamp = float(current_measurement[key])
+                    break
+                except (TypeError, ValueError):
+                    continue
+        if timestamp is None and frame_id is not None:
+            timestamp = float(frame_id) * 0.05
 
         # Determine whether the augmented camera or the normal camera is used.
         if augment_exists and random.random() <= self.img_shift_augmentation_prob and self.img_shift_augmentation:
@@ -317,6 +350,10 @@ class Data_Driving(BaseDataset):  # pylint: disable=locally-disabled, invalid-na
             placeholder_values = placeholder_values,
             measurement_path = data['measurement_path'],
             dataset = 'driving',
+            ego_xy=ego_xy,
+            ego_yaw=ego_yaw,
+            timestamp=timestamp,
+            frame_id=frame_id,
         )
         
         if VIZ_DATA:

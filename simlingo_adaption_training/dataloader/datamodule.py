@@ -315,6 +315,20 @@ class DataModule(LightningDataModule):
         else:
             qa_templates = None
             eval_infos = None
+
+        ego_xy = []
+        ego_yaw = []
+        timestamp = []
+        for i in range(BS):
+            item = data[i]
+            if item.ego_xy is None or item.ego_yaw is None or item.timestamp is None:
+                ego_xy.append([np.nan, np.nan])
+                ego_yaw.append(np.nan)
+                timestamp.append(np.nan)
+            else:
+                ego_xy.append([float(item.ego_xy[0]), float(item.ego_xy[1])])
+                ego_yaw.append(float(item.ego_yaw))
+                timestamp.append(float(item.timestamp))
         
         driving_input=DrivingInput(
                 camera_images=image_ff_pixel,  # [B, T, N, C, H, W] uint8 [0, 255]
@@ -325,6 +339,9 @@ class DataModule(LightningDataModule):
                 target_point=torch.tensor(np.asarray([data[i].target_points for i in range(len(data))])).float(),  # [B, 2] float32
                 prompt=prompt_languagelabel,
                 prompt_inference=prompt_question_languagelabel,
+                ego_xy=torch.tensor(np.asarray(ego_xy)).float(),
+                ego_yaw=torch.tensor(np.asarray(ego_yaw)).float(),
+                timestamp=torch.tensor(np.asarray(timestamp)).float(),
             )
 
         driving_label=DrivingLabel(

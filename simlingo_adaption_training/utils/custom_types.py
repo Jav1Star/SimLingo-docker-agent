@@ -17,6 +17,10 @@ class DatasetOutput(NamedTuple):
     dataset: Optional[str]
     qa_templates: Optional[Tuple[str, str]] = None
     eval_infos: Optional[Dict] = None
+    ego_xy: Optional[Tuple[float, float]] = None
+    ego_yaw: Optional[float] = None
+    timestamp: Optional[float] = None
+    frame_id: Optional[int] = None
 
 class LanguageLabel(NamedTuple):
     phrase_ids: Tensor  # [B, max(len(tokens))] int64
