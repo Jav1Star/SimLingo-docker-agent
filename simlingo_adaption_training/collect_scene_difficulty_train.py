@@ -207,6 +207,47 @@ def to_repo_relative(path: str, repo_root: Path) -> str:
         return str(path_obj)
 
 
+def _route_id_from_route_key(route_key: str) -> str:
+    return Path(route_key).name
+
+
+def load_processed_route_ids(processed_jsonl_path: Path) -> set:
+    """
+    Load processed route ids from an existing metrics JSONL file.
+    A route is considered processed if it appears at least once in that file.
+    """
+    route_ids = set()
+    if not processed_jsonl_path.exists():
+        return route_ids
+
+    with open(processed_jsonl_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            route_id = row.get("route_id", None)
+            if route_id:
+                route_ids.add(str(route_id))
+                continue
+
+            route_key = row.get("route_key", None)
+            if route_key:
+                route_ids.add(_route_id_from_route_key(str(route_key)))
+                continue
+
+            measurement_path = row.get("measurement_path", None)
+            if measurement_path:
+                route_key_from_measurement = _route_key_from_measurement_path(str(measurement_path))
+                route_ids.add(_route_id_from_route_key(route_key_from_measurement))
+
+    return route_ids
+
+
 def resolve_route_batch_size(cfg) -> int:
     cfg_batch_size = int(getattr(cfg.data_module, "batch_size", 1))
     env_override = os.getenv("SIMLINGO_ROUTE_BATCH_SIZE", "").strip()
@@ -286,7 +327,33 @@ def main(cfg: TrainConfig):
     print(f"[collect] autocast enabled={use_autocast}, dtype={autocast_dtype}, reason={autocast_reason}")
 
     route_batch_size = resolve_route_batch_size(cfg)
+    root = Path(get_original_cwd())
     records = build_sample_records(train_dataset)
+
+    processed_jsonl_env = os.getenv("SIMLINGO_SKIP_ROUTES_FROM_JSONL", "").strip()
+    if processed_jsonl_env:
+        processed_jsonl_path = Path(processed_jsonl_env)
+    else:
+        processed_jsonl_path = root / "outputs" / "scene_difficulty" / "part_1.jsonl"
+
+    processed_route_ids = load_processed_route_ids(processed_jsonl_path)
+    if processed_route_ids:
+        before_records = len(records)
+        before_route_ids = {_route_id_from_route_key(record.route_key) for record in records}
+        records = [record for record in records if _route_id_from_route_key(record.route_key) not in processed_route_ids]
+        after_route_ids = {_route_id_from_route_key(record.route_key) for record in records}
+        skipped_routes = len(before_route_ids - after_route_ids)
+        skipped_records = before_records - len(records)
+        print(
+            f"[collect] skip processed routes from {processed_jsonl_path}: "
+            f"skipped_routes={skipped_routes}, skipped_frames={skipped_records}"
+        )
+    else:
+        print(f"[collect] no processed-route skip file used: {processed_jsonl_path}")
+
+    if not records:
+        raise RuntimeError("No records left after filtering processed routes.")
+
     num_frames = len(records)
     route_batches = build_route_batches(records, route_batch_size=route_batch_size)
     route_counts = defaultdict(int)
@@ -299,7 +366,6 @@ def main(cfg: TrainConfig):
         f"route_batch_size={route_batch_size}, scheduler=fixed_slot_parallel(route-continuous)"
     )
 
-    root = Path(get_original_cwd())
     save_dir = root / "outputs" / "scene_difficulty"
     save_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
