@@ -80,15 +80,15 @@ def _to_latency_tensor(
     return latency.to(device=device, dtype=dtype)
 
 
-def _waypoint_attention_spatial_entropy_from_prefix(
+def _token_attention_spatial_entropy_from_prefix(
     prefix_attentions: List[torch.Tensor],
-    waypoint_positions: Optional[torch.LongTensor],
+    token_positions: Optional[torch.LongTensor],
     visual_positions: Optional[torch.LongTensor],
     visual_coords: Optional[torch.FloatTensor],
     spatial_lambda: float = 1e-3,
     eps: float = 1e-8,
 ) -> Optional[torch.Tensor]:
-    if not prefix_attentions or waypoint_positions is None or visual_positions is None or visual_coords is None:
+    if not prefix_attentions or token_positions is None or visual_positions is None or visual_coords is None:
         return None
 
     attn = torch.stack(prefix_attentions, dim=0).float()  # [L, B, H, Q, K]
@@ -97,20 +97,20 @@ def _waypoint_attention_spatial_entropy_from_prefix(
     spatial_entropy = torch.full((batch_size,), float("nan"), device=device, dtype=attn.dtype)
 
     for b_idx in range(batch_size):
-        wp_idx = waypoint_positions[b_idx]
+        token_idx = token_positions[b_idx]
         vis_idx = visual_positions[b_idx]
         vis_coords = visual_coords[b_idx]
-        wp_idx = wp_idx[(wp_idx >= 0) & (wp_idx < q_len)]
+        token_idx = token_idx[(token_idx >= 0) & (token_idx < q_len)]
         valid_vis_mask = (vis_idx >= 0) & (vis_idx < k_len)
         vis_idx = vis_idx[valid_vis_mask]
         vis_coords = vis_coords[valid_vis_mask]
-        if wp_idx.numel() == 0 or vis_idx.numel() == 0:
+        if token_idx.numel() == 0 or vis_idx.numel() == 0:
             continue
 
-        wp_idx = torch.unique(wp_idx, sorted=True)
+        token_idx = torch.unique(token_idx, sorted=True)
 
         # [L, H, Nw, Nv] -> [Nv]
-        selected = attn[:, b_idx][:, :, wp_idx][:, :, :, vis_idx]
+        selected = attn[:, b_idx][:, :, token_idx][:, :, :, vis_idx]
         v_attn = selected.mean(dim=(0, 1, 2))
 
         vis_coords = vis_coords.to(device=device, dtype=attn.dtype)
@@ -141,40 +141,70 @@ def compute_rule_based_latency(
     waypoint_path_token_positions: Optional[torch.LongTensor],
     waypoint_speed_token_positions: Optional[torch.LongTensor],
     fallback_latency: torch.Tensor,
+    latency_token_positions: Optional[torch.LongTensor] = None,
+    entropy_token_source: str = "waypoints",
     history_state: Optional[Dict[str, torch.Tensor]] = None,
     history_alpha: float = 0.2,
     spatial_lambda: float = 1e-3,
     eps: float = 1e-8,
 ) -> Dict[str, torch.Tensor]:
-    # waypoints spatial entropy
-    path_spatial_entropy = _waypoint_attention_spatial_entropy_from_prefix(
-        prefix_attentions=prefix_attentions,
-        waypoint_positions=waypoint_path_token_positions,
-        visual_positions=visual_token_positions,
-        visual_coords=visual_token_coords,
-        spatial_lambda=spatial_lambda,
-        eps=eps,
-    )
-    speed_spatial_entropy = _waypoint_attention_spatial_entropy_from_prefix(
-        prefix_attentions=prefix_attentions,
-        waypoint_positions=waypoint_speed_token_positions,
-        visual_positions=visual_token_positions,
-        visual_coords=visual_token_coords,
-        spatial_lambda=spatial_lambda,
-        eps=eps,
-    )
+    token_source = str(entropy_token_source).strip().lower()
+    if token_source not in {"waypoints", "latency"}:
+        token_source = "waypoints"
 
-    if path_spatial_entropy is None:
-        path_spatial_entropy = torch.full_like(fallback_latency, float("nan"))
-    if speed_spatial_entropy is None:
-        speed_spatial_entropy = torch.full_like(fallback_latency, float("nan"))
+    path_spatial_entropy = torch.full_like(fallback_latency, float("nan"))
+    speed_spatial_entropy = torch.full_like(fallback_latency, float("nan"))
+    latency_spatial_entropy = torch.full_like(fallback_latency, float("nan"))
 
-    entropy_stack = torch.stack([path_spatial_entropy, speed_spatial_entropy], dim=0)
-    valid = torch.isfinite(entropy_stack)
-    valid_count = valid.sum(dim=0)
-    entropy_sum = torch.where(valid, entropy_stack, torch.zeros_like(entropy_stack)).sum(dim=0)
-    mean_spatial_entropy = torch.where(valid_count > 0, entropy_sum / valid_count.clamp_min(1), fallback_latency.float())
-    mean_spatial_entropy = mean_spatial_entropy.clamp(0.0, 1.0)
+    if token_source == "latency":
+        latency_spatial_entropy_raw = _token_attention_spatial_entropy_from_prefix(
+            prefix_attentions=prefix_attentions,
+            token_positions=latency_token_positions,
+            visual_positions=visual_token_positions,
+            visual_coords=visual_token_coords,
+            spatial_lambda=spatial_lambda,
+            eps=eps,
+        )
+        if latency_spatial_entropy_raw is not None:
+            latency_spatial_entropy = latency_spatial_entropy_raw
+        # In latency mode, missing latency-token entropy should remain NaN.
+        mean_spatial_entropy = torch.where(
+            torch.isfinite(latency_spatial_entropy),
+            latency_spatial_entropy.clamp(0.0, 1.0),
+            torch.full_like(latency_spatial_entropy, float("nan")),
+        )
+    else:
+        path_spatial_entropy_raw = _token_attention_spatial_entropy_from_prefix(
+            prefix_attentions=prefix_attentions,
+            token_positions=waypoint_path_token_positions,
+            visual_positions=visual_token_positions,
+            visual_coords=visual_token_coords,
+            spatial_lambda=spatial_lambda,
+            eps=eps,
+        )
+        speed_spatial_entropy_raw = _token_attention_spatial_entropy_from_prefix(
+            prefix_attentions=prefix_attentions,
+            token_positions=waypoint_speed_token_positions,
+            visual_positions=visual_token_positions,
+            visual_coords=visual_token_coords,
+            spatial_lambda=spatial_lambda,
+            eps=eps,
+        )
+        if path_spatial_entropy_raw is not None:
+            path_spatial_entropy = path_spatial_entropy_raw
+        if speed_spatial_entropy_raw is not None:
+            speed_spatial_entropy = speed_spatial_entropy_raw
+
+        entropy_stack = torch.stack([path_spatial_entropy, speed_spatial_entropy], dim=0)
+        valid = torch.isfinite(entropy_stack)
+        valid_count = valid.sum(dim=0)
+        entropy_sum = torch.where(valid, entropy_stack, torch.zeros_like(entropy_stack)).sum(dim=0)
+        mean_spatial_entropy = torch.where(
+            valid_count > 0,
+            entropy_sum / valid_count.clamp_min(1),
+            fallback_latency.float(),
+        )
+        mean_spatial_entropy = mean_spatial_entropy.clamp(0.0, 1.0)
 
     # history similarity (per-sample, no batch-mean mixing)
     sim_in = fallback_latency.float().clone()
@@ -235,10 +265,12 @@ def compute_rule_based_latency(
             history_state["v_hist_valid"] = updated_valid.detach()
 
     return {
-        "waypoint_entropy": {
-            "path_spatial_entropy": path_spatial_entropy,
-            "speed_spatial_entropy": speed_spatial_entropy,
-            "mean_spatial_entropy": mean_spatial_entropy,
+        "spatial_entropy": {
+            "token_source": token_source,
+            "path": path_spatial_entropy,
+            "speed": speed_spatial_entropy,
+            "latency": latency_spatial_entropy,
+            "mean": mean_spatial_entropy,
         },
         "history_similarity": {
             "sim_in": sim_in,
@@ -1089,6 +1121,8 @@ class Qwen2Model(Qwen2PreTrainedModel):
         visual_token_coords: Optional[torch.FloatTensor] = None,
         waypoint_path_token_positions: Optional[torch.LongTensor] = None,
         waypoint_speed_token_positions: Optional[torch.LongTensor] = None,
+        latency_token_positions: Optional[torch.LongTensor] = None,
+        entropy_token_source: str = "waypoints",
         history_state: Optional[Dict[str, torch.Tensor]] = None,
         history_alpha: float = 0.2,
     ) -> Dict[str, torch.Tensor]:
@@ -1159,6 +1193,8 @@ class Qwen2Model(Qwen2PreTrainedModel):
             waypoint_path_token_positions=waypoint_path_token_positions,
             waypoint_speed_token_positions=waypoint_speed_token_positions,
             fallback_latency=fallback_latency,
+            latency_token_positions=latency_token_positions,
+            entropy_token_source=entropy_token_source,
             history_state=history_state,
             history_alpha=history_alpha,
         )
@@ -1519,6 +1555,8 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         visual_token_coords: Optional[torch.FloatTensor] = None,
         waypoint_path_token_positions: Optional[torch.LongTensor] = None,
         waypoint_speed_token_positions: Optional[torch.LongTensor] = None,
+        latency_token_positions: Optional[torch.LongTensor] = None,
+        entropy_token_source: str = "waypoints",
         history_state: Optional[Dict[str, torch.Tensor]] = None,
         history_alpha: float = 0.2,
     ) -> Dict[str, torch.Tensor]:
@@ -1534,6 +1572,8 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             visual_token_coords=visual_token_coords,
             waypoint_path_token_positions=waypoint_path_token_positions,
             waypoint_speed_token_positions=waypoint_speed_token_positions,
+            latency_token_positions=latency_token_positions,
+            entropy_token_source=entropy_token_source,
             history_state=history_state,
             history_alpha=history_alpha,
         )

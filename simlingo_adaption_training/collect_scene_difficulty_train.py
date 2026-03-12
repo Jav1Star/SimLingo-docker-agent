@@ -418,6 +418,10 @@ def main(cfg: TrainConfig):
 
                 frame_idx_in_route = route_frame_index[record.route_key]
                 route_frame_index[record.route_key] += 1
+                spatial_entropy_value = metric_at(scene_metrics, ("spatial_entropy", "mean"), i)
+                if spatial_entropy_value is None:
+                    # Backward compatibility for old metric schema.
+                    spatial_entropy_value = metric_at(scene_metrics, ("waypoint_entropy", "mean_spatial_entropy"), i)
                 row = {
                     "measurement_path": to_repo_relative(record.measurement_path, root.resolve()),
                     "route_key": to_repo_relative(record.route_key, root.resolve()),
@@ -426,7 +430,7 @@ def main(cfg: TrainConfig):
                     "route_frame_index": frame_idx_in_route,
                     "route_frame_count": route_counts[record.route_key],
                     "loss_total": float(total_loss[i].detach().cpu()),
-                    "spatial_entropy": metric_at(scene_metrics, ("waypoint_entropy", "mean_spatial_entropy"), i),
+                    "spatial_entropy": spatial_entropy_value,
                     "history_similarity": metric_at(scene_metrics, ("history_similarity", "sim_in"), i),
                     "used_latency": metric_at(scene_metrics, ("used_latency",), i),
                     "decision_shift_speed_e_mean": metric_at(scene_metrics, ("decision_shift", "speed_wps", "e_mean"), i),

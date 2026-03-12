@@ -61,6 +61,16 @@ class DrivingModel(pl.LightningModule):
         self.probe_history_state_by_route = {}
         self.probe_history_alpha = 0.6
         self.probe_entropy_weight = 0.5
+        if not hasattr(self, "probe_spatial_entropy_token_source"):
+            raise ValueError(
+                f"probe spatial entropy token is not configured."
+            )
+        self.probe_spatial_entropy_token_source = str(self.probe_spatial_entropy_token_source).strip().lower()
+        if self.probe_spatial_entropy_token_source not in {"waypoints", "latency"}:
+            raise ValueError(
+                f"Unsupported probe_spatial_entropy_token_source={self.probe_spatial_entropy_token_source}. "
+                "Expected one of: waypoints, latency."
+            )
         self.decision_shift_state = {}
         self.decision_shift_state_by_route = {}
         self.decision_shift_t_lap = 0.2

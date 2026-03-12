@@ -45,7 +45,9 @@ class DrivingMetricsComputer:
         split_sizes = adaptor_dict["split_sizes"].tolist()
         language_len = int(split_sizes[0])
         driving_len = int(split_sizes[1]) if len(split_sizes) > 1 else 0
+        latency_len = int(split_sizes[2]) if len(split_sizes) > 2 else 0
         driving_start = language_len
+        latency_start = language_len + driving_len
 
         language_ids = adaptor_dict["language__ids"]
         img_context_token_id = self.owner.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
@@ -86,6 +88,7 @@ class DrivingMetricsComputer:
 
         path_pos_lists = []
         speed_pos_lists = []
+        latency_pos_lists = []
         for b_idx in range(inv_perm.size(0)):
             if path_size > 0 and driving_len > 0:
                 path_orig = torch.arange(path_start, path_start + path_size, device=inv_perm.device)
@@ -97,14 +100,21 @@ class DrivingMetricsComputer:
                 speed_new = inv_perm[b_idx, speed_orig].tolist()
             else:
                 speed_new = []
+            if latency_len > 0:
+                latency_orig = torch.arange(latency_start, latency_start + latency_len, device=inv_perm.device)
+                latency_new = inv_perm[b_idx, latency_orig].tolist()
+            else:
+                latency_new = []
             path_pos_lists.append(path_new)
             speed_pos_lists.append(speed_new)
+            latency_pos_lists.append(latency_new)
 
         visual_positions = self._pad_position_lists(visual_pos_lists, inv_perm.device)
         visual_coords = self._pad_coord_lists(visual_coord_lists, inv_perm.device)
         path_positions = self._pad_position_lists(path_pos_lists, inv_perm.device)
         speed_positions = self._pad_position_lists(speed_pos_lists, inv_perm.device)
-        return visual_positions, visual_coords, path_positions, speed_positions
+        latency_positions = self._pad_position_lists(latency_pos_lists, inv_perm.device)
+        return visual_positions, visual_coords, path_positions, speed_positions, latency_positions
 
     def run_rule_based_probe(
         self,
@@ -122,8 +132,9 @@ class DrivingMetricsComputer:
             visual_token_coords,
             waypoint_path_token_positions,
             waypoint_speed_token_positions,
+            latency_token_positions,
         ) = self._build_rule_based_token_positions(adaptor_dict, driving_input)
-
+        # check positions
         history_state = self._prepare_probe_history_state(route_keys, inputs_embeds)
         probe_metrics = self.owner.language_model.model.probe_forward(
             attention_mask=attention_mask,
@@ -135,6 +146,8 @@ class DrivingMetricsComputer:
             visual_token_coords=visual_token_coords,
             waypoint_path_token_positions=waypoint_path_token_positions,
             waypoint_speed_token_positions=waypoint_speed_token_positions,
+            latency_token_positions=latency_token_positions,
+            entropy_token_source=self.owner.probe_spatial_entropy_token_source,
             history_state=history_state,
             history_alpha=self.owner.probe_history_alpha,
         )
@@ -187,10 +200,15 @@ class DrivingMetricsComputer:
             }
 
     def compute_latency_from_probe_metrics(self, metrics, fallback_latency):
-        waypoint_entropy = metrics.get("waypoint_entropy", {}) if isinstance(metrics, dict) else {}
+        spatial_entropy = metrics.get("spatial_entropy", {}) if isinstance(metrics, dict) else {}
+        # Backward compatibility for old metric schema.
+        if not spatial_entropy and isinstance(metrics, dict):
+            spatial_entropy = metrics.get("waypoint_entropy", {})
         history_similarity = metrics.get("history_similarity", {}) if isinstance(metrics, dict) else {}
 
-        entropy_mean = waypoint_entropy.get("mean_spatial_entropy")
+        entropy_mean = spatial_entropy.get("mean")
+        if entropy_mean is None:
+            entropy_mean = spatial_entropy.get("mean_spatial_entropy")
         sim_in = history_similarity.get("sim_in")
         if entropy_mean is None or sim_in is None:
             return fallback_latency

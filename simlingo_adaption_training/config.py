@@ -52,6 +52,7 @@ class DrivingModelConfig:
     adaption_train: bool = False
     simlingo_checkpoint: Optional[str] = None
     computation_budget: str = 'fixed' # fixed, random
+    probe_spatial_entropy_token_source: str = "waypoints"  # waypoints, latency
     
     _target_: str = "simlingo_adaption_training.models.driving.DrivingModel"
 
