@@ -2,16 +2,21 @@ import os
 import sys
 import subprocess
 import time
-import ujson
+import json
 import shutil
 import argparse
 import yaml
 from collections import deque
 from tqdm.autonotebook import tqdm
 
+try:
+    import ujson
+except Exception:
+    import json as ujson
 
 
-VULKAN_GPU_ID = {0: 2, 1: 0}  # 映射到 Vulkan 适配的 GPU ID, 太诡异了，每次只能试试
+
+VULKAN_GPU_ID = {0: 0, 1: 2}  # 映射到 Vulkan 适配的 GPU ID, 太诡异了，每次只能试试
 POLL_INTERVAL_S = float(os.getenv("SIMLINGO_POLL_INTERVAL", "5.0"))
 
 carla_world_ports = set(range(10000, 20000, 50))
@@ -64,18 +69,67 @@ def load_eval_yaml(config_path: str):
 def parse_latency_settings(data):
     eval_cfg = data.get("eval", data)
     latency_cfg = data.get("latency", eval_cfg.get("latency", {})) or {}
+    default_rule_based_cfg = {
+        "k_warmup": 5,
+        "eta": 0.03,
+        "safe_threshold": 0.35,
+        "safe_count_threshold": 2,
+        "decay_step": 0.1,
+        "base_offset": 0.25,
+        "base_scale": 0.75,
+        "inst_offset": 0.5,
+        "inst_scale": 0.5,
+        "weights": {
+            "base_mean": {"novelty": 0.23, "speed_shift": 0.35, "route_shift": 0.15},
+            "base_max": {"novelty": 0.08, "speed_shift": 0.12, "route_shift": 0.08},
+            "inst": {"novelty": 0.40, "speed_shift": 0.40, "route_shift": 0.20},
+        },
+        "normalization": {
+            "novelty": {"q10": 0.0001102686, "q90": 0.0150763988},
+            "speed_shift": {"q10": 0.0030981766, "q90": 0.7491058707},
+            "route_shift": {"q10": 0.1959435195, "q90": 0.7666570544},
+        },
+    }
+    rule_based_cfg_raw = latency_cfg.get("rule_based", {}) or {}
+    if not isinstance(rule_based_cfg_raw, dict):
+        rule_based_cfg_raw = {}
+    rule_based_cfg = dict(default_rule_based_cfg)
+    for key, value in rule_based_cfg_raw.items():
+        if isinstance(value, dict) and isinstance(rule_based_cfg.get(key), dict):
+            merged = dict(rule_based_cfg[key])
+            merged.update(value)
+            rule_based_cfg[key] = merged
+        else:
+            rule_based_cfg[key] = value
+    weights_raw = rule_based_cfg_raw.get("weights", {}) if isinstance(rule_based_cfg_raw, dict) else {}
+    if isinstance(weights_raw, dict):
+        for sub_key in ("base_mean", "base_max", "inst"):
+            if isinstance(weights_raw.get(sub_key), dict):
+                merged = dict(default_rule_based_cfg["weights"][sub_key])
+                merged.update(weights_raw[sub_key])
+                rule_based_cfg["weights"][sub_key] = merged
+    norm_raw = rule_based_cfg_raw.get("normalization", {}) if isinstance(rule_based_cfg_raw, dict) else {}
+    if isinstance(norm_raw, dict):
+        for sub_key in ("novelty", "speed_shift", "route_shift"):
+            if isinstance(norm_raw.get(sub_key), dict):
+                merged = dict(default_rule_based_cfg["normalization"][sub_key])
+                merged.update(norm_raw[sub_key])
+                rule_based_cfg["normalization"][sub_key] = merged
     # 从 yaml 读取 latency 模式配置（random/fixed/rule_based）
     mode = str(latency_cfg.get("mode", "no mode in config")).strip().lower()
+    allowed_modes = {"random", "fixed", "rule_based"}
+    if mode not in allowed_modes:
+        raise ValueError(f"latency.mode must be one of {sorted(allowed_modes)}, got {mode}")
     fix_latency = float(latency_cfg.get("fix_latency", 1.0))
     if mode == "fixed" and not (0.0 <= fix_latency <= 1.0):
         raise ValueError(f"latency.fix_latency must be in [0, 1] for fixed mode, got {fix_latency}")
-    return mode, fix_latency
+    return mode, fix_latency, rule_based_cfg
 
 
 def build_eval_config(args, no_server_launch):
     eval_yaml = load_eval_yaml(args.eval_config)
     cfg = eval_yaml.get("eval", eval_yaml)
-    latency_mode, fix_latency = parse_latency_settings(eval_yaml)
+    latency_mode, fix_latency, rule_based_cfg = parse_latency_settings(eval_yaml)
 
     required_keys = [
         "agent",
@@ -112,6 +166,7 @@ def build_eval_config(args, no_server_launch):
         "no_server_launch": no_server_launch,
         "latency_mode": latency_mode,
         "fix_latency": fix_latency,
+        "rule_based_cfg": rule_based_cfg,
     }
     return eval_cfg
 
@@ -144,6 +199,7 @@ def launch_job(job, gpu_id, world_port, tm_port):
     # 通过环境变量把 mode 与固定延迟值传给 agent
     env["SIMLINGO_EVAL_LATENCY_MODE"] = str(job["latency_mode"])
     env["SIMLINGO_EVAL_FIXED_LATENCY"] = str(job["fix_latency"])
+    env["SIMLINGO_EVAL_RULE_BASED_CFG_JSON"] = json.dumps(job["rule_based_cfg"], ensure_ascii=False)
     
     command = [
         sys.executable,
@@ -390,6 +446,7 @@ def main(args):
                     "seed": seed,
                     "latency_mode": cfg["latency_mode"],
                     "fix_latency": cfg["fix_latency"],
+                    "rule_based_cfg": cfg["rule_based_cfg"],
                     "viz_path": viz_path,
                     "result_file": result_file,
                     "log_file": log_file,
@@ -511,7 +568,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--eval-config", type=str, default=default_eval_config, help="评估配置 YAML 路径")
     parser.add_argument("--seed", type=int, help="用于脚本的随机种子；不传则使用 eval-config 中的 seeds", default=None)
-    parser.add_argument("--remote-carla-port", type=int, default=20000, help="External CARLA world port")
+    parser.add_argument("--remote-carla-port", type=int, default=None, help="External CARLA world port")
     parser.add_argument("--remote-tm-port", type=int, default=None, help="External CARLA TM port")
     parser.add_argument("--gpu", type=int, nargs='+', default=None, help="gpu to use")
 

@@ -61,11 +61,8 @@ class DrivingModel(pl.LightningModule):
         self.probe_history_state_by_route = {}
         self.probe_history_alpha = 0.6
         self.probe_entropy_weight = 0.5
-        if not hasattr(self, "probe_spatial_entropy_token_source"):
-            raise ValueError(
-                f"probe spatial entropy token is not configured."
-            )
-        self.probe_spatial_entropy_token_source = str(self.probe_spatial_entropy_token_source).strip().lower()
+        probe_token_source = getattr(self, "probe_spatial_entropy_token_source", "latency")
+        self.probe_spatial_entropy_token_source = str(probe_token_source).strip().lower()
         if self.probe_spatial_entropy_token_source not in {"waypoints", "latency"}:
             raise ValueError(
                 f"Unsupported probe_spatial_entropy_token_source={self.probe_spatial_entropy_token_source}. "
@@ -357,17 +354,6 @@ class DrivingModel(pl.LightningModule):
                 latency_value=latency_value,
                 route_keys=route_keys,
             )
-            # TEMP hardcode for data collection: keep ruled_based latency fixed to 1.0.
-            # TODO: revert this to dynamic latency computation from probe metrics after data collection.
-            if latency_value is not None:
-                decided_latency = torch.ones_like(latency_value)
-            else:
-                decided_latency = torch.ones(
-                    (input_embeds.size(0),),
-                    device=input_embeds.device,
-                    dtype=input_embeds.dtype,
-                )
-            # decided_latency = self.metrics_computer.compute_latency_from_probe_metrics(probe_metrics, latency_value)
         # check probe_metrics and self.probe_history_state
         outputs = self.language_model.model(
             attention_mask=attention_mask,

@@ -5,6 +5,7 @@ partially taken from https://github.com/autonomousvision/carla_garage/blob/leade
 
 
 import importlib.util
+import copy
 import json
 import math
 import os
@@ -105,20 +106,46 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             raise ValueError(f"SIMLINGO_EVAL_LATENCY_MODE must be random/fixed/rule_based, got {self.eval_latency_mode}")
 
         self.fixed_eval_latency = self._load_fixed_eval_latency()
-        init_latency = self.fixed_eval_latency
+        self.rule_based_cfg = self._load_rule_based_latency_cfg()
+        self.rule_based_state = self._init_rule_based_state() if self.eval_latency_mode == "rule_based" else None
+        init_latency = 1.0 if self.eval_latency_mode == "rule_based" else self.fixed_eval_latency
         self.eval_latency = {
-            "value": init_latency,
-            "waypoint_entropy": {
-                "path_spatial_entropy": None,
-                "speed_spatial_entropy": None,
-                "mean_spatial_entropy": init_latency,
-            },
+            "value": float(init_latency),
+            "used_latency": float(init_latency),
+            "base_latency": None,
+            "instant_latency": None,
+            "target_latency": None,
+            "phase": "warmup" if self.eval_latency_mode == "rule_based" else self.eval_latency_mode,
             "history_similarity": {
                 "sim_in": 1.0,
                 "alpha": None,
             },
-            "used_latency": init_latency,
+            "spatial_entropy": {
+                "token_source": None,
+                "path": None,
+                "speed": None,
+                "latency": None,
+                "mean": None,
+            },
+            "novelty": 0.0,
+            "decision_shift": {
+                "speed_curr": None,
+                "route_curr": None,
+                "speed_used_prev": 0.0,
+                "route_used_prev": 0.0,
+            },
+            "normalized": {
+                "novelty": 0.0,
+                "speed_shift": 0.0,
+                "route_shift": 0.0,
+            },
+            "rule_based": {
+                "frame_count": 0,
+                "safe_counter": 0,
+            },
         }
+        if self.eval_latency_mode == "rule_based":
+            self.eval_latency["rule_based_cfg"] = self.rule_based_cfg
 
         if self.config.eval_route_as == -1:
             self.config.eval_route_as = self.model.route_as
@@ -884,6 +911,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             self.control = control
             
         metric_info = self.get_metric_info()
+        metric_info["eval_latency"] = copy.deepcopy(self.eval_latency)
         self.metric_info[self.step] = metric_info
         if self.save_path_metric is not None and self.step % 1 == 0:
                 # metric info
@@ -965,9 +993,9 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             del self.processor
 
     def latency_input_process(self):
-        # random 模式每帧随机采样 latency
+        # random 模式每帧随机采样 latency，范围 [0.25, 1.0]
         if self.eval_latency_mode == "random":
-            value = random.random()
+            value = random.uniform(0.25, 1.0)
             self.eval_latency["value"] = float(value)
             self.eval_latency["used_latency"] = float(value)
             return float(value)
@@ -978,50 +1006,285 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             self.eval_latency["used_latency"] = float(self.fixed_eval_latency)
             return float(self.fixed_eval_latency)
 
-        # rule_based 模式使用上一帧/初始化的熵驱动 latency
+        # rule_based 模式使用上一帧更新得到的 latency
         return float(self.eval_latency["value"])
 
     def _update_eval_latency_from_model_metrics(self):
-        # 仅 rule_based 模式根据注意力熵更新记录使用的latency
         if self.eval_latency_mode != "rule_based":
             return
         metrics = getattr(self.model, "scene_difficulty_metrics", None)
         if not isinstance(metrics, dict):
             return
 
-        def _as_float_or_none(value):
-            if value is None:
-                return None
-            if isinstance(value, (list, tuple)):
-                if len(value) == 0:
-                    return None
-                return float(np.mean(value))
-            return float(value)
-
-        waypoint_entropy = metrics.get("waypoint_entropy", {})
+        spatial_entropy = metrics.get("spatial_entropy", {})
+        if not isinstance(spatial_entropy, dict):
+            spatial_entropy = metrics.get("waypoint_entropy", {})
+        if not isinstance(spatial_entropy, dict):
+            spatial_entropy = {}
         history_similarity = metrics.get("history_similarity", {})
-        path_spatial_entropy = waypoint_entropy.get("path_spatial_entropy")
-        speed_spatial_entropy = waypoint_entropy.get("speed_spatial_entropy")
-        mean_spatial_entropy = waypoint_entropy.get("mean_spatial_entropy")
-        sim_in = history_similarity.get("sim_in")
-        alpha = history_similarity.get("alpha")
-        used_latency = metrics.get("used_latency")
+        if not isinstance(history_similarity, dict):
+            history_similarity = {}
+        decision_shift = metrics.get("decision_shift", {})
+        if not isinstance(decision_shift, dict):
+            decision_shift = {}
 
+        sim_in = self._as_float_or_none(history_similarity.get("sim_in"))
+        alpha = self._as_float_or_none(history_similarity.get("alpha"))
+        novelty_curr = None if sim_in is None else (1.0 - sim_in)
 
-        if mean_spatial_entropy is None:
+        speed_shift_curr = self._as_float_or_none(
+            decision_shift.get("speed_wps", {}).get("e_norm")
+            if isinstance(decision_shift.get("speed_wps", {}), dict)
+            else None
+        )
+        route_shift_curr = self._as_float_or_none(
+            decision_shift.get("route", {}).get("e_norm")
+            if isinstance(decision_shift.get("route", {}), dict)
+            else None
+        )
+
+        used_latency = self._as_float_or_none(metrics.get("used_latency"))
+        if used_latency is None:
+            used_latency = float(self.eval_latency["value"])
+
+        state = self.rule_based_state
+        if state is None:
             return
+        cfg = self.rule_based_cfg
 
-        self.eval_latency["waypoint_entropy"]["path_spatial_entropy"] = _as_float_or_none(path_spatial_entropy)
-        self.eval_latency["waypoint_entropy"]["speed_spatial_entropy"] = _as_float_or_none(speed_spatial_entropy)
-        self.eval_latency["waypoint_entropy"]["mean_spatial_entropy"] = _as_float_or_none(mean_spatial_entropy)
-        self.eval_latency["history_similarity"]["sim_in"] = _as_float_or_none(sim_in)
-        self.eval_latency["history_similarity"]["alpha"] = _as_float_or_none(alpha)
-        self.eval_latency["used_latency"] = _as_float_or_none(used_latency if used_latency is not None else mean_spatial_entropy)
-        self.eval_latency["value"] = float(np.clip(self.eval_latency["used_latency"], 0.0, 1.0))
+        speed_shift_prev = state["prev_decision_shift_speed"]
+        route_shift_prev = state["prev_decision_shift_route"]
+        if speed_shift_prev is None:
+            speed_shift_prev = speed_shift_curr if speed_shift_curr is not None else 0.0
+        if route_shift_prev is None:
+            route_shift_prev = route_shift_curr if route_shift_curr is not None else 0.0
+        novelty_used = novelty_curr if novelty_curr is not None else 0.0
+
+        n_hat = self._normalize_metric(novelty_used, cfg["normalization"]["novelty"])
+        s_hat = self._normalize_metric(speed_shift_prev, cfg["normalization"]["speed_shift"])
+        r_hat = self._normalize_metric(route_shift_prev, cfg["normalization"]["route_shift"])
+
+        state["window_novelty"].append(n_hat)
+        state["window_speed_shift"].append(s_hat)
+        state["window_route_shift"].append(r_hat)
+        state["frame_count"] += 1
+
+        inst_weights = cfg["weights"]["inst"]
+        u_t = self._clip01(
+            inst_weights["novelty"] * n_hat
+            + inst_weights["speed_shift"] * s_hat
+            + inst_weights["route_shift"] * r_hat
+        )
+        inst_latency = self._clip01(cfg["inst_offset"] + cfg["inst_scale"] * u_t)
+
+        next_latency = float(used_latency)
+        target_latency = None
+
+        k_warmup = int(cfg["k_warmup"])
+        frame_count = state["frame_count"]
+        if frame_count < k_warmup:
+            next_latency = 1.0
+            phase = "warmup"
+        elif state["base_latency"] is None:
+            g_init = self._compute_base_g_score(
+                state["window_novelty"],
+                state["window_speed_shift"],
+                state["window_route_shift"],
+            )
+            state["base_latency"] = self._clip01(cfg["base_offset"] + cfg["base_scale"] * g_init)
+            next_latency = float(state["base_latency"])
+            phase = "adaptive"
+        else:
+            g_tilde = self._compute_base_g_score(
+                state["window_novelty"],
+                state["window_speed_shift"],
+                state["window_route_shift"],
+            )
+            tilde_base_latency = self._clip01(cfg["base_offset"] + cfg["base_scale"] * g_tilde)
+            state["base_latency"] = self._clip01(
+                (1.0 - cfg["eta"]) * state["base_latency"] + cfg["eta"] * tilde_base_latency
+            )
+            target_latency = max(state["base_latency"], inst_latency)
+
+            if target_latency > used_latency:
+                next_latency = target_latency
+                state["safe_counter"] = 0
+            else:
+                safe_condition = ((s_hat + r_hat) * 0.5 <= cfg["safe_threshold"]) and (
+                    target_latency <= state["base_latency"]
+                )
+                state["safe_counter"] = state["safe_counter"] + 1 if safe_condition else 0
+                if state["safe_counter"] > int(cfg["safe_count_threshold"]):
+                    next_latency = max(state["base_latency"], used_latency - cfg["decay_step"])
+                else:
+                    next_latency = float(used_latency)
+            phase = "adaptive"
+
+        if speed_shift_curr is not None:
+            state["prev_decision_shift_speed"] = speed_shift_curr
+        if route_shift_curr is not None:
+            state["prev_decision_shift_route"] = route_shift_curr
+
+        self.eval_latency["used_latency"] = float(used_latency)
+        self.eval_latency["value"] = float(self._clip01(next_latency))
+        self.eval_latency["base_latency"] = (
+            None if state["base_latency"] is None else float(state["base_latency"])
+        )
+        self.eval_latency["instant_latency"] = float(inst_latency)
+        self.eval_latency["target_latency"] = None if target_latency is None else float(target_latency)
+        self.eval_latency["phase"] = phase
+        self.eval_latency["novelty"] = float(novelty_used)
+
+        self.eval_latency["spatial_entropy"]["token_source"] = spatial_entropy.get("token_source")
+        self.eval_latency["spatial_entropy"]["path"] = self._as_float_or_none(
+            spatial_entropy.get("path", spatial_entropy.get("path_spatial_entropy"))
+        )
+        self.eval_latency["spatial_entropy"]["speed"] = self._as_float_or_none(
+            spatial_entropy.get("speed", spatial_entropy.get("speed_spatial_entropy"))
+        )
+        self.eval_latency["spatial_entropy"]["latency"] = self._as_float_or_none(
+            spatial_entropy.get("latency")
+        )
+        self.eval_latency["spatial_entropy"]["mean"] = self._as_float_or_none(
+            spatial_entropy.get("mean", spatial_entropy.get("mean_spatial_entropy"))
+        )
+        self.eval_latency["history_similarity"]["sim_in"] = sim_in
+        self.eval_latency["history_similarity"]["alpha"] = alpha
+        self.eval_latency["decision_shift"]["speed_curr"] = speed_shift_curr
+        self.eval_latency["decision_shift"]["route_curr"] = route_shift_curr
+        self.eval_latency["decision_shift"]["speed_used_prev"] = float(speed_shift_prev)
+        self.eval_latency["decision_shift"]["route_used_prev"] = float(route_shift_prev)
+        self.eval_latency["normalized"]["novelty"] = float(n_hat)
+        self.eval_latency["normalized"]["speed_shift"] = float(s_hat)
+        self.eval_latency["normalized"]["route_shift"] = float(r_hat)
+        self.eval_latency["rule_based"]["frame_count"] = int(state["frame_count"])
+        self.eval_latency["rule_based"]["safe_counter"] = int(state["safe_counter"])
+
+    @staticmethod
+    def _clip01(value):
+        return float(np.clip(value, 0.0, 1.0))
+
+    @staticmethod
+    def _as_float_or_none(value):
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple)):
+            if len(value) == 0:
+                return None
+            arr = np.asarray(value, dtype=np.float32)
+            if np.isnan(arr).all():
+                return None
+            return float(np.nanmean(arr))
+        try:
+            out = float(value)
+        except Exception:
+            return None
+        if not np.isfinite(out):
+            return None
+        return out
+
+    def _normalize_metric(self, value, quantile_cfg):
+        q10 = float(quantile_cfg["q10"])
+        q90 = float(quantile_cfg["q90"])
+        denom = max(q90 - q10, 1e-6)
+        return self._clip01((float(value) - q10) / denom)
+
+    def _compute_base_g_score(self, novelty_vals, speed_vals, route_vals):
+        n = np.asarray(list(novelty_vals), dtype=np.float32)
+        s = np.asarray(list(speed_vals), dtype=np.float32)
+        r = np.asarray(list(route_vals), dtype=np.float32)
+        if n.size == 0 or s.size == 0 or r.size == 0:
+            return 0.0
+
+        base_mean_weights = self.rule_based_cfg["weights"]["base_mean"]
+        base_max_weights = self.rule_based_cfg["weights"]["base_max"]
+        g_t = (
+            base_mean_weights["novelty"] * float(n.mean())
+            + base_mean_weights["speed_shift"] * float(s.mean())
+            + base_mean_weights["route_shift"] * float(r.mean())
+            + base_max_weights["novelty"] * float(n.max())
+            + base_max_weights["speed_shift"] * float(s.max())
+            + base_max_weights["route_shift"] * float(r.max())
+        )
+        return self._clip01(g_t)
+
+    def _load_rule_based_latency_cfg(self):
+        default_cfg = {
+            "k_warmup": 5,
+            "eta": 0.03,
+            "safe_threshold": 0.35,
+            "safe_count_threshold": 2,
+            "decay_step": 0.1,
+            "base_offset": 0.25,
+            "base_scale": 0.75,
+            "inst_offset": 0.5,
+            "inst_scale": 0.5,
+            "weights": {
+                "base_mean": {"novelty": 0.23, "speed_shift": 0.35, "route_shift": 0.15},
+                "base_max": {"novelty": 0.08, "speed_shift": 0.12, "route_shift": 0.08},
+                "inst": {"novelty": 0.40, "speed_shift": 0.40, "route_shift": 0.20},
+            },
+            "normalization": {
+                "novelty": {"q10": 0.0001102686, "q90": 0.0150763988},
+                "speed_shift": {"q10": 0.0030981766, "q90": 0.7491058707},
+                "route_shift": {"q10": 0.1959435195, "q90": 0.7666570544},
+            },
+        }
+        cfg_raw = os.getenv("SIMLINGO_EVAL_RULE_BASED_CFG_JSON", "").strip()
+        if not cfg_raw:
+            return default_cfg
+        try:
+            user_cfg = json.loads(cfg_raw)
+        except Exception:
+            return default_cfg
+        if not isinstance(user_cfg, dict):
+            return default_cfg
+
+        merged_cfg = dict(default_cfg)
+        for key, value in user_cfg.items():
+            if isinstance(value, dict) and isinstance(merged_cfg.get(key), dict):
+                updated = dict(merged_cfg[key])
+                updated.update(value)
+                merged_cfg[key] = updated
+            else:
+                merged_cfg[key] = value
+
+        if isinstance(user_cfg.get("weights"), dict):
+            for key in ("base_mean", "base_max", "inst"):
+                if isinstance(user_cfg["weights"].get(key), dict):
+                    updated = dict(default_cfg["weights"][key])
+                    updated.update(user_cfg["weights"][key])
+                    merged_cfg["weights"][key] = updated
+
+        if isinstance(user_cfg.get("normalization"), dict):
+            for key in ("novelty", "speed_shift", "route_shift"):
+                if isinstance(user_cfg["normalization"].get(key), dict):
+                    updated = dict(default_cfg["normalization"][key])
+                    updated.update(user_cfg["normalization"][key])
+                    merged_cfg["normalization"][key] = updated
+        return merged_cfg
+
+    def _init_rule_based_state(self):
+        k_warmup = int(self.rule_based_cfg["k_warmup"])
+        return {
+            "frame_count": 0,
+            "safe_counter": 0,
+            "base_latency": None,
+            "prev_decision_shift_speed": None,
+            "prev_decision_shift_route": None,
+            "window_novelty": deque(maxlen=max(k_warmup, 1)),
+            "window_speed_shift": deque(maxlen=max(k_warmup, 1)),
+            "window_route_shift": deque(maxlen=max(k_warmup, 1)),
+        }
 
     def _load_fixed_eval_latency(self):
-        value= os.getenv("SIMLINGO_EVAL_FIXED_LATENCY")
-        return value
+        value = os.getenv("SIMLINGO_EVAL_FIXED_LATENCY", "1.0")
+        try:
+            value = float(value)
+        except Exception:
+            value = 1.0
+        return float(np.clip(value, 0.0, 1.0))
+
 # Filter Functions
 def bicycle_model_forward(x, dt, steer, throttle, brake):
     # Kinematic bicycle model.

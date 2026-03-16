@@ -11,8 +11,11 @@ This module contains a statistics manager for the CARLA AD leaderboard
 
 from __future__ import print_function
 
+import glob
+import json
 from dictor import dictor
 import math
+import os
 
 from srunner.scenariomanager.traffic_events import TrafficEventType
 
@@ -91,6 +94,11 @@ class RouteRecord():
             'route_length': 0,
             'duration_game': 0,
             'duration_system': 0,
+        }
+        self.latency = {
+            'average_latency': None,
+            'initial_base_latency': None,
+            'final_base_latency': None,
         }
 
     def to_json(self):
@@ -204,6 +212,62 @@ class StatisticsManager(object):
         self._results = Results()
         self._endpoint = endpoint
         self._debug_endpoint = debug_endpoint
+
+    @staticmethod
+    def _as_float_or_none(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _collect_route_latency_summary(self, route_record):
+        summary = {
+            'average_latency': None,
+            'initial_base_latency': None,
+            'final_base_latency': None,
+        }
+        save_root = os.environ.get("SAVE_PATH")
+        if not save_root or not route_record.save_name:
+            return summary
+
+        route_root = save_root + route_record.save_name
+        metric_pattern = os.path.join(route_root, "debug_viz", "**", "metric", "metric_info.json")
+        metric_files = glob.glob(metric_pattern, recursive=True)
+        if not metric_files:
+            return summary
+
+        metric_file = max(metric_files, key=os.path.getmtime)
+        with open(metric_file, 'r', encoding='utf-8') as f:
+            metric_info = json.load(f)
+        if not isinstance(metric_info, dict):
+            return summary
+
+        frame_items = sorted(metric_info.items(), key=lambda x: int(x[0]))
+        used_latencies = []
+        base_latencies = []
+        for _, frame_data in frame_items:
+            if not isinstance(frame_data, dict):
+                continue
+            eval_latency = frame_data.get("eval_latency", {})
+            if not isinstance(eval_latency, dict):
+                continue
+
+            used_latency = self._as_float_or_none(eval_latency.get("used_latency"))
+            if used_latency is None:
+                used_latency = self._as_float_or_none(eval_latency.get("value"))
+            if used_latency is not None:
+                used_latencies.append(used_latency)
+
+            base_latency = self._as_float_or_none(eval_latency.get("base_latency"))
+            if base_latency is not None:
+                base_latencies.append(base_latency)
+
+        if used_latencies:
+            summary['average_latency'] = round(sum(used_latencies) / len(used_latencies), ROUND_DIGITS_SCORE)
+        if base_latencies:
+            summary['initial_base_latency'] = round(base_latencies[0], ROUND_DIGITS_SCORE)
+            summary['final_base_latency'] = round(base_latencies[-1], ROUND_DIGITS_SCORE)
+        return summary
 
     def add_file_records(self, endpoint):
         """Reads a file and saves its records onto the statistics manager"""
@@ -375,6 +439,7 @@ class StatisticsManager(object):
         route_record.meta['route_length'] = self._route_length
         route_record.meta['duration_game'] = round(duration_time_game, ROUND_DIGITS)
         route_record.meta['duration_system'] = round(duration_time_system, ROUND_DIGITS)
+        route_record.latency = self._collect_route_latency_summary(route_record)
 
         # Update the route infractions
         if self._scenario:

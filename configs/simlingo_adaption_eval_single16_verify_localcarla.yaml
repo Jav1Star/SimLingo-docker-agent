@@ -2,19 +2,19 @@ eval:
   agent: simlingo
   checkpoint: ~/simlingo-adaption/models/simlingoCheckpoints/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin
   benchmark: bench2drive
-  route_path: ~/simlingo-adaption/leaderboard/data/bench2drive_split
-  seeds: [42]
+  route_path: /tmp/bench2drive_split_single16
+  seeds:
+  - 3
   tries: 0
-  out_root: ~/simlingo-adaption/eval_results/Bench2Drive
+  out_root: ~/simlingo-adaption/eval_results/Bench2Drive_verify
   carla_root: /data/carla0915
   repo_root: ~/simlingo-adaption
   agent_file: ~/simlingo-adaption/team_code_adaption/agent_simlingo.py
   team_code: team_code_adaption
   agent_config: not_used
-
 latency:
-  mode: rule_based #random #fixed
-  fix_latency: 0.8
+  mode: rule_based
+  fix_latency: 1.0
   rule_based:
     k_warmup: 5
     eta: 0.03
