@@ -241,6 +241,10 @@ def read_from_json(filepath, metric_dir=None):
     driving_efficiency = []
     for record in data["_checkpoint"]["records"]:
         filepath = os.path.join(metric_dir, record["save_name"], 'metric_info.json')
+        # 核心补丁：如果文件不存在，直接跳过这一条记录
+        if not os.path.exists(filepath):
+            print(f"Warning: Missing metric data for {record['route_id']}, skipping...")
+            continue
         temp_dict = {}
         temp_dict["acceleration"] = []
         temp_dict["angular_velocity"] = []
@@ -284,3 +288,11 @@ if __name__=='__main__':
         comfort_res.append(seg_compute_comfort_metric(**record))
     print(f'Driving Efficiency={sum(driving_efficiency_list) / len(driving_efficiency_list)}')
     print(f'Driving Smoothness={sum(comfort_res)/len(comfort_res)}')
+
+    # 生成日志记录文件
+    summary_res = {
+    "driving_efficiency": sum(driving_efficiency_list) / len(driving_efficiency_list),
+    "driving_smoothness": sum(comfort_res) / len(comfort_res)
+    }
+    with open("efficiency_smoothness_results.json", "w") as f:
+        json.dump(summary_res, f, indent=4)
