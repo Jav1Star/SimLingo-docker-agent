@@ -12,9 +12,9 @@ eval:
   agent_file: ~/simlingo-adaption/team_code_adaption/agent_simlingo.py
   team_code: team_code_adaption
   agent_config: not_used
-latency:
+budget:
   mode: rule_based
-  fix_latency: 1.0
+  fixed_budget: 1.0
   rule_based:
     k_warmup: 5
     eta: 0.03

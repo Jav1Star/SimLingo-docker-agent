@@ -5,7 +5,6 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from simlingo_adaption_training.utils.custom_types import DrivingExample
-from ..scheduler.scheduler_utils import latency_quantizing
 
 def cross_track_error(points: Tensor, path: Tensor):
     """
@@ -164,7 +163,6 @@ class DrivingAdaptor(nn.Module):
     def get_predictions(
         self, 
         features: Tensor,
-        logits: Optional[Tensor] = None
     ) -> Dict:
 
         current_index = 0
@@ -182,7 +180,7 @@ class DrivingAdaptor(nn.Module):
 
 
     def compute_loss(
-        self, adaptor_features: Tensor, adaptor_logits: Tensor, _inputs: Dict[str, Tensor], example: DrivingExample
+        self, adaptor_features: Tensor, _adaptor_logits: Tensor, _inputs: Dict[str, Tensor], example: DrivingExample
     ) -> Dict[str, Tuple[Tensor, Tensor]]:
         label = example.driving_label
         assert label is not None
@@ -241,8 +239,6 @@ class LanguageAdaptor(nn.Module):
             driving_input = example.driving_input
         except AttributeError:
             driving_input = example
-            
-        b = driving_input.camera_images.size(0)
         
         if inference:
             label = driving_input.prompt_inference
@@ -258,14 +254,9 @@ class LanguageAdaptor(nn.Module):
         return {"inputs": inputs, "inputs_mask": ids_valid, "_ids": ids, "_ids_mask": ids_mask}
 
     def compute_loss(
-        self, adaptor_features: Tensor, adaptor_logits: Tensor, inputs: Dict[str, Tensor], example: DrivingExample
+        self, _adaptor_features: Tensor, adaptor_logits: Tensor, inputs: Dict[str, Tensor], _example: DrivingExample
     ) -> Dict[str, Tuple[Tensor, Tensor]]:
-        del example
-
-        if adaptor_logits is None:
-            adaptor_logits = self.lm_head(outputs[:, :-1])
-        else:
-            adaptor_logits = adaptor_logits[:, :-1]
+        adaptor_logits = adaptor_logits[:, :-1]
         labels = torch.where(inputs["_ids_mask"], inputs["_ids"], -1)
         # Shift by 1 for next token prediction
         labels = labels[:, 1:]
@@ -275,59 +266,39 @@ class LanguageAdaptor(nn.Module):
         return {"language_loss": (language_loss, labels.ne(-1))}
 
 
-class LatencyAdaptor(nn.Module):
+class BudgetAdaptor(nn.Module):
     def __init__(self):
         super().__init__()
-        
-    def forward(self, example: DrivingExample, scheduler=None, latency=0, **kwargs) -> Dict[str, Tensor]:
-        """
-        Args:
-            example: 用于获取 batch_size (如果 latency 为 None 需要随机生成或默认)
-            scheduler: 必须传入，用于执行 latency_encoding
-            latency: 外部传入的 latency 值 [Batch] 或 [1] 或 float
-        """
-        
-        if latency is None: # 通过检测foward的部分。
-            latency = 1 
-        # 确保 latency 是 Tensor [Batch]
+
+    def forward(self, example: DrivingExample, budget_assigner=None, **kwargs) -> Dict[str, Tensor]:
+        """Build budget token embeddings from assigner-managed runtime budget state."""
+
         try:
             driving_input = example.driving_input
         except AttributeError:
             driving_input = example
-        
-        bs = driving_input.camera_images.shape[0]
-        dtype = driving_input.camera_images.dtype
-        device = driving_input.camera_images.device
-        
-        # 简单的标量转 Tensor 逻辑
-        if not isinstance(latency, torch.Tensor):
-            latency_tensor = torch.full((bs,), latency, dtype=dtype, device=device)
-        else:
-            if latency.ndim == 0:
-                latency_tensor = latency.expand(bs).to(device).to(dtype)
-            else:
-                latency_tensor = latency.to(device).to(dtype)
-        
-        # 编码 (使用 Scheduler)
-        # 产生的 shape 通常是 [Batch, 1, Hidden]
-        # 注意：scheduler.latency_encoding 需要返回 unsqueeze(1) 后的结果或者在这里手动加维度
-        inputs = scheduler.latency_encoding(latency_tensor) 
-        
-        if inputs.dim() == 2:
-            inputs = inputs.unsqueeze(1) # [Batch, 1, Hidden]
 
-        # 4. 生成 Mask
-        inputs_mask = torch.ones((bs, 1), dtype=torch.bool, device=device)
+        bs = driving_input.camera_images.shape[0]
+
+        if budget_assigner is None:
+            raise ValueError("budget_assigner is required for budget token encoding")
+        budget_tensor = budget_assigner.get_runtime_budget_values(bs)
+        inputs = budget_assigner.encode_budget_token(budget_tensor)
+
+        if inputs.dim() == 2:
+            inputs = inputs.unsqueeze(1)
+
+        inputs_mask = torch.ones((bs, 1), dtype=torch.bool, device=inputs.device)
 
         return {
-            "inputs": inputs, 
+            "inputs": inputs,
             "inputs_mask": inputs_mask,
-            "values": latency_tensor #以此保留原始值以备后用
+            "values": budget_tensor,
         }
 
     def compute_loss(self, *args, **kwargs):
-        # Latency 通常作为条件输入，不计算自身的 Loss
         return {}
+
 
 class AdaptorList(nn.Module):
     """
@@ -340,12 +311,12 @@ class AdaptorList(nn.Module):
         self,
         driving: Optional[DrivingAdaptor] = None,
         language: Optional[LanguageAdaptor] = None,
-        latency: Optional[LatencyAdaptor] = None,
+        budget: Optional[BudgetAdaptor] = None,
     ):
         super().__init__()
         self.driving = driving
         self.language = language
-        self.latency = latency
+        self.budget = budget
     @property
     def adaptors(self):
         dct: Dict[str, Adaptor] = {}
@@ -353,8 +324,8 @@ class AdaptorList(nn.Module):
             dct["language"] = self.language
         if self.driving is not None:
             dct["driving"] = self.driving
-        if self.latency is not None:
-            dct["latency"] = self.latency
+        if self.budget is not None:
+            dct["budget"] = self.budget
         return dct
 
     def forward(self, example: DrivingExample, **kwargs) -> Dict[str, Tensor]:
@@ -371,6 +342,17 @@ class AdaptorList(nn.Module):
             inputs_list.append(adaptor_input_dict["inputs"])
             inputs_mask_list.append(adaptor_input_dict["inputs_mask"])
             input_dict.update({key + "_" + k: v for k, v in adaptor_input_dict.items()}) # all
+
+        # Track original (pre-permutation) indices for each adaptor block.
+        offset = 0
+        for key, inputs in zip(self.adaptors.keys(), inputs_list):
+            input_dict[f"{key}_orig_indices"] = torch.arange(
+                offset,
+                offset + inputs.size(1),
+                device=inputs.device,
+                dtype=torch.long,
+            )
+            offset += inputs.size(1)
 
         inputs = torch.cat(inputs_list, dim=1)
         inputs_mask = torch.cat(inputs_mask_list, dim=1)
@@ -453,7 +435,7 @@ def replace_placeholder_tokens(
         
         2.原地编码waypoints并替换对应占位符。waypoints的真实值在palceholder_values中。
         
-        3.latency在LatencyAdaptor中处理了。TODO: 梯度传递是否存在问题？
+        3.budget 在 BudgetAdaptor 中处理。TODO: 梯度传递是否存在问题？
     '''
     if 'tokenizer' in image_encoder.processor.__dict__:
         image_encoder.tokenizer = image_encoder.processor.tokenizer

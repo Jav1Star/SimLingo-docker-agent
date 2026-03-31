@@ -29,7 +29,7 @@ class LingoInternVLModel(nn.Module):
         image_encoder: Optional[nn.Module] = None,
         wp_encoder: Optional[nn.Module] = None,
         scheduer: Optional[nn.Module] = None, # scheduler作为参数传入
-        latency: Optional[float] = None,  # [新增参数] 接收外部传入的 Latency 目标
+        budget: Optional[float] = None,  # [新增参数] 接收外部传入的 Budget 目标
         labels: Optional[torch.LongTensor] = None, # [新增参数] 接收 Labels 用于同步对齐
     ):
         
@@ -41,10 +41,10 @@ class LingoInternVLModel(nn.Module):
         IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
         img_context_token_id = image_encoder.tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
         image_encoder.img_context_token_id = img_context_token_id
-        # ================= [新增] 统一预处理 Latency =================
-        # 将 Latency 提前转为 1-d Tensor，供后续所有步骤复用
-        latency_tensor = None
-        if latency is not None:
+        # ================= [新增] 统一预处理 Budget =================
+        # 将 Budget 提前转为 1-d Tensor，供后续所有步骤复用
+        budget_tensor = None
+        if budget is not None:
             # 参考其他输入 Tensor 对齐 device 和 dtype.
             ref_tensor = adaptor_dict.get('language_inputs', None)
             if ref_tensor is None and 'language__ids' in adaptor_dict:
@@ -60,14 +60,14 @@ class LingoInternVLModel(nn.Module):
             # 假设 input_ids 存在，我们可以用它的 batch size
             bs = adaptor_dict['language__ids'].shape[0]
 
-            if not isinstance(latency, torch.Tensor):
-                latency_tensor = torch.full((bs,), latency, device=device, dtype=dtype)
+            if not isinstance(budget, torch.Tensor):
+                budget_tensor = torch.full((bs,), budget, device=device, dtype=dtype)
             else:
                 # 如果已经是 Tensor，确保维度和设备正确
-                if latency.ndim == 0:
-                    latency_tensor = latency.expand(bs).to(device).to(dtype)
+                if budget.ndim == 0:
+                    budget_tensor = budget.expand(bs).to(device).to(dtype)
                 else:
-                    latency_tensor = latency.to(device).to(dtype)
+                    budget_tensor = budget.to(device).to(dtype)
         # ===========================================================
         
         output_attentions = output_attentions if output_attentions is not None else image_encoder.model.config.output_attentions
@@ -109,7 +109,7 @@ class LingoInternVLModel(nn.Module):
                     end = start + coords_length_org[i]
                     inputs_embeds[pos[0], start:end] = wp_embeds[i]
 
-            # 2. Merge text and images (修改核心：显式拼接 Latency Token)
+            # 2. Merge text and images (修改核心：显式拼接 Budget Token)
             if pixel_values is not None and input_ids.shape[1] != 1 and pixel_values.size(0) > 0:
                 all_pixel_values = [pixel_values]
                     
@@ -132,24 +132,24 @@ class LingoInternVLModel(nn.Module):
 
                 vit_embeds = torch.cat(all_image_features, dim=0)
                 
-                # === [Step A] 准备 Latency Embedding ===
+                # === [Step A] 准备 Budget Embedding ===
                 # 时延
-                latency_embed = None
-                if latency_tensor is not None: # <--- 改用 latency_tensor 判断
+                budget_embed = None
+                if budget_tensor is not None: # <--- 改用 budget_tensor 判断
                     # 生成 Embedding: [BS, Hidden]
                     # 直接传处理好的 Tensor 给 scheduler
-                    latency_embed = image_encoder.scheduler.latency_encoding(latency_tensor)
-                """ if latency is not None:
-                    print(f"DEBUG_CTX [2/3] LLM Input: type={type(latency)}")
+                    budget_embed = image_encoder.scheduler.budget_encoding(budget_tensor)
+                """ if budget is not None:
+                    print(f"DEBUG_CTX [2/3] LLM Input: type={type(budget)}")
                     # 确保转为 Tensor [Batch_Size]
-                    if not isinstance(latency, torch.Tensor):
-                        latency_tensor = torch.tensor([latency] * BS, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
+                    if not isinstance(budget, torch.Tensor):
+                        budget_tensor = torch.tensor([budget] * BS, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
                     else:
-                        print(f"DEBUG_CTX [2/3] LLM Input Shape: {latency.shape}, dim={latency.ndim}")
-                        latency_tensor = latency.to(inputs_embeds.device).to(inputs_embeds.dtype)
+                        print(f"DEBUG_CTX [2/3] LLM Input Shape: {budget.shape}, dim={budget.ndim}")
+                        budget_tensor = budget.to(inputs_embeds.device).to(inputs_embeds.dtype)
                     
                     # 生成 Embedding: [BS, Hidden]
-                    latency_embed = image_encoder.scheduler.latency_encoding(latency_tensor) """
+                    budget_embed = image_encoder.scheduler.budget_encoding(budget_tensor) """
                 
                 # === [Step B] 准备重构序列 ===
                 # 文本
@@ -165,7 +165,7 @@ class LingoInternVLModel(nn.Module):
                 new_inputs_embeds_list = []
                 new_labels_list = []
                 new_masks_list = []  # [新增] 用于存储重构后的 Mask
-                latency_token_positions = [] 
+                budget_token_positions = [] 
 
                 for b in range(BS):
                     mask_indices = (input_ids[b] == image_encoder.img_context_token_id)
@@ -201,10 +201,10 @@ class LingoInternVLModel(nn.Module):
                             # 如果没有 mask，默认为全 1 (极少情况)
                             parts_mask = [] # 后续处理
                         
-                        # 2. 插入 Latency Token (在最后)
-                        if latency_embed is not None:
+                        # 2. 插入 Budget Token (在最后)
+                        if budget_embed is not None:
                             # Embedding
-                            parts_emb.append(latency_embed[b].unsqueeze(0))
+                            parts_emb.append(budget_embed[b].unsqueeze(0))
                             
                             # Label
                             if labels is not None:
@@ -216,9 +216,9 @@ class LingoInternVLModel(nn.Module):
                             
                             # Position
                             pos = prefix.shape[0] + vit_embeds[b].shape[0] + suffix.shape[0]
-                            latency_token_positions.append(pos)
+                            budget_token_positions.append(pos)
                         else:
-                            latency_token_positions.append(0)
+                            budget_token_positions.append(0)
                             
                         # 3. 拼接
                         new_inputs_embeds_list.append(torch.cat(parts_emb, dim=0))
@@ -236,13 +236,13 @@ class LingoInternVLModel(nn.Module):
                         # 纯文本 Mask 处理
                         parts_mask = [old_mask[b]] if old_mask is not None else []
                         
-                        # Latency 插入
-                        if latency_embed is not None:
-                            parts_emb = [inputs_embeds[b], latency_embed[b].unsqueeze(0)]
+                        # Budget 插入
+                        if budget_embed is not None:
+                            parts_emb = [inputs_embeds[b], budget_embed[b].unsqueeze(0)]
                             new_inputs_embeds_list[-1] = torch.cat(parts_emb, dim=0) # 更新刚才 append 的
                             
                             pos = inputs_embeds[b].shape[0]
-                            latency_token_positions.append(pos)
+                            budget_token_positions.append(pos)
 
                             if labels is not None:
                                 parts_label = [labels[b], torch.tensor([-100], dtype=labels.dtype, device=labels.device)]
@@ -251,7 +251,7 @@ class LingoInternVLModel(nn.Module):
                             if old_mask is not None:
                                 parts_mask.append(torch.tensor([1], dtype=old_mask.dtype, device=old_mask.device))
                         else:
-                            latency_token_positions.append(0)
+                            budget_token_positions.append(0)
                         
                         if old_mask is not None:
                             new_masks_list.append(torch.cat(parts_mask, dim=0))
@@ -272,14 +272,14 @@ class LingoInternVLModel(nn.Module):
                         adaptor_dict['inputs_mask'] = new_mask
 
                 # === [Step E] 打包 AdaLLaVA 参数 ===
-                if latency is not None:
-                    adaptor_dict['latency_token_position'] = torch.tensor(
-                        latency_token_positions, device=inputs_embeds.device
+                if budget is not None:
+                    adaptor_dict['budget_token_position'] = torch.tensor(
+                        budget_token_positions, device=inputs_embeds.device
                     )
                     # 修改前：存入原始数据 (可能是标量)
-                    # adaptor_dict['latency'] = latency 
+                    # adaptor_dict['budget'] = budget 
                     # 修改后：存入韩式开头已经处理好的 1-d Tensor
-                    adaptor_dict['latency'] = latency_tensor
+                    adaptor_dict['budget'] = budget_tensor
                     adaptor_dict['scheduler'] = image_encoder.scheduler.forward
 
             # pixel_values is not None but is empty ---> text only cases

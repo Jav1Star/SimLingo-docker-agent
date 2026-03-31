@@ -12,9 +12,9 @@ eval:
   team_code: team_code_adaption
   agent_config: not_used
 
-latency:
+budget:
   mode: fixed # random # fixed # rule_based
-  fix_latency: 0.8
+  fixed_budget: 0.8
   rule_based:
     k_warmup: 5
     eta: 0.03

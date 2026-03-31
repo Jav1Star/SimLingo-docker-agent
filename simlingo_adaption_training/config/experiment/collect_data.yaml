@@ -8,8 +8,7 @@ model:
   lr: 3e-5
   predict_route_as_wps: True
   speed_wps_mode: 2d
-  computation_budget: 'random' # fixed, random
-  probe_spatial_entropy_token_source: 'latency' # waypoints, latency
+  budget_mode: random # fixed, random, rule_based
   language_model:
     variant: 'OpenGVLab/InternVL2-1B'
     lora: True

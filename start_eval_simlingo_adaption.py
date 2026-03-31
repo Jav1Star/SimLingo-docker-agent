@@ -66,70 +66,31 @@ def load_eval_yaml(config_path: str):
     return data
 
 
-def parse_latency_settings(data):
+def parse_budget_settings(data):
     eval_cfg = data.get("eval", data)
-    latency_cfg = data.get("latency", eval_cfg.get("latency", {})) or {}
-    default_rule_based_cfg = {
-        "k_warmup": 5,
-        "eta": 0.03,
-        "safe_threshold": 0.35,
-        "safe_count_threshold": 2,
-        "decay_step": 0.1,
-        "base_offset": 0.25,
-        "base_scale": 0.75,
-        "inst_offset": 0.5,
-        "inst_scale": 0.5,
-        "weights": {
-            "base_mean": {"novelty": 0.23, "speed_shift": 0.35, "route_shift": 0.15},
-            "base_max": {"novelty": 0.08, "speed_shift": 0.12, "route_shift": 0.08},
-            "inst": {"novelty": 0.40, "speed_shift": 0.40, "route_shift": 0.20},
-        },
-        "normalization": {
-            "novelty": {"q10": 0.0001102686, "q90": 0.0150763988},
-            "speed_shift": {"q10": 0.0030981766, "q90": 0.7491058707},
-            "route_shift": {"q10": 0.1959435195, "q90": 0.7666570544},
-        },
-    }
-    rule_based_cfg_raw = latency_cfg.get("rule_based", {}) or {}
-    if not isinstance(rule_based_cfg_raw, dict):
-        rule_based_cfg_raw = {}
-    rule_based_cfg = dict(default_rule_based_cfg)
-    for key, value in rule_based_cfg_raw.items():
-        if isinstance(value, dict) and isinstance(rule_based_cfg.get(key), dict):
-            merged = dict(rule_based_cfg[key])
-            merged.update(value)
-            rule_based_cfg[key] = merged
-        else:
-            rule_based_cfg[key] = value
-    weights_raw = rule_based_cfg_raw.get("weights", {}) if isinstance(rule_based_cfg_raw, dict) else {}
-    if isinstance(weights_raw, dict):
-        for sub_key in ("base_mean", "base_max", "inst"):
-            if isinstance(weights_raw.get(sub_key), dict):
-                merged = dict(default_rule_based_cfg["weights"][sub_key])
-                merged.update(weights_raw[sub_key])
-                rule_based_cfg["weights"][sub_key] = merged
-    norm_raw = rule_based_cfg_raw.get("normalization", {}) if isinstance(rule_based_cfg_raw, dict) else {}
-    if isinstance(norm_raw, dict):
-        for sub_key in ("novelty", "speed_shift", "route_shift"):
-            if isinstance(norm_raw.get(sub_key), dict):
-                merged = dict(default_rule_based_cfg["normalization"][sub_key])
-                merged.update(norm_raw[sub_key])
-                rule_based_cfg["normalization"][sub_key] = merged
-    # 从 yaml 读取 latency 模式配置（random/fixed/rule_based）
-    mode = str(latency_cfg.get("mode", "no mode in config")).strip().lower()
+    budget_cfg = data.get("budget", eval_cfg.get("budget", {})) or {}
+
+    mode = str(budget_cfg.get("mode", "no mode in config")).strip().lower()
     allowed_modes = {"random", "fixed", "rule_based"}
     if mode not in allowed_modes:
-        raise ValueError(f"latency.mode must be one of {sorted(allowed_modes)}, got {mode}")
-    fix_latency = float(latency_cfg.get("fix_latency", 1.0))
-    if mode == "fixed" and not (0.0 <= fix_latency <= 1.0):
-        raise ValueError(f"latency.fix_latency must be in [0, 1] for fixed mode, got {fix_latency}")
-    return mode, fix_latency, rule_based_cfg
+        raise ValueError(f"budget.mode must be one of {sorted(allowed_modes)}, got {mode}")
+
+    fixed_budget = float(budget_cfg.get("fixed_budget", 1.0))
+    if mode == "fixed" and not (0.0 <= fixed_budget <= 1.0):
+        raise ValueError(f"budget.fixed_budget must be in [0, 1] for fixed mode, got {fixed_budget}")
+
+    rule_based_cfg = budget_cfg.get("rule_based", None)
+    if mode == "rule_based":
+        if not isinstance(rule_based_cfg, dict) or not rule_based_cfg:
+            raise ValueError("budget.rule_based must be provided as non-empty dict when budget.mode=rule_based")
+
+    return mode, fixed_budget, rule_based_cfg
 
 
 def build_eval_config(args, no_server_launch):
     eval_yaml = load_eval_yaml(args.eval_config)
     cfg = eval_yaml.get("eval", eval_yaml)
-    latency_mode, fix_latency, rule_based_cfg = parse_latency_settings(eval_yaml)
+    budget_mode, fixed_budget, rule_based_cfg = parse_budget_settings(eval_yaml)
 
     required_keys = [
         "agent",
@@ -164,8 +125,8 @@ def build_eval_config(args, no_server_launch):
         "agent_config": cfg.get("agent_config", "not_used"),
         "username": cfg.get("username", os.getenv("USER", "local_user")),
         "no_server_launch": no_server_launch,
-        "latency_mode": latency_mode,
-        "fix_latency": fix_latency,
+        "budget_mode": budget_mode,
+        "fixed_budget": fixed_budget,
         "rule_based_cfg": rule_based_cfg,
     }
     return eval_cfg
@@ -196,9 +157,9 @@ def launch_job(job, gpu_id, world_port, tm_port):
     env["SCENARIO_RUNNER_ROOT"] = f"{repo_root}/Bench2Drive/scenario_runner"
     env["SAVE_PATH"] = job["viz_path"]
     env["LEADERBOARD_ROOT"] = f"{repo_root}/Bench2Drive/leaderboard"
-    # 通过环境变量把 mode 与固定延迟值传给 agent
-    env["SIMLINGO_EVAL_LATENCY_MODE"] = str(job["latency_mode"])
-    env["SIMLINGO_EVAL_FIXED_LATENCY"] = str(job["fix_latency"])
+    # 通过环境变量把 mode 与固定 budget 值传给 agent
+    env["SIMLINGO_EVAL_BUDGET_MODE"] = str(job["budget_mode"])
+    env["SIMLINGO_EVAL_FIXED_BUDGET"] = str(job["fixed_budget"])
     env["SIMLINGO_EVAL_RULE_BASED_CFG_JSON"] = json.dumps(job["rule_based_cfg"], ensure_ascii=False)
     
     command = [
@@ -394,10 +355,10 @@ def main(args):
 
         for seed in cfg["seeds"]:
             seed = str(seed)
-            # 输出目录按 mode 分层；fixed 模式再细分到 lat_xxx
-            base_dir = os.path.join(cfg["out_root"], cfg["agent"], cfg["benchmark"], seed, cfg["latency_mode"])
-            if cfg["latency_mode"] == "fixed":
-                base_dir = os.path.join(base_dir, f"lat_{cfg['fix_latency']:.3f}")
+            # 输出目录按 mode 分层；fixed 模式再细分到 bud_xxx
+            base_dir = os.path.join(cfg["out_root"], cfg["agent"], cfg["benchmark"], seed, cfg["budget_mode"])
+            if cfg["budget_mode"] == "fixed":
+                base_dir = os.path.join(base_dir, f"bud_{cfg['fixed_budget']:.3f}")
             os.makedirs(os.path.join(base_dir, "run"), exist_ok=True)
             os.makedirs(os.path.join(base_dir, "res"), exist_ok=True)
             os.makedirs(os.path.join(base_dir, "out"), exist_ok=True)
@@ -426,14 +387,14 @@ def main(args):
                             status = res_data["_checkpoint"]["global_record"].get("status", "Failed")
                         if status == "Completed":
                             should_skip = True
-                            print(f"[skip] route {route_id} mode {cfg['latency_mode']} status is Completed -> skip")
+                            print(f"[skip] route {route_id} mode {cfg['budget_mode']} status is Completed -> skip")
                         else:
                             # 状态是 Failed 或其他，需要重跑
-                            print(f"[queue] route {route_id} mode {cfg['latency_mode']} status is {status} -> queue")
+                            print(f"[queue] route {route_id} mode {cfg['budget_mode']} status is {status} -> queue")
 
                     except Exception as e:
                         # JSON 解析失败或读取错误，视为需要重跑
-                        print(f"[queue] route {route_id} mode {cfg['latency_mode']} json invalid ({e}) -> queue")
+                        print(f"[queue] route {route_id} mode {cfg['budget_mode']} json invalid ({e}) -> queue")
                         should_skip = False
 
                 if should_skip:
@@ -444,8 +405,8 @@ def main(args):
                     "route": route_file,
                     "route_id": route_id,
                     "seed": seed,
-                    "latency_mode": cfg["latency_mode"],
-                    "fix_latency": cfg["fix_latency"],
+                    "budget_mode": cfg["budget_mode"],
+                    "fixed_budget": cfg["fixed_budget"],
                     "rule_based_cfg": cfg["rule_based_cfg"],
                     "viz_path": viz_path,
                     "result_file": result_file,
@@ -536,7 +497,7 @@ def main(args):
 
             print(
                 f"Started job {job['route_id']} on GPU {gpu_id} "
-                f"with mode={job['latency_mode']} fix_latency={job['fix_latency']} "
+                f"with mode={job['budget_mode']} fixed_budget={job['fixed_budget']} "
                 f"(tries left after launch: {job['tries_remaining']})."
             )
             job_started = True

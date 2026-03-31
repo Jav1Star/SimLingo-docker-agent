@@ -74,8 +74,8 @@ def n_times_gumbel_softmax_head_version(logits, n = 1, tau = 1, hard = False, ep
         n -= 1
     return cumulate_mask
 
-def posemb_sincos_1d(latency_num, dim=256, temperature=10000, dtype=torch.float32):
-    n = latency_num
+def posemb_sincos_1d(token_num, dim=256, temperature=10000, dtype=torch.float32):
+    n = token_num
 
     n = torch.arange(n)
     assert (dim % 2) == 0, 'feature dimension must be multiple of 2 for sincos emb'
@@ -86,9 +86,9 @@ def posemb_sincos_1d(latency_num, dim=256, temperature=10000, dtype=torch.float3
     pe = torch.cat((n.sin(), n.cos()), dim=1)
     return pe
     
-def latency_quantizing(latency, num_prefix_units=16, num_total_units=32):
-    if not torch.all((latency >= 0) & (latency <= 1)):
-        raise ValueError("Latency must be between 0 and 1.")
-    units = torch.floor(num_total_units * latency) - num_prefix_units
+def budget_quantizing(budget, num_prefix_units=16, num_total_units=32):
+    if not torch.all((budget >= 0) & (budget <= 1)):
+        raise ValueError("Budget must be between 0 and 1.")
+    units = torch.floor(num_total_units * budget) - num_prefix_units
     units = torch.relu(units)
     return units, units / (num_total_units - num_prefix_units + 1)

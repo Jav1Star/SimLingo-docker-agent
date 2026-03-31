@@ -1,5 +1,3 @@
-import logging
-import math
 from typing import Dict, List, Optional
 
 import torch
@@ -7,226 +5,13 @@ from torch import Tensor
 
 from simlingo_adaption_training.utils.custom_types import DrivingInput
 
-
-logger = logging.getLogger(__name__)
-
-
 class DrivingMetricsComputer:
+    """Compute novelty and decision-shift metrics for one forward step."""
+
     def __init__(self, owner):
         self.owner = owner
 
-    def _pad_position_lists(self, pos_lists, device):
-        if len(pos_lists) == 0:
-            return None
-        max_len = max(len(x) for x in pos_lists)
-        if max_len == 0:
-            return torch.full((len(pos_lists), 1), -1, device=device, dtype=torch.long)
-        out = torch.full((len(pos_lists), max_len), -1, device=device, dtype=torch.long)
-        for idx, positions in enumerate(pos_lists):
-            if len(positions) > 0:
-                out[idx, :len(positions)] = torch.tensor(positions, device=device, dtype=torch.long)
-        return out
-
-    def _pad_coord_lists(self, coord_lists, device):
-        if len(coord_lists) == 0:
-            return None
-        max_len = max(len(x) for x in coord_lists)
-        if max_len == 0:
-            return torch.full((len(coord_lists), 1, 2), -1.0, device=device, dtype=torch.float32)
-        out = torch.full((len(coord_lists), max_len, 2), -1.0, device=device, dtype=torch.float32)
-        for idx, coords in enumerate(coord_lists):
-            if len(coords) > 0:
-                out[idx, :len(coords)] = torch.tensor(coords, device=device, dtype=torch.float32)
-        return out
-
-    def _build_rule_based_token_positions(self, adaptor_dict: Dict, driving_input: DrivingInput):
-        perm = adaptor_dict["perm"]
-        inv_perm = perm.argsort(-1)
-        split_sizes = adaptor_dict["split_sizes"].tolist()
-        language_len = int(split_sizes[0])
-        driving_len = int(split_sizes[1]) if len(split_sizes) > 1 else 0
-        latency_len = int(split_sizes[2]) if len(split_sizes) > 2 else 0
-        driving_start = language_len
-        latency_start = language_len + driving_len
-
-        language_ids = adaptor_dict["language__ids"]
-        img_context_token_id = self.owner.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
-
-        visual_pos_lists = []
-        visual_coord_lists = []
-        num_patches = int(driving_input.camera_images.size(2))
-        for b_idx in range(language_ids.size(0)):
-            visual_orig = torch.nonzero(language_ids[b_idx] == img_context_token_id, as_tuple=False).squeeze(-1)
-            visual_new = inv_perm[b_idx, visual_orig].tolist() if visual_orig.numel() > 0 else []
-            visual_pos_lists.append(visual_new)
-
-            coords = []
-            if len(visual_new) > 0:
-                tokens_per_patch = len(visual_new) // num_patches
-                side = int(math.sqrt(tokens_per_patch))
-                for token_rank in range(len(visual_new)):
-                    patch_id = token_rank // tokens_per_patch
-                    local_idx = token_rank % tokens_per_patch
-                    local_r = local_idx // side
-                    local_c = local_idx % side
-                    global_c = patch_id * side + local_c
-                    r_norm = local_r / max(side - 1, 1)
-                    c_norm = global_c / max(num_patches * side - 1, 1)
-                    coords.append([r_norm, c_norm])
-            visual_coord_lists.append(coords)
-
-        order = list(self.owner.adaptors.driving.order)
-        sizes = self.owner.adaptors.driving.sizes
-        path_size = int(sizes.get("route", 0))
-        speed_size = int(sizes.get("speed_wps", 0))
-        if "route" in order and order.index("route") == 0:
-            path_start = driving_start
-            speed_start = driving_start + path_size
-        else:
-            path_start = driving_start
-            speed_start = driving_start
-
-        path_pos_lists = []
-        speed_pos_lists = []
-        latency_pos_lists = []
-        for b_idx in range(inv_perm.size(0)):
-            if path_size > 0 and driving_len > 0:
-                path_orig = torch.arange(path_start, path_start + path_size, device=inv_perm.device)
-                path_new = inv_perm[b_idx, path_orig].tolist()
-            else:
-                path_new = []
-            if speed_size > 0 and driving_len > 0:
-                speed_orig = torch.arange(speed_start, speed_start + speed_size, device=inv_perm.device)
-                speed_new = inv_perm[b_idx, speed_orig].tolist()
-            else:
-                speed_new = []
-            if latency_len > 0:
-                latency_orig = torch.arange(latency_start, latency_start + latency_len, device=inv_perm.device)
-                latency_new = inv_perm[b_idx, latency_orig].tolist()
-            else:
-                latency_new = []
-            path_pos_lists.append(path_new)
-            speed_pos_lists.append(speed_new)
-            latency_pos_lists.append(latency_new)
-
-        visual_positions = self._pad_position_lists(visual_pos_lists, inv_perm.device)
-        visual_coords = self._pad_coord_lists(visual_coord_lists, inv_perm.device)
-        path_positions = self._pad_position_lists(path_pos_lists, inv_perm.device)
-        speed_positions = self._pad_position_lists(speed_pos_lists, inv_perm.device)
-        latency_positions = self._pad_position_lists(latency_pos_lists, inv_perm.device)
-        return visual_positions, visual_coords, path_positions, speed_positions, latency_positions
-
-    def run_rule_based_probe(
-        self,
-        adaptor_dict: Dict,
-        driving_input: DrivingInput,
-        inputs_embeds: Tensor,
-        attention_mask: Tensor,
-        position_ids: Optional[Tensor],
-        cache_position: Optional[Tensor],
-        latency_value: Optional[Tensor],
-        route_keys: Optional[List[str]] = None,
-    ):
-        (
-            visual_token_positions,
-            visual_token_coords,
-            waypoint_path_token_positions,
-            waypoint_speed_token_positions,
-            latency_token_positions,
-        ) = self._build_rule_based_token_positions(adaptor_dict, driving_input)
-        # check positions
-        history_state = self._prepare_probe_history_state(route_keys, inputs_embeds)
-        probe_metrics = self.owner.language_model.model.probe_forward(
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            inputs_embeds=inputs_embeds,
-            cache_position=cache_position,
-            latency=latency_value,
-            visual_token_positions=visual_token_positions,
-            visual_token_coords=visual_token_coords,
-            waypoint_path_token_positions=waypoint_path_token_positions,
-            waypoint_speed_token_positions=waypoint_speed_token_positions,
-            latency_token_positions=latency_token_positions,
-            entropy_token_source=self.owner.probe_spatial_entropy_token_source,
-            history_state=history_state,
-            history_alpha=self.owner.probe_history_alpha,
-        )
-        if route_keys is not None:
-            self._commit_probe_history_state(route_keys, history_state)
-        return probe_metrics
-
-    def _prepare_probe_history_state(self, route_keys: Optional[List[str]], inputs_embeds: Tensor):
-        if route_keys is None:
-            return self.owner.probe_history_state
-
-        batch_size = inputs_embeds.size(0)
-        if len(route_keys) != batch_size:
-            raise ValueError(f"route_keys length ({len(route_keys)}) must match batch size ({batch_size})")
-        hidden_size = inputs_embeds.size(-1)
-        v_hist = torch.zeros((batch_size, hidden_size), device=inputs_embeds.device, dtype=inputs_embeds.dtype)
-        v_hist_valid = torch.zeros(batch_size, device=inputs_embeds.device, dtype=torch.bool)
-
-        for b_idx, route_key in enumerate(route_keys):
-            if route_key is None:
-                continue
-            prev_state = self.owner.probe_history_state_by_route.get(route_key, None)
-            if not prev_state:
-                continue
-            prev_hist = prev_state.get("v_hist", None)
-            if isinstance(prev_hist, torch.Tensor) and prev_hist.numel() == hidden_size:
-                v_hist[b_idx] = prev_hist.to(device=inputs_embeds.device, dtype=inputs_embeds.dtype)
-                v_hist_valid[b_idx] = True
-
-        return {"v_hist": v_hist, "v_hist_valid": v_hist_valid}
-
-    def _commit_probe_history_state(self, route_keys: List[str], history_state: Dict[str, Tensor]):
-        if not isinstance(history_state, dict):
-            return
-        hist = history_state.get("v_hist")
-        valid = history_state.get("v_hist_valid")
-        if not isinstance(hist, torch.Tensor) or hist.ndim != 2:
-            return
-
-        if isinstance(valid, torch.Tensor) and valid.numel() == hist.size(0):
-            valid_mask = valid.to(device=hist.device, dtype=torch.bool)
-        else:
-            valid_mask = torch.ones(hist.size(0), device=hist.device, dtype=torch.bool)
-
-        for b_idx, route_key in enumerate(route_keys):
-            if route_key is None or not bool(valid_mask[b_idx]):
-                continue
-            self.owner.probe_history_state_by_route[route_key] = {
-                "v_hist": hist[b_idx].detach().clone(),
-            }
-
-    def compute_latency_from_probe_metrics(self, metrics, fallback_latency):
-        spatial_entropy = metrics.get("spatial_entropy", {}) if isinstance(metrics, dict) else {}
-        # Backward compatibility for old metric schema.
-        if not spatial_entropy and isinstance(metrics, dict):
-            spatial_entropy = metrics.get("waypoint_entropy", {})
-        history_similarity = metrics.get("history_similarity", {}) if isinstance(metrics, dict) else {}
-
-        entropy_mean = spatial_entropy.get("mean")
-        if entropy_mean is None:
-            entropy_mean = spatial_entropy.get("mean_spatial_entropy")
-        sim_in = history_similarity.get("sim_in")
-        if entropy_mean is None or sim_in is None:
-            return fallback_latency
-
-        if not isinstance(entropy_mean, torch.Tensor):
-            if isinstance(fallback_latency, torch.Tensor):
-                entropy_mean = torch.full_like(fallback_latency, float(entropy_mean))
-            else:
-                entropy_mean = torch.tensor(float(entropy_mean))
-        if not isinstance(sim_in, torch.Tensor):
-            if isinstance(fallback_latency, torch.Tensor):
-                sim_in = torch.full_like(fallback_latency, float(sim_in))
-            else:
-                sim_in = torch.tensor(float(sim_in))
-
-        decided_latency = self.owner.probe_entropy_weight * entropy_mean + (1.0 - self.owner.probe_entropy_weight) * sim_in
-        return decided_latency.clamp(0.0, 1.0)
-
+    # Convert nested tensors to python scalars/lists for logging/state update.
     def to_python_metrics(self, outputs):
         metrics = outputs if isinstance(outputs, dict) else getattr(outputs, "rule_based_metrics", None)
         if metrics is None:
@@ -241,6 +26,69 @@ class DrivingMetricsComputer:
             return value
 
         return _to_python(metrics)
+
+    def compute_novelty_metrics(
+        self,
+        route_keys: List[str],
+        adaptor_dict: Dict[str, torch.Tensor],
+        inputs_embeds: torch.Tensor,
+        tokenizer,
+    ) -> Dict[str, Dict[str, List[Optional[float]]]]:
+        """Compute visual-history similarity/novelty and update per-route `v_hist`."""
+        sim_in_list: List[Optional[float]] = [None for _ in range(len(route_keys))]
+        novelty_list: List[Optional[float]] = [None for _ in range(len(route_keys))]
+        visual_positions = self._extract_visual_token_positions(adaptor_dict, tokenizer)
+        if visual_positions is None:
+            return {
+                "novelty": novelty_list,
+                "history_similarity": {"sim_in": sim_in_list, "alpha": float(self.owner.history_alpha)},
+            }
+
+        for idx, route_key in enumerate(route_keys):
+            state = self.owner.state_by_route[route_key]
+            vis_idx = visual_positions[idx]
+            vis_idx = vis_idx[(vis_idx >= 0) & (vis_idx < inputs_embeds.size(1))]
+            if vis_idx.numel() == 0:
+                continue
+
+            v_global = inputs_embeds[idx, vis_idx].mean(dim=0).detach().float()
+            prev_hist = state.get("v_hist")
+            if prev_hist is None:
+                sim_in = 1.0
+                updated_hist = v_global
+            else:
+                prev_hist = prev_hist.to(device=v_global.device, dtype=v_global.dtype)
+                denom = float((v_global.norm(p=2) * prev_hist.norm(p=2)).item())
+                cos = float(torch.dot(v_global, prev_hist).item() / max(denom, 1e-8))
+                sim_in = float(torch.clamp(torch.tensor(0.5 * (1.0 + cos)), 0.0, 1.0).item())
+                updated_hist = self.owner.history_alpha * v_global + (1.0 - self.owner.history_alpha) * prev_hist
+
+            state["v_hist"] = updated_hist.detach()
+            sim_in_list[idx] = sim_in
+            novelty_list[idx] = float(torch.clamp(torch.tensor(1.0 - sim_in), 0.0, 1.0).item())
+
+        return {
+            "novelty": novelty_list,
+            "history_similarity": {"sim_in": sim_in_list, "alpha": float(self.owner.history_alpha)},
+        }
+
+    @staticmethod
+    def _extract_visual_token_positions(
+        adaptor_dict: Dict[str, torch.Tensor],
+        tokenizer,
+    ) -> Optional[List[torch.Tensor]]:
+        """Extract reordered visual token positions (<IMG_CONTEXT>) for each sample."""
+        language_ids = adaptor_dict.get("language__ids")
+        perm = adaptor_dict.get("perm")
+        if language_ids is None or perm is None:
+            return None
+        inv_perm = perm.argsort(-1)
+        img_context_token_id = tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
+        positions: List[torch.Tensor] = []
+        for b_idx in range(language_ids.size(0)):
+            visual_orig = torch.nonzero(language_ids[b_idx] == img_context_token_id, as_tuple=False).squeeze(-1)
+            positions.append(inv_perm[b_idx, visual_orig].long())
+        return positions
 
     def _transform_prev_waypoints_to_curr_frame(self, prev_waypoints: Tensor, delta_xy_prev_frame: Tensor, delta_yaw: Tensor):
         centered = prev_waypoints - delta_xy_prev_frame[:, None, :]
@@ -298,92 +146,20 @@ class DrivingMetricsComputer:
         e_mean, e_norm = self._compute_decision_shift(current_waypoints, prev_aligned, valid_mask)
         return {"e_mean": e_mean, "e_norm": e_norm}
 
-    def _update_decision_shift_state(
-        self,
-        current_speed_wps: Optional[Tensor],
-        current_route: Optional[Tensor],
-        ego_xy: Tensor,
-        ego_yaw: Tensor,
-        timestamp: Tensor,
-    ):
-        self.owner.decision_shift_state = {
-            "speed_wps": None if current_speed_wps is None else current_speed_wps.detach(),
-            "route": None if current_route is None else current_route.detach(),
-            "ego_xy": ego_xy.detach(),
-            "ego_yaw": ego_yaw.detach(),
-            "timestamp": timestamp.detach(),
-        }
-
     def compute_decision_shift_metrics(
         self,
         driving_input: DrivingInput,
         current_speed_wps: Optional[Tensor],
         current_route: Optional[Tensor],
-        route_keys: Optional[List[str]] = None,
+        route_keys: List[str],
     ):
-        if route_keys is not None:
-            return self._compute_decision_shift_metrics_by_route(
-                driving_input=driving_input,
-                current_speed_wps=current_speed_wps,
-                current_route=current_route,
-                route_keys=route_keys,
-            )
-
-        default_out = {
-            "speed_wps": {"e_mean": None, "e_norm": None},
-            "route": {"e_mean": None, "e_norm": None},
-            "delta_tau": None,
-            "t_lap": self.owner.decision_shift_t_lap,
-        }
-
-        ego_xy = driving_input.ego_xy
-        ego_yaw = driving_input.ego_yaw
-        timestamp = driving_input.timestamp
-        if ego_xy is None or ego_yaw is None or timestamp is None:
-            if not self.owner._decision_shift_warning_emitted:
-                logger.warning("Skip decision_shift in rule_based mode: missing ego_xy/ego_yaw/timestamp in DrivingInput.")
-                self.owner._decision_shift_warning_emitted = True
-            return default_out
-
-        prev_state = self.owner.decision_shift_state
-        if not prev_state:
-            self._update_decision_shift_state(current_speed_wps, current_route, ego_xy, ego_yaw, timestamp)
-            return default_out
-
-        prev_ego_xy = prev_state["ego_xy"]
-        prev_ego_yaw = prev_state["ego_yaw"]
-        prev_timestamp = prev_state["timestamp"]
-
-        dx_global = ego_xy[:, 0] - prev_ego_xy[:, 0]
-        dy_global = ego_xy[:, 1] - prev_ego_xy[:, 1]
-        cos_prev = torch.cos(prev_ego_yaw)
-        sin_prev = torch.sin(prev_ego_yaw)
-        delta_x_prev = cos_prev * dx_global + sin_prev * dy_global
-        delta_y_prev = -sin_prev * dx_global + cos_prev * dy_global
-        delta_xy_prev_frame = torch.stack([delta_x_prev, delta_y_prev], dim=-1)
-        delta_yaw = ego_yaw - prev_ego_yaw
-        delta_tau = timestamp - prev_timestamp
-
-        out = {
-            "speed_wps": self._decision_shift_for_waypoint_set(
-                current_waypoints=current_speed_wps,
-                prev_waypoints=prev_state.get("speed_wps"),
-                delta_xy_prev_frame=delta_xy_prev_frame,
-                delta_yaw=delta_yaw,
-                delta_tau=delta_tau,
-            ),
-            "route": self._decision_shift_for_waypoint_set(
-                current_waypoints=current_route,
-                prev_waypoints=prev_state.get("route"),
-                delta_xy_prev_frame=delta_xy_prev_frame,
-                delta_yaw=delta_yaw,
-                delta_tau=delta_tau,
-            ),
-            "delta_tau": delta_tau,
-            "t_lap": torch.full_like(delta_tau, float(self.owner.decision_shift_t_lap)),
-        }
-        self._update_decision_shift_state(current_speed_wps, current_route, ego_xy, ego_yaw, timestamp)
-        return out
+        """Compute route-wise decision shift and update `prev_decision_state_by_route`."""
+        return self._compute_decision_shift_metrics_by_route(
+            driving_input=driving_input,
+            current_speed_wps=current_speed_wps,
+            current_route=current_route,
+            route_keys=route_keys,
+        )
 
     def _compute_decision_shift_metrics_by_route(
         self,
@@ -392,18 +168,12 @@ class DrivingMetricsComputer:
         current_route: Optional[Tensor],
         route_keys: List[str],
     ):
+        """Compute decision-shift from current state vs route-specific previous decision state."""
         batch_size = len(route_keys)
-        if driving_input.ego_xy is not None and driving_input.ego_xy.size(0) != batch_size:
-            raise ValueError(
-                f"route_keys length ({batch_size}) must match ego batch size ({driving_input.ego_xy.size(0)})"
-            )
-        device = None
-        for tensor in (current_speed_wps, current_route, driving_input.ego_xy):
-            if tensor is not None:
-                device = tensor.device
-                break
-        if device is None:
-            device = torch.device("cpu")
+        ego_xy = driving_input.ego_xy
+        ego_yaw = driving_input.ego_yaw
+        timestamp = driving_input.timestamp
+        device = ego_xy.device
 
         speed_e_mean = torch.full((batch_size,), float("nan"), device=device)
         speed_e_norm = torch.full((batch_size,), float("nan"), device=device)
@@ -411,35 +181,12 @@ class DrivingMetricsComputer:
         route_e_norm = torch.full((batch_size,), float("nan"), device=device)
         delta_tau_out = torch.full((batch_size,), float("nan"), device=device)
 
-        ego_xy = driving_input.ego_xy
-        ego_yaw = driving_input.ego_yaw
-        timestamp = driving_input.timestamp
-        if ego_xy is None or ego_yaw is None or timestamp is None:
-            if not self.owner._decision_shift_warning_emitted:
-                logger.warning("Skip decision_shift in rule_based mode: missing ego_xy/ego_yaw/timestamp in DrivingInput.")
-                self.owner._decision_shift_warning_emitted = True
-            return {
-                "speed_wps": {"e_mean": speed_e_mean, "e_norm": speed_e_norm},
-                "route": {"e_mean": route_e_mean, "e_norm": route_e_norm},
-                "delta_tau": delta_tau_out,
-                "t_lap": torch.full((batch_size,), float(self.owner.decision_shift_t_lap), device=device),
-            }
-
         for b_idx, route_key in enumerate(route_keys):
-            if route_key is None:
-                continue
-
             ego_xy_i = ego_xy[b_idx]
             ego_yaw_i = ego_yaw[b_idx]
             timestamp_i = timestamp[b_idx]
-            if (
-                not torch.isfinite(ego_xy_i).all()
-                or not torch.isfinite(ego_yaw_i)
-                or not torch.isfinite(timestamp_i)
-            ):
-                continue
 
-            prev_state = self.owner.decision_shift_state_by_route.get(route_key, None)
+            prev_state = self.owner.prev_decision_state_by_route.get(route_key, None)
             current_speed_i = None if current_speed_wps is None else current_speed_wps[b_idx]
             current_route_i = None if current_route is None else current_route[b_idx]
 
@@ -481,7 +228,7 @@ class DrivingMetricsComputer:
                     route_e_mean[b_idx] = route_metrics["e_mean"][0]
                     route_e_norm[b_idx] = route_metrics["e_norm"][0]
 
-            self.owner.decision_shift_state_by_route[route_key] = {
+            self.owner.prev_decision_state_by_route[route_key] = {
                 "speed_wps": None if current_speed_i is None else current_speed_i.detach().clone(),
                 "route": None if current_route_i is None else current_route_i.detach().clone(),
                 "ego_xy": ego_xy_i.detach().clone(),

@@ -1,7 +1,6 @@
 import datetime
 import json
 import os
-import random
 from pathlib import Path
 from pprint import PrettyPrinter
 from typing import Dict, Optional, Tuple, List
@@ -16,18 +15,20 @@ from torch.optim import AdamW
 from hydra.utils import get_original_cwd
 
 from .adaptors.adaptors import replace_placeholder_tokens
-from simlingo_adaption_training.models.adaptors.adaptors import DrivingAdaptor, LanguageAdaptor, WaypointInputAdaptor, LatencyAdaptor,AdaptorList
-from simlingo_adaption_training.models.metrics.driving_metrics import DrivingMetricsComputer
+from simlingo_adaption_training.models.adaptors.adaptors import DrivingAdaptor, LanguageAdaptor, WaypointInputAdaptor, BudgetAdaptor,AdaptorList
+from simlingo_adaption_training.models.budget_assigner import BudgetAssigner
 from simlingo_adaption_training.models.utils import summarise_losses
 from simlingo_adaption_training.utils.custom_types import (DrivingExample, DrivingInput,
-                                                DrivingLabel, DrivingOutput,
+                                                DrivingOutput,
                                                 TrainingOutput)
 
 
 pprint = PrettyPrinter().pprint
 
+
 def decode_uint8(encoded: torch.Tensor) -> List[str]:
     return [row.tobytes().decode("utf-8").rstrip("\0") for row in encoded.cpu().numpy()]
+
 
 class NormZeroOne(nn.Module):
     def __init__(self, min_max: Tuple[float, float]):
@@ -35,11 +36,22 @@ class NormZeroOne(nn.Module):
         self.register_buffer("min_max", torch.tensor(min_max, dtype=torch.float), persistent=False)
 
     def forward(self, x: Tensor) -> Tensor:
-        """Normalise tensor to [0, 1] using values from min_max"""
         return (x - self.min_max[0]) / (self.min_max[1] - self.min_max[0])
 
 
 class DrivingModel(pl.LightningModule):
+    @staticmethod
+    def remap_legacy_state_dict_keys(state_dict):
+        if not isinstance(state_dict, dict):
+            return state_dict
+        if any(k.startswith("budget_assigner.scheduler.") for k in state_dict.keys()):
+            return state_dict
+        remapped = dict(state_dict)
+        for key, value in state_dict.items():
+            if key.startswith("scheduler."):
+                remapped["budget_assigner.scheduler." + key[len("scheduler."):]] = value
+        return remapped
+
     def __init__(
         self,
         cfg_data_module,
@@ -49,88 +61,68 @@ class DrivingModel(pl.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters()
-        
+
         for key, value in cfg.items():
             setattr(self, key, value)
-            
+
         self.processor = processor
-        
         self.prediction = {}
         self.scene_difficulty_metrics = {}
-        self.probe_history_state = {}
-        self.probe_history_state_by_route = {}
-        self.probe_history_alpha = 0.6
-        self.probe_entropy_weight = 0.5
-        probe_token_source = getattr(self, "probe_spatial_entropy_token_source", "latency")
-        self.probe_spatial_entropy_token_source = str(probe_token_source).strip().lower()
-        if self.probe_spatial_entropy_token_source not in {"waypoints", "latency"}:
-            raise ValueError(
-                f"Unsupported probe_spatial_entropy_token_source={self.probe_spatial_entropy_token_source}. "
-                "Expected one of: waypoints, latency."
-            )
-        self.decision_shift_state = {}
-        self.decision_shift_state_by_route = {}
-        self.decision_shift_t_lap = 0.2
-        self._decision_shift_warning_emitted = False
-        self.metrics_computer = DrivingMetricsComputer(self)
-        
+
+        budget_mode = getattr(self, "budget_mode", getattr(self, "computation_budget", "fixed"))
+        fixed_budget = getattr(self, "fixed_budget", 1.0)
+        budget_rule_based_cfg = getattr(self, "budget_rule_based_cfg", None)
+        decision_shift_t_lap = getattr(self, "decision_shift_t_lap", 0.2)
+        self.budget_assigner = BudgetAssigner(
+            mode=budget_mode,
+            fixed_budget=fixed_budget,
+            rule_based_cfg=budget_rule_based_cfg,
+            decision_shift_t_lap=decision_shift_t_lap,
+        )
+        self.eval_budget = {}
+
         self.predict_language = True
-        
         self.cfg_data_module = cfg_data_module
-        
-        # 根据config与代码，发现都是加载完整的InterVL2-1B，然后丢掉冗余部分来实现，可能需要手动清一下cuda cache
-        self.vision_model = hydra.utils.instantiate( 
+
+        self.vision_model = hydra.utils.instantiate(
             self.vision_model,
             cfg_data_module=cfg_data_module,
             processor=self.processor,
             cache_dir=cache_dir,
-            _recursive_=False
+            _recursive_=False,
         )
-            
+
         self.language_model = hydra.utils.instantiate(
             self.language_model,
             cache_dir=cache_dir,
-            _recursive_=False
+            _recursive_=False,
         )
-         
-    
+
         self.all_predictions = {}
         self.all_losses = {}
-        
-        driving = None
+
         driving = DrivingAdaptor(
-            self.language_model.hidden_size, 
+            self.language_model.hidden_size,
             speed_wps_mode=self.speed_wps_mode,
             predict_route_as_wps=self.predict_route_as_wps,
         )
-        
 
         self.wp_encoder = WaypointInputAdaptor(
             token_size=self.language_model.hidden_size,
             hidden_size=256,
             hidden_size2=512,
-            # norm_layer=NormZeroOne(min_max=(-32.0, 32.0)),
         )
-        if 'tokenizer' in self.processor.__dict__:
+        if "tokenizer" in self.processor.__dict__:
             self.tokenizer = self.processor.tokenizer
         else:
             self.tokenizer = self.processor
 
-        
-        if not self.adaption_train:
-            self.scheduler = None
-            
-        else:
-            # language model alignment for scheduler, init
-            self.scheduler_model.num_hidden_layers = self.language_model.config.num_hidden_layers
-            self.scheduler_model.num_attention_heads = self.language_model.config.num_attention_heads
-            self.scheduler_model.hidden_size = self.language_model.config.hidden_size
-             
-            self.scheduler = hydra.utils.instantiate(
-                self.scheduler_model, # model config
-                _recursive_=False
+        scheduler_module = None
+        if self.adaption_train:
+            scheduler_module = self.budget_assigner.build_scheduler(
+                self.scheduler_model,
+                self.language_model.config,
             )
-            
             current_path = Path(__file__).resolve()
             project_path = current_path.parent.parent.parent
             self.simlingo_checkpoint = os.path.join(project_path, self.simlingo_checkpoint)
@@ -138,246 +130,115 @@ class DrivingModel(pl.LightningModule):
                 state_dict = get_fp32_state_dict_from_zero_checkpoint(self.simlingo_checkpoint)
             else:
                 state_dict = torch.load(self.simlingo_checkpoint, map_location="cpu")
-            self.load_state_dict(state_dict,strict=False) # 加载simlingo原始参数
-            
-        self.language_model.get_lora_model() # 构造llm的PEFT模型
+            state_dict = self.remap_legacy_state_dict_keys(state_dict)
+            self.load_state_dict(state_dict, strict=False)
+
+        self.language_model.get_lora_model()
         self.adaptors = AdaptorList(
-            language=LanguageAdaptor(self.language_model), # 依赖language_model的peft参数
-            driving=driving, # 此处该参数还没有被加载进来
-            latency=LatencyAdaptor()
+            language=LanguageAdaptor(self.language_model),
+            driving=driving,
+            budget=BudgetAdaptor(),
         )
-        
-        
+
         if self.adaption_train:
-            self.load_state_dict(state_dict,strict=False) # 此处language参数应该不匹配了。主要是为了加载adaptor的参数。
-            # 冻结除language model和scheduler外的所有参数
-            # language model内部初始化的时候已实现adaption_train判断以及部分冻结
+            self.load_state_dict(state_dict, strict=False)
             self.vision_model.requires_grad_(False)
             self.wp_encoder.requires_grad_(False)
             self.adaptors.driving.requires_grad_(False)
-            
-            self.scheduler.requires_grad_(True)
-            
+            if scheduler_module is not None:
+                scheduler_module.requires_grad_(True)
+
     @torch.no_grad()
-    def forward(self,
-        example: DrivingExample, # TODO 
+    def forward(
+        self,
+        example: DrivingExample,
         return_language: Optional[bool] = None,
         prompt_ids: Optional[Tensor] = None,
-        # [新增] 接收外部传入的 latency 参数
-        latency: Optional[float] = None, # agent_simlingo中传入
-        ruled_based: bool = False,
         route_keys: Optional[List[str]] = None,
     ) -> DrivingOutput:
         """
         Samples a trajectory from the model.
-        推理阶段, 若predict_language = ture, 则先生成CoT，再直接拼接CoT跟wps, 然后提取wps token
-        若predict_language = false, 则是prompt+wps前向传播,后提取wps token
-        
+        推理阶段, 若self.predict_language = ture, 则先生成CoT，再直接拼接CoT跟wps, 然后提取wps token
+        若self.predict_language = false, 则是prompt+wps前向传播,后提取wps token
+        目前舍弃了self.predict-language分支。
         """
         self.speed_wps, self.route, self.language = None, None, []
         try:
             driving_input = example.driving_input
         except AttributeError:
             driving_input = example
-        if ruled_based and route_keys is None:
-            route_keys = self._extract_route_keys(example)
-        
-        adaptor_dict = self.adaptors(example, inference=True,latency=latency,scheduler=self.scheduler)
-        # 单次前向传播 (用于验证或非语言输出模式)
-        features, logits = self.forward_model(driving_input, adaptor_dict, ruled_based=ruled_based, route_keys=route_keys)
+
+        route_keys = self._resolve_route_keys_or_raise(
+            example=example,
+            route_keys=route_keys,
+            batch_size=driving_input.camera_images.size(0),
+        )
+
+        # Bind runtime reference tensor so assigner can infer budget tensor device/dtype.
+        self.budget_assigner.bind_runtime_reference(driving_input.camera_images)
+        # Decide current-step budget before LLM (for budget-token encoding path).
+        self.budget_assigner.budget_decide_before_llm(
+            batch_size=driving_input.camera_images.size(0),
+            route_keys=route_keys,
+        )
+
+        # BudgetAdaptor reads the decided budget directly from assigner.
+        adaptor_dict = self.adaptors(example, inference=True, budget_assigner=self.budget_assigner)
+        features, logits = self.forward_model(driving_input, adaptor_dict)
         outputs_by_adaptor = self.adaptors.split_outputs_by_adaptor(adaptor_dict, features)
-        predictions = self.adaptors.driving.get_predictions(outputs_by_adaptor['driving']) 
-        # check decision_shift_metrics
-        for k, v in predictions.items():
-            if v is not None:
-                setattr(self, k, v)
-        if ruled_based:
-            decision_shift_metrics = self.metrics_computer.compute_decision_shift_metrics(
-                driving_input=driving_input,
-                current_speed_wps=self.speed_wps,
-                current_route=self.route,
-                route_keys=route_keys,
-            )
-            self.scene_difficulty_metrics["decision_shift"] = self.metrics_computer.to_python_metrics(decision_shift_metrics) # tensor 2 python
-        """    
-        if self.predict_language:
-            adaptor_dict = replace_placeholder_tokens(
-                        adaptor_dict = adaptor_dict,
-                        pixel_values = driving_input.camera_images,
-                        placeholder_values = driving_input.prompt_inference.placeholder_values,
-                        image_encoder = self.vision_model.image_encoder,
-                        wp_encoder = self.wp_encoder,
-                    )
-            input_embeds_all = adaptor_dict["language_inputs"] ### 这块只拿language inputs,生成CoT不需要驾驶输入。跟训练时逻辑不一致
-            # 拼接上latency:
-            if adaptor_dict.get('latency_inputs') is not None:
-                input_embeds_all = torch.cat((input_embeds_all, adaptor_dict['latency_inputs']), dim=1)
-            
-            attention_masks = adaptor_dict['language_inputs_mask']
-            
-            latency_value = adaptor_dict.get('latency_values')
-            latency_token_pos = None
-            if latency_value is not None:
-                latency_token_pos = torch.full(
-                    size = (input_embeds_all.size(0),),
-                    fill_value = adaptor_dict['split_sizes'][0], # 只使用了language inputs
-                    device = input_embeds_all.device
-                )
-            # per batch item because of padding
-            for b_idx, (input_embed, attention_mask) in enumerate(zip(input_embeds_all, attention_masks)):
-                input_embed = input_embed.unsqueeze(0)
-                attention_mask = attention_mask.unsqueeze(0)
-                
-                # 提取当前样本的latency
-                current_latency = None
-                if latency_value is not None:    
-                    current_latency = latency_value[b_idx:b_idx+1] # -> 1-d tensor [1]
-                # ================================================
-                
-                if self.language_model.variant == 'OpenGVLab/InternVL2-4B':
-                    eos = self.tokenizer.added_tokens_encoder['<|end|>']
-                elif self.language_model.variant == 'OpenGVLab/InternVL2-2B':
-                    eos = self.tokenizer.added_tokens_encoder['<|im_end|>']
-                else:
-                    eos = self.tokenizer.eos_token_id
+        predictions = self.adaptors.driving.get_predictions(outputs_by_adaptor["driving"])
+        for key, value in predictions.items():
+            if value is not None:
+                setattr(self, key, value)
 
-                # BUG: input_embeds, cot
-                sampled_tokens, input_embeds = self.language_model.greedy_sample(
-                    input_embed,
-                    eos_token_id=eos,
-                    max_new_tokens=100,
-                    input_embed_matrix=self.adaptors.language.embed_tokens.weight,
-                    logit_matrix=self.adaptors.language.lm_head.weight,
-                    attention_mask=attention_mask,
-                    # position_ids=position_ids,
-                    # 传入 AdaLLaVA 参数
-                    latency=current_latency, # [修改] 使用 current_latency
-                    latency_token_position = latency_token_pos,
-                    scheduler=self.scheduler.forward,
-                    )
-                
-                # TODO: 这块latency没有输入。
-                # 获得驾驶输入，拼接CoT与驾驶输入，进行驾驶决策推理
-                inputs_driving = self.adaptors.driving(driving_input) # 冗余？此时adaptor_dict中应该已经包含了
-                # TODO: 这是直接拼接CoT和wps?那么跟训练的prompt+wps模式，相差有点大了。
-                input_embed_concat = torch.cat((input_embeds, inputs_driving["inputs"][b_idx].unsqueeze(0)), dim=1) 
-                features, logits = self.language_model.forward( 
-                    input_embed_concat,
-                    # 传入 AdaLLaVA 参数
-                    latency=current_latency, # [修改] 使用 current_latency
-                    latency_token_position=latency_token_pos[b_idx].unsqueeze(0) if latency_token_pos is not None else None,
-                    scheduler=self.scheduler.forward,
-                    )
-
-                # 放弃维护adaptor中的split_size，此处手动计算，提取出wps tokens来预测。因为推理阶段无需再调用adaptor的 compute loss 了
-                len_driving = inputs_driving["inputs"].size(1)
-                driving_features = features[:, -len_driving:]
-                driving_logits = logits[:, -len_driving:]
-                predictions = self.adaptors.driving.get_predictions(driving_features, driving_logits)
-                    
-                for k, v in predictions.items():
-                    if v is not None:
-                        if hasattr(self, k) and getattr(self, k) is not None:
-                            if isinstance(v, torch.Tensor):
-                                setattr(self, k, torch.cat((getattr(self, k), v), dim=0))
-                            elif isinstance(v, list):
-                                getattr(self, k).append(v)
-                            else:
-                                raise NotImplementedError(f"Type of {k} not supported")
-                        else:
-                            setattr(self, k, v)
-                                
-                self.language.append(self.tokenizer.batch_decode(sampled_tokens, skip_special_tokens=True)[0])
-        else:
-            # 单次前向传播 (用于验证或非语言输出模式)
-            features = self.forward_model(driving_input, adaptor_dict)
-            outputs_by_adaptor = self.adaptors.split_outputs_by_adaptor(adaptor_dict, features)
-            predictions = self.adaptors.driving.get_predictions(outputs_by_adaptor['driving'])
-
-            for k, v in predictions.items():
-                if v is not None:
-                    setattr(self, k, v)
-        """
+        # Update novelty / decision-shift history and budget diagnostics after LLM forward.
+        budget_metrics = self.budget_assigner.budget_info_update_after_llm(
+            route_keys=route_keys,
+            driving_input=driving_input,
+            current_speed_wps=self.speed_wps,
+            current_route=self.route,
+            adaptor_dict=adaptor_dict,
+            inputs_embeds=self._last_inputs_embeds,
+            tokenizer=self.tokenizer,
+        )
+        self.scene_difficulty_metrics = budget_metrics
+        # Snapshot latest budget decision/update info for eval logging.
+        self.eval_budget = self.budget_assigner.get_eval_budget()
         return self.speed_wps, self.route, self.language
 
-
-    def forward_model(self, 
-                      driving_input: DrivingInput, 
-                      adaptor_dict: Dict, 
-                      driving_labels: DrivingLabel = None,
-                      ruled_based: bool = False,
-                      route_keys: Optional[List[str]] = None,
-                      ) -> Tensor:
-        """
-        Forward model conditioned on the given driving input.
-        
-        """
+    def forward_model(
+        self,
+        driving_input: DrivingInput,
+        adaptor_dict: Dict,
+    ) -> Tensor:
         adaptor_dict = replace_placeholder_tokens(
-                adaptor_dict = adaptor_dict,
-                pixel_values = driving_input.camera_images,
-                placeholder_values = driving_input.prompt_inference.placeholder_values,
-                image_encoder = self.vision_model.image_encoder,
-                wp_encoder = self.wp_encoder,
+            adaptor_dict=adaptor_dict,
+            pixel_values=driving_input.camera_images,
+            placeholder_values=driving_input.prompt_inference.placeholder_values,
+            image_encoder=self.vision_model.image_encoder,
+            wp_encoder=self.wp_encoder,
         )
         position_ids = None
         adaptor_embeds = adaptor_dict["inputs"]
-        adaptor_mask = adaptor_dict['inputs_mask']
-        
-        latency_value = adaptor_dict.get('latency_values')
-        latency_embeds = adaptor_dict.get('latency_inputs')
-        if latency_embeds is not None:
-            latency_token_position = torch.full(
-                size = (latency_embeds.size(0),),
-                fill_value = adaptor_dict['split_sizes'][0]+adaptor_dict['split_sizes'][1], # latency在最后
-                device = latency_embeds.device
-            )
-        else:
-            latency_token_position = None
-        
+        adaptor_mask = adaptor_dict["inputs_mask"]
 
-        input_embeds = adaptor_embeds
-        input_embeds = input_embeds.to(
-            dtype=self.language_model.model.dtype
-        )
+        input_embeds = adaptor_embeds.to(dtype=self.language_model.model.dtype)
         attention_mask = adaptor_mask
+        self._last_inputs_embeds = input_embeds
 
-        decided_latency = latency_value
-        probe_metrics = {}
-        if ruled_based:
-            probe_metrics = self.metrics_computer.run_rule_based_probe(
-                adaptor_dict=adaptor_dict,
-                driving_input=driving_input,
-                inputs_embeds=input_embeds,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                cache_position=None,
-                latency_value=latency_value,
-                route_keys=route_keys,
-            )
-        # check probe_metrics and self.probe_history_state
-        outputs = self.language_model.model(
+        self.budget_assigner.prepare_llm_runtime(adaptor_dict)
+        features, logits = self.language_model(
+            embeddings=input_embeds,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            inputs_embeds=input_embeds,
-            output_hidden_states=True,
             return_dict=True,
-            # AdaLLaVA
-            latency = decided_latency,
-            scheduler = self.scheduler.forward,
-            latency_token_position = latency_token_position,
+            assigner=self.budget_assigner,
         )
-        if ruled_based:
-            probe_metrics["used_latency"] = decided_latency
-            self.scene_difficulty_metrics = self.metrics_computer.to_python_metrics(probe_metrics)
-        else:
-            self.scene_difficulty_metrics = {}
-        features = outputs.hidden_states[-1]
-        logits = outputs[0]
 
-        vision_features, adaptor_features = features.split(
+        _, adaptor_features = features.split(
             [features.size(1) - adaptor_embeds.size(1), adaptor_embeds.size(1)], dim=1
         )
-        vision_logits, adaptor_logits = logits.split(
+        _, adaptor_logits = logits.split(
             [logits.size(1) - adaptor_embeds.size(1), adaptor_embeds.size(1)], dim=1
         )
         return adaptor_features, adaptor_logits
@@ -389,82 +250,70 @@ class DrivingModel(pl.LightningModule):
             return parts[0]
         return os.path.dirname(measurement_path)
 
-    def _extract_route_keys(self, example: DrivingExample) -> Optional[List[str]]:
+    def _extract_route_keys(self, example: DrivingExample) -> List[str]:
+        """Extract route ids from run_id; route info is required for budget state."""
         if not hasattr(example, "run_id") or example.run_id is None:
-            return None
-        try:
-            measurement_paths = decode_uint8(example.run_id)
-            return [self._measurement_to_route_key(path) for path in measurement_paths]
-        except Exception:
-            return None
+            raise ValueError("example.run_id is required for budget assignment")
+        measurement_paths = decode_uint8(example.run_id)
+        return [self._measurement_to_route_key(path) for path in measurement_paths]
+
+    def _resolve_route_keys_or_raise(
+        self,
+        example: DrivingExample,
+        route_keys: Optional[List[str]],
+        batch_size: int,
+    ) -> List[str]:
+        """Resolve route ids for current batch and validate against batch size."""
+        if route_keys is None:
+            route_keys = self._extract_route_keys(example)
+        return BudgetAssigner._resolve_route_keys(route_keys, batch_size)
 
     def forward_loss(
         self,
         example: DrivingExample,
         per_sample=False,
-        latency=None,
-        ruled_based: bool = False,
         route_keys: Optional[List[str]] = None,
         return_scene_metrics: bool = False,
     ) -> TrainingOutput:
-        """
-        Forward pass of the model for a driving input, followed by
-        computing the next token cross-entropy loss.
+        route_keys = self._resolve_route_keys_or_raise(
+            example=example,
+            route_keys=route_keys,
+            batch_size=example.driving_input.camera_images.size(0),
+        )
 
-        Args:
-            driving_input: input to the vision encoder.
-            text_ids: Text ids tensor of shape [B, T]. These are input to the model and used in the loss.
-            text_mask: Text mask tensor of shape [B, T].
-        """
-        # === [新增] 训练时的随机采样逻辑 ===
-        # 如果是Adallava训练模式，且外部没指定 latency，我们就在这里随机生成 TODO 后面包装成可以参数指定latency生成模式的
-        # if self.adaption_train and latency is None:
-
-        if self.adaption_train:
-            if self.computation_budget == 'random':
-                import random
-                # 策略：50% 概率全速 (1.0), 50% 概率随机减速 (0.25~1.0)
-                if random.random() < 0.5:
-                     latency = 1.0
-                else:
-                     latency = random.uniform(0.25, 1.0)
-            if self.computation_budget == 'fixed':
-                latency = 1.0 # test
-        if ruled_based and route_keys is None:
-            route_keys = self._extract_route_keys(example)
-        adaptor_dict = self.adaptors(example, latency=latency, scheduler=self.scheduler)
-        adaptor_embeds = adaptor_dict["inputs"]
-        adaptor_mask = adaptor_dict['inputs_mask']
+        self.budget_assigner.bind_runtime_reference(example.driving_input.camera_images)
+        self.budget_assigner.budget_decide_before_llm(
+            batch_size=example.driving_input.camera_images.size(0),
+            route_keys=route_keys,
+        )
+        adaptor_dict = self.adaptors(example, budget_assigner=self.budget_assigner)
 
         adaptor_features, adaptor_logits = self.forward_model(
             example.driving_input,
             adaptor_dict,
-            driving_labels=example.driving_label,
-            ruled_based=ruled_based,
-            route_keys=route_keys,
         )
 
-        if ruled_based:
-            outputs_by_adaptor = self.adaptors.split_outputs_by_adaptor(adaptor_dict, adaptor_features)
-            predictions = self.adaptors.driving.get_predictions(outputs_by_adaptor['driving'])
-            speed_wps_pred = predictions.get("speed_wps")
-            route_pred = predictions.get("route")
-            decision_shift_metrics = self.metrics_computer.compute_decision_shift_metrics(
-                driving_input=example.driving_input,
-                current_speed_wps=speed_wps_pred,
-                current_route=route_pred,
-                route_keys=route_keys,
-            )
-            self.scene_difficulty_metrics["decision_shift"] = self.metrics_computer.to_python_metrics(decision_shift_metrics)
-        else:
-            self.scene_difficulty_metrics = {}
+        outputs_by_adaptor = self.adaptors.split_outputs_by_adaptor(adaptor_dict, adaptor_features)
+        predictions = self.adaptors.driving.get_predictions(outputs_by_adaptor["driving"])
+        speed_wps_pred = predictions.get("speed_wps")
+        route_pred = predictions.get("route")
+        budget_metrics = self.budget_assigner.budget_info_update_after_llm(
+            route_keys=route_keys,
+            driving_input=example.driving_input,
+            current_speed_wps=speed_wps_pred,
+            current_route=route_pred,
+            adaptor_dict=adaptor_dict,
+            inputs_embeds=self._last_inputs_embeds,
+            tokenizer=self.tokenizer,
+        )
+        self.scene_difficulty_metrics = budget_metrics
+        self.eval_budget = self.budget_assigner.get_eval_budget()
 
         loss_dict = self.adaptors.compute_loss(adaptor_features, adaptor_logits, adaptor_dict, example)
+        loss_dict_only_losses = {k: v for k, v in loss_dict.items() if k.endswith("loss")}
+        loss_logs = {k: v for k, v in loss_dict.items() if k.endswith("log")}
+        pred_labels = {k: v for k, v in loss_dict.items() if not k.endswith("loss") and not k.endswith("log")}
 
-        loss_dict_only_losses = {k:v for k, v in loss_dict.items() if k.endswith("loss")}
-        loss_logs = {k:v for k, v in loss_dict.items() if k.endswith("log")}
-        
-        pred_labels = {k:v for k, v in loss_dict.items() if not k.endswith("loss") and not k.endswith("log")}
         if per_sample:
             if return_scene_metrics:
                 return loss_dict_only_losses, pred_labels, self.scene_difficulty_metrics
@@ -474,7 +323,6 @@ class DrivingModel(pl.LightningModule):
         if return_scene_metrics:
             return output, loss_logs, self.scene_difficulty_metrics
         return output, loss_logs
-
     def training_step(self, batch: DrivingExample, _batch_idx: int = 0):
         output, loss_logs = self.forward_loss(batch)
         logs = output #.update(loss_logs)

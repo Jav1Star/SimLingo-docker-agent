@@ -95,10 +95,10 @@ class RouteRecord():
             'duration_game': 0,
             'duration_system': 0,
         }
-        self.latency = {
-            'average_latency': None,
-            'initial_base_latency': None,
-            'final_base_latency': None,
+        self.budget = {
+            'average_budget': None,
+            'initial_base_budget': None,
+            'final_base_budget': None,
         }
 
     def to_json(self):
@@ -220,11 +220,11 @@ class StatisticsManager(object):
         except (TypeError, ValueError):
             return None
 
-    def _collect_route_latency_summary(self, route_record):
+    def _collect_route_budget_summary(self, route_record):
         summary = {
-            'average_latency': None,
-            'initial_base_latency': None,
-            'final_base_latency': None,
+            'average_budget': None,
+            'initial_base_budget': None,
+            'final_base_budget': None,
         }
         save_root = os.environ.get("SAVE_PATH")
         if not save_root or not route_record.save_name:
@@ -243,30 +243,30 @@ class StatisticsManager(object):
             return summary
 
         frame_items = sorted(metric_info.items(), key=lambda x: int(x[0]))
-        used_latencies = []
-        base_latencies = []
+        used_budgets = []
+        base_budgets = []
         for _, frame_data in frame_items:
             if not isinstance(frame_data, dict):
                 continue
-            eval_latency = frame_data.get("eval_latency", {})
-            if not isinstance(eval_latency, dict):
+            eval_budget = frame_data.get("eval_budget", {})
+            if not isinstance(eval_budget, dict):
                 continue
 
-            used_latency = self._as_float_or_none(eval_latency.get("used_latency"))
-            if used_latency is None:
-                used_latency = self._as_float_or_none(eval_latency.get("value"))
-            if used_latency is not None:
-                used_latencies.append(used_latency)
+            used_budget = self._as_float_or_none(eval_budget.get("used_budget"))
+            if used_budget is None:
+                used_budget = self._as_float_or_none(eval_budget.get("value"))
+            if used_budget is not None:
+                used_budgets.append(used_budget)
 
-            base_latency = self._as_float_or_none(eval_latency.get("base_latency"))
-            if base_latency is not None:
-                base_latencies.append(base_latency)
+            base_budget = self._as_float_or_none(eval_budget.get("base_budget"))
+            if base_budget is not None:
+                base_budgets.append(base_budget)
 
-        if used_latencies:
-            summary['average_latency'] = round(sum(used_latencies) / len(used_latencies), ROUND_DIGITS_SCORE)
-        if base_latencies:
-            summary['initial_base_latency'] = round(base_latencies[0], ROUND_DIGITS_SCORE)
-            summary['final_base_latency'] = round(base_latencies[-1], ROUND_DIGITS_SCORE)
+        if used_budgets:
+            summary['average_budget'] = round(sum(used_budgets) / len(used_budgets), ROUND_DIGITS_SCORE)
+        if base_budgets:
+            summary['initial_base_budget'] = round(base_budgets[0], ROUND_DIGITS_SCORE)
+            summary['final_base_budget'] = round(base_budgets[-1], ROUND_DIGITS_SCORE)
         return summary
 
     def add_file_records(self, endpoint):
@@ -439,7 +439,7 @@ class StatisticsManager(object):
         route_record.meta['route_length'] = self._route_length
         route_record.meta['duration_game'] = round(duration_time_game, ROUND_DIGITS)
         route_record.meta['duration_system'] = round(duration_time_system, ROUND_DIGITS)
-        route_record.latency = self._collect_route_latency_summary(route_record)
+        route_record.budget = self._collect_route_budget_summary(route_record)
 
         # Update the route infractions
         if self._scenario:

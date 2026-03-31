@@ -6,10 +6,10 @@ import os
 
 
 ROUND_DIGITS = 6
-DEFAULT_LATENCY_KEYS = (
-    "average_latency",
-    "initial_base_latency",
-    "final_base_latency",
+DEFAULT_BUDGET_KEYS = (
+    "average_budget",
+    "initial_base_budget",
+    "final_base_budget",
 )
 
 
@@ -59,13 +59,13 @@ def is_success_record(record):
     return True
 
 
-def extract_latency_values(record, latency_keys=None):
-    latency_data = record.get("latency")
-    if not isinstance(latency_data, dict):
+def extract_budget_values(record, budget_keys=None):
+    budget_data = record.get("budget")
+    if not isinstance(budget_data, dict):
         return {}
 
-    keys = list(latency_keys) if latency_keys is not None else list(latency_data.keys())
-    return {key: to_float_or_none(latency_data.get(key)) for key in keys}
+    keys = list(budget_keys) if budget_keys is not None else list(budget_data.keys())
+    return {key: to_float_or_none(budget_data.get(key)) for key in keys}
 
 
 def _linear_quantile(sorted_values, quantile):
@@ -106,34 +106,34 @@ def summarize_numeric(values):
     }
 
 
-def _infer_latency_keys(records):
+def _infer_budget_keys(records):
     discovered = set()
     for record in records:
-        latency_data = record.get("latency")
-        if isinstance(latency_data, dict):
-            discovered.update(latency_data.keys())
+        budget_data = record.get("budget")
+        if isinstance(budget_data, dict):
+            discovered.update(budget_data.keys())
 
-    keys = [key for key in DEFAULT_LATENCY_KEYS if key in discovered]
-    keys.extend(sorted(key for key in discovered if key not in DEFAULT_LATENCY_KEYS))
+    keys = [key for key in DEFAULT_BUDGET_KEYS if key in discovered]
+    keys.extend(sorted(key for key in discovered if key not in DEFAULT_BUDGET_KEYS))
     return keys
 
 
-def collect_latency_metrics(records, latency_keys=None, require_success=False):
-    records_for_latency = records
+def collect_budget_metrics(records, budget_keys=None, require_success=False):
+    records_for_budget = records
     if require_success:
-        records_for_latency = [record for record in records if is_success_record(record)]
+        records_for_budget = [record for record in records if is_success_record(record)]
 
-    record_count = len(records_for_latency)
-    keys = list(latency_keys) if latency_keys is not None else _infer_latency_keys(records_for_latency)
+    record_count = len(records_for_budget)
+    keys = list(budget_keys) if budget_keys is not None else _infer_budget_keys(records_for_budget)
 
     values_by_key = {key: [] for key in keys}
-    latency_record_count = 0
+    budget_record_count = 0
 
-    for record in records_for_latency:
-        latency_data = record.get("latency")
-        if isinstance(latency_data, dict):
-            latency_record_count += 1
-        parsed_values = extract_latency_values(record, keys)
+    for record in records_for_budget:
+        budget_data = record.get("budget")
+        if isinstance(budget_data, dict):
+            budget_record_count += 1
+        parsed_values = extract_budget_values(record, keys)
         for key in keys:
             value = parsed_values.get(key)
             if value is not None:
@@ -152,7 +152,7 @@ def collect_latency_metrics(records, latency_keys=None, require_success=False):
 
     return {
         "record_count": record_count,
-        "latency_record_count": latency_record_count,
+        "budget_record_count": budget_record_count,
         "fields": fields,
     }
 
@@ -173,7 +173,7 @@ def _collect_driving_metrics(records):
     return driving_score_mean, success_rate, eval_num
 
 
-def merge_route_json(folder_path, include_latency=True, latency_keys=None):
+def merge_route_json(folder_path, include_budget=True, budget_keys=None):
     merged_records = load_route_records(folder_path)
     if len(merged_records) != 220:
         print(
@@ -193,10 +193,10 @@ def merge_route_json(folder_path, include_latency=True, latency_keys=None):
         "success rate": success_rate,
         "eval num": eval_num,
     }
-    if include_latency:
-        merged_data["latency_metrics"] = collect_latency_metrics(
+    if include_budget:
+        merged_data["budget_metrics"] = collect_budget_metrics(
             merged_records,
-            latency_keys=latency_keys,
+            budget_keys=budget_keys,
             require_success=False,
         )
 
@@ -214,21 +214,21 @@ if __name__ == '__main__':
         default='eval_results/Bench2Drive/reproCVPTsimlingo_2025_05_02_04_08_01_simlingo_withaugmentation_seed2/bench2drive/1/res',
     )
     parser.add_argument(
-        '--no-latency',
+        '--no-budget',
         action='store_true',
-        help='Disable latency metric aggregation in merged.json.',
+        help='Disable budget metric aggregation in merged.json.',
     )
     parser.add_argument(
-        '--latency-keys',
+        '--budget-keys',
         nargs='+',
         default=None,
-        help='Optional explicit latency keys to aggregate.',
+        help='Optional explicit budget keys to aggregate.',
     )
     args = parser.parse_args()
 
     if os.path.isdir(args.folder):
         merge_route_json(
             args.folder,
-            include_latency=not args.no_latency,
-            latency_keys=args.latency_keys,
+            include_budget=not args.no_budget,
+            budget_keys=args.budget_keys,
         )

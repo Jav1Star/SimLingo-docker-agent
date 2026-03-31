@@ -105,11 +105,7 @@ class InternVLChatModel(PreTrainedModel):
             output_attentions: Optional[bool] = None,
             output_hidden_states: Optional[bool] = None,
             return_dict: Optional[bool] = None,
-            # === [AdaLLaVA 修改] 新增参数 ===
-            latency: Optional[torch.FloatTensor] = None,
-            latency_token_position: Optional[torch.LongTensor] = None,
-            scheduler: Optional[object] = None,
-            # ===============================
+            assigner: Optional[object] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -148,11 +144,7 @@ class InternVLChatModel(PreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            # === [AdaLLaVA 修改] 透传参数给 Qwen2 ===
-            latency=latency,
-            latency_token_position=latency_token_position,
-            scheduler=scheduler,
-            # ======================================
+            assigner=assigner,
         )
         logits = outputs.logits
 
@@ -331,11 +323,7 @@ class InternVLChatModel(PreTrainedModel):
             visual_features: Optional[torch.FloatTensor] = None,
             generation_config: Optional[GenerationConfig] = None,
             output_hidden_states: Optional[bool] = None,
-            # === [AdaLLaVA 修改] 新增参数 ===
-            latency: Optional[torch.FloatTensor] = None,
-            latency_token_position: Optional[torch.LongTensor] = None,
-            scheduler: Optional[object] = None,
-            # ===============================
+            assigner: Optional[object] = None,
             **generate_kwargs,
     ) -> torch.LongTensor:
 
@@ -364,12 +352,7 @@ class InternVLChatModel(PreTrainedModel):
             generation_config=generation_config,
             output_hidden_states=output_hidden_states,
             use_cache=True,
-            # === [AdaLLaVA 修改] 透传参数 ===
-            latency=latency,
-            latency_token_position=latency_token_position,
-            scheduler=scheduler,
-            # ==============================
-            **generate_kwargs,
+            assigner=assigner,
             **generate_kwargs,
         )
 

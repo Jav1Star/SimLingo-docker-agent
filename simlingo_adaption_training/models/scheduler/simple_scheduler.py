@@ -34,14 +34,14 @@ class SimpleScheduler_L(nn.Module):
     def set_tau(self, tau):
         self.tau = tau
 
-    def latency_encoding(self, latency):
-        quantized_latency = latency_quantizing(latency, self.num_prefix_layers, self.num_hidden_layers)[1]
+    def budget_encoding(self, budget):
+        quantized_budget = budget_quantizing(budget, self.num_prefix_layers, self.num_hidden_layers)[1]
 
-        # Scale the batch latency to a range of [0, 2π]
-        scaled_values = quantized_latency * 2 * torch.pi  # Shape: [batch_size]
+        # Scale the batch budget to a range of [0, 2π]
+        scaled_values = quantized_budget * 2 * torch.pi  # Shape: [batch_size]
 
         # Generate frequency indices to create a diverse range of sine and cosine values
-        frequencies = 1 / (10000 ** (torch.arange(128).to(quantized_latency.device) / 128))  # 128 frequencies for each sin and cos
+        frequencies = 1 / (10000 ** (torch.arange(128).to(quantized_budget.device) / 128))  # 128 frequencies for each sin and cos
 
         # Expand dimensions to compute sine and cosine for each value in the batch with each frequency
         # `scaled_values[:, None]` adds a dimension to match (batch_size, 1) with (128), resulting in (batch_size, 128)
@@ -49,23 +49,23 @@ class SimpleScheduler_L(nn.Module):
         cos_values = torch.cos(scaled_values[:, None] * frequencies)  # Shape: [batch_size, 128]
 
         # Concatenate sin and cos values along the last dimension to get a tensor of size [batch_size, 256]
-        latency_emb = torch.cat((sin_values, cos_values), dim=1).to(quantized_latency.dtype)  # Shape: [batch_size, 256]
+        budget_emb = torch.cat((sin_values, cos_values), dim=1).to(quantized_budget.dtype)  # Shape: [batch_size, 256]
         
-        latency_emb = self.scheduler_up_proj(latency_emb)
-        return latency_emb
+        budget_emb = self.scheduler_up_proj(budget_emb)
+        return budget_emb
 
-    def forward(self, x, latency):
+    def forward(self, x, budget):
         '''
-         x: latency token [bs, hidden_size]
-         latency: just latency
+         x: budget token [bs, hidden_size]
+         budget: normalized budget
         
          return: execution plan, size [batch_size, num_hidden_layers, 2, num_attention_heads]
         '''
-        latency = latency_quantizing(latency, self.num_prefix_layers, self.num_hidden_layers)[0]
+        budget = budget_quantizing(budget, self.num_prefix_layers, self.num_hidden_layers)[0]
         logits = self.mlp_head(x)
         output_samples = []
-        for logits_, latency_ in zip (logits, latency):
-            sample = n_times_gumbel_softmax(logits_, latency_.item(), self.tau, self.is_hard, training=self.training)
+        for logits_, budget_ in zip (logits, budget):
+            sample = n_times_gumbel_softmax(logits_, budget_.item(), self.tau, self.is_hard, training=self.training)
             output_samples.append(sample)
         
         output_samples = torch.stack(output_samples)
@@ -83,9 +83,9 @@ class SimpleScheduler_L(nn.Module):
         prefix_execution_plan = torch.ones(new_shape, device=output_samples.device, dtype=output_samples.dtype)
         return prefix_execution_plan
 
-    def get_random_latency(self, batch_size):
-        latency = torch.randint(self.num_prefix_layers, self.num_hidden_layers + 1, (batch_size,)) / self.num_hidden_layers
-        return latency
+    def get_random_budget(self, batch_size):
+        budget = torch.randint(self.num_prefix_layers, self.num_hidden_layers + 1, (batch_size,)) / self.num_hidden_layers
+        return budget
 
     def init_weights(self):
             """
@@ -127,16 +127,18 @@ class SimpleScheduler_H(nn.Module):
     def set_tau(self, tau):
         self.tau = tau
 
-    def latency_encoding(self, latency):
-        quantized_latency = latency_quantizing(latency, 
-                                               self.num_prefix_layers * self.num_attention_heads // self.rank, 
-                                               self.num_hidden_layers * self.num_attention_heads // self.rank)[1]
+    def budget_encoding(self, budget):
+        quantized_budget = budget_quantizing(
+            budget,
+            self.num_prefix_layers * self.num_attention_heads // self.rank,
+            self.num_hidden_layers * self.num_attention_heads // self.rank,
+        )[1]
 
-        # Scale the batch latency to a range of [0, 2π]
-        scaled_values = quantized_latency * 2 * torch.pi  # Shape: [batch_size]
+        # Scale the batch budget to a range of [0, 2π]
+        scaled_values = quantized_budget * 2 * torch.pi  # Shape: [batch_size]
 
         # Generate frequency indices to create a diverse range of sine and cosine values
-        frequencies = 1 / (10000 ** (torch.arange(128).to(quantized_latency.device) / 128))  # 128 frequencies for each sin and cos
+        frequencies = 1 / (10000 ** (torch.arange(128).to(quantized_budget.device) / 128))  # 128 frequencies for each sin and cos
 
         # Expand dimensions to compute sine and cosine for each value in the batch with each frequency
         # `scaled_values[:, None]` adds a dimension to match (batch_size, 1) with (128), resulting in (batch_size, 128)
@@ -144,20 +146,22 @@ class SimpleScheduler_H(nn.Module):
         cos_values = torch.cos(scaled_values[:, None] * frequencies)  # Shape: [batch_size, 128]
 
         # Concatenate sin and cos values along the last dimension to get a tensor of size [batch_size, 256]
-        latency_emb = torch.cat((sin_values, cos_values), dim=1).to(quantized_latency.dtype)  # Shape: [batch_size, 256]
+        budget_emb = torch.cat((sin_values, cos_values), dim=1).to(quantized_budget.dtype)  # Shape: [batch_size, 256]
         
-        latency_emb = self.scheduler_up_proj(latency_emb)
-        return latency_emb
+        budget_emb = self.scheduler_up_proj(budget_emb)
+        return budget_emb
     
-    def forward(self, x, latency):
-        latency = latency_quantizing(latency, 
-                                     self.num_prefix_layers * self.num_attention_heads // self.rank, 
-                                     self.num_hidden_layers * self.num_attention_heads // self.rank)[0]
+    def forward(self, x, budget):
+        budget = budget_quantizing(
+            budget,
+            self.num_prefix_layers * self.num_attention_heads // self.rank,
+            self.num_hidden_layers * self.num_attention_heads // self.rank,
+        )[0]
         logits = self.mlp_head(x)
         output_samples = []
-        for logits_, latency_ in zip (logits, latency):
+        for logits_, budget_ in zip (logits, budget):
             logits_ = logits_.view(self.num_sub_layer, self.num_attention_heads * 2)
-            sample = n_times_gumbel_softmax_head_version(logits_, latency_.item(), self.tau, self.is_hard, r=self.rank, training=self.training)
+            sample = n_times_gumbel_softmax_head_version(logits_, budget_.item(), self.tau, self.is_hard, r=self.rank, training=self.training)
             output_samples.append(sample)
         
         output_samples = torch.stack(output_samples)
@@ -175,7 +179,10 @@ class SimpleScheduler_H(nn.Module):
         prefix_execution_plan = torch.ones(new_shape, device=output_samples.device, dtype=output_samples.dtype)
         return prefix_execution_plan
 
-    def get_random_latency(self, batch_size):
-        latency = torch.randint(self.num_prefix_layers * self.num_attention_heads // self.rank, 
-                                self.num_hidden_layers * self.num_attention_heads // self.rank + 1, (batch_size,)) / (self.num_hidden_layers * self.num_attention_heads // self.rank)
-        return latency
+    def get_random_budget(self, batch_size):
+        budget = torch.randint(
+            self.num_prefix_layers * self.num_attention_heads // self.rank,
+            self.num_hidden_layers * self.num_attention_heads // self.rank + 1,
+            (batch_size,),
+        ) / (self.num_hidden_layers * self.num_attention_heads // self.rank)
+        return budget

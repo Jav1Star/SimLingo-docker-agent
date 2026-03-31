@@ -3,8 +3,6 @@ from transformers import GPTNeoXForCausalLM
 from transformers import LlavaNextProcessor, LlavaNextForConditionalGeneration
 from transformers import AutoModel, AutoTokenizer
 from transformers import Qwen2Tokenizer
-# [新增] 引入 Scheduler 
-from ..scheduler.simple_scheduler import SimpleScheduler_L
 from .internvl_2_1b.modeling_internvl_chat import InternVLChatModel
 
 from typing import Any, Dict, Optional, Tuple
@@ -148,10 +146,7 @@ class LLM(nn.Module):
         attention_mask: Tensor = None,
         return_dict: bool = True,
         position_ids: Optional[Tensor] = None,
-        # === [新增] AdaLLaVA 专用参数 ===
-        latency: Optional[float] = None,
-        latency_token_position: Optional[Tensor] = None,
-        scheduler: Optional[object] = None,
+        assigner: Optional[object] = None,
         **kwargs
     ) -> Tensor:
 
@@ -165,18 +160,10 @@ class LLM(nn.Module):
             "return_dict": return_dict
         }
 
-        # 2. [AdaLLaVA 逻辑] 注入 Scheduler 和 Latency
-        if scheduler is not None:
-            model_inputs["scheduler"] = scheduler
-        
-        if latency is not None:
-            # 确保 latency 是 Tensor 且在正确的设备上
-            if isinstance(latency, (float, int)):
-                latency = torch.tensor(latency, device=embeddings.device, dtype=embeddings.dtype)
-            model_inputs["latency"] = latency
-
-        if latency_token_position is not None:
-            model_inputs["latency_token_position"] = latency_token_position
+        if assigner is not None:
+            if hasattr(assigner, "on_llm_forward_start"):
+                assigner.on_llm_forward_start()
+            model_inputs["assigner"] = assigner
 
         # 3. 调用模型 (self.model 应该是 Qwen2ForCausalLM 或其变体)
         # 不需要传 pixel_values，因为它只处理 embeddings
@@ -248,11 +235,7 @@ class LLM(nn.Module):
         restrict_tokens: Optional[Tuple[int, int]] = None,
         attention_mask = None,
         position_ids = None,
-        # === [修复 1: 在这里添加参数接收] ===
-        latency: Optional[float] = None,
-        latency_token_position: Optional[Tensor] = None,
-        scheduler: Optional[object] = None,
-        # ==================================
+        assigner: Optional[object] = None,
     ) -> Tuple[Tensor, int]:
         
         if input_embed_matrix is None:
@@ -296,10 +279,7 @@ class LLM(nn.Module):
                 embeddings=input_embeds, 
                 attention_mask=attention_mask,
                 position_ids=position_ids,
-                # 新增参数
-                latency=latency,
-                latency_token_position=latency_token_position,
-                scheduler=scheduler
+                assigner=assigner,
             )
             # ============================================
 

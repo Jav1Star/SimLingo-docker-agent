@@ -66,219 +66,6 @@ _CHECKPOINT_FOR_DOC = "Qwen/Qwen2-7B"
 _CONFIG_FOR_DOC = "Qwen2Config"
 
 
-def _to_latency_tensor(
-    latency: Optional[torch.FloatTensor], batch_size: int, device: torch.device, dtype: torch.dtype
-) -> torch.Tensor:
-    # Scheduler expects per-sample latency iterable with shape [B].
-    # Normalize scalar / python float / tensor inputs to that format.
-    if latency is None:
-        return torch.full((batch_size,), 0.5, device=device, dtype=dtype)
-    if not isinstance(latency, torch.Tensor):
-        return torch.full((batch_size,), float(latency), device=device, dtype=dtype)
-    if latency.ndim == 0:
-        return latency.to(device=device, dtype=dtype).expand(batch_size)
-    return latency.to(device=device, dtype=dtype)
-
-
-def _token_attention_spatial_entropy_from_prefix(
-    prefix_attentions: List[torch.Tensor],
-    token_positions: Optional[torch.LongTensor],
-    visual_positions: Optional[torch.LongTensor],
-    visual_coords: Optional[torch.FloatTensor],
-    spatial_lambda: float = 1e-3,
-    eps: float = 1e-8,
-) -> Optional[torch.Tensor]:
-    if not prefix_attentions or token_positions is None or visual_positions is None or visual_coords is None:
-        return None
-
-    attn = torch.stack(prefix_attentions, dim=0).float()  # [L, B, H, Q, K]
-    _, batch_size, _, q_len, k_len = attn.shape
-    device = attn.device
-    spatial_entropy = torch.full((batch_size,), float("nan"), device=device, dtype=attn.dtype)
-
-    for b_idx in range(batch_size):
-        token_idx = token_positions[b_idx]
-        vis_idx = visual_positions[b_idx]
-        vis_coords = visual_coords[b_idx]
-        token_idx = token_idx[(token_idx >= 0) & (token_idx < q_len)]
-        valid_vis_mask = (vis_idx >= 0) & (vis_idx < k_len)
-        vis_idx = vis_idx[valid_vis_mask]
-        vis_coords = vis_coords[valid_vis_mask]
-        if token_idx.numel() == 0 or vis_idx.numel() == 0:
-            continue
-
-        token_idx = torch.unique(token_idx, sorted=True)
-
-        # [L, H, Nw, Nv] -> [Nv]
-        selected = attn[:, b_idx][:, :, token_idx][:, :, :, vis_idx]
-        v_attn = selected.mean(dim=(0, 1, 2))
-
-        vis_coords = vis_coords.to(device=device, dtype=attn.dtype)
-        # mu = sum_j V_attn,j * C_j
-        coord_center = (v_attn[:, None] * vis_coords).sum(dim=0)
-        distance = torch.sqrt(((vis_coords - coord_center) ** 2).sum(dim=-1))
-
-        # H_spatial = -sum_j V_attn,j * log(V_attn,j / (d_j + lambda))
-        ratio = v_attn / (distance + spatial_lambda + eps)
-        h_spatial = -(v_attn * torch.log(ratio + eps)).sum()
-
-        # MinMax normalization with per-sample theoretical bounds from d range.
-        d_min = distance.min()
-        d_max = distance.max()
-        h_min = -(v_attn * torch.log(v_attn / (d_min + spatial_lambda + eps) + eps)).sum()
-        h_max = -(v_attn * torch.log(v_attn / (d_max + spatial_lambda + eps) + eps)).sum()
-        h_norm = ((h_spatial - h_min) / (h_max - h_min + eps)).clamp(0.0, 1.0)
-        spatial_entropy[b_idx] = h_norm
-
-    return spatial_entropy
-
-
-def compute_rule_based_latency(
-    prefix_attentions: List[torch.Tensor],
-    inputs_embeds: Optional[torch.FloatTensor],
-    visual_token_positions: Optional[torch.LongTensor],
-    visual_token_coords: Optional[torch.FloatTensor],
-    waypoint_path_token_positions: Optional[torch.LongTensor],
-    waypoint_speed_token_positions: Optional[torch.LongTensor],
-    fallback_latency: torch.Tensor,
-    latency_token_positions: Optional[torch.LongTensor] = None,
-    entropy_token_source: str = "waypoints",
-    history_state: Optional[Dict[str, torch.Tensor]] = None,
-    history_alpha: float = 0.2,
-    spatial_lambda: float = 1e-3,
-    eps: float = 1e-8,
-) -> Dict[str, torch.Tensor]:
-    token_source = str(entropy_token_source).strip().lower()
-    if token_source not in {"waypoints", "latency"}:
-        token_source = "waypoints"
-
-    path_spatial_entropy = torch.full_like(fallback_latency, float("nan"))
-    speed_spatial_entropy = torch.full_like(fallback_latency, float("nan"))
-    latency_spatial_entropy = torch.full_like(fallback_latency, float("nan"))
-
-    if token_source == "latency":
-        latency_spatial_entropy_raw = _token_attention_spatial_entropy_from_prefix(
-            prefix_attentions=prefix_attentions,
-            token_positions=latency_token_positions,
-            visual_positions=visual_token_positions,
-            visual_coords=visual_token_coords,
-            spatial_lambda=spatial_lambda,
-            eps=eps,
-        )
-        if latency_spatial_entropy_raw is not None:
-            latency_spatial_entropy = latency_spatial_entropy_raw
-        # In latency mode, missing latency-token entropy should remain NaN.
-        mean_spatial_entropy = torch.where(
-            torch.isfinite(latency_spatial_entropy),
-            latency_spatial_entropy.clamp(0.0, 1.0),
-            torch.full_like(latency_spatial_entropy, float("nan")),
-        )
-    else:
-        path_spatial_entropy_raw = _token_attention_spatial_entropy_from_prefix(
-            prefix_attentions=prefix_attentions,
-            token_positions=waypoint_path_token_positions,
-            visual_positions=visual_token_positions,
-            visual_coords=visual_token_coords,
-            spatial_lambda=spatial_lambda,
-            eps=eps,
-        )
-        speed_spatial_entropy_raw = _token_attention_spatial_entropy_from_prefix(
-            prefix_attentions=prefix_attentions,
-            token_positions=waypoint_speed_token_positions,
-            visual_positions=visual_token_positions,
-            visual_coords=visual_token_coords,
-            spatial_lambda=spatial_lambda,
-            eps=eps,
-        )
-        if path_spatial_entropy_raw is not None:
-            path_spatial_entropy = path_spatial_entropy_raw
-        if speed_spatial_entropy_raw is not None:
-            speed_spatial_entropy = speed_spatial_entropy_raw
-
-        entropy_stack = torch.stack([path_spatial_entropy, speed_spatial_entropy], dim=0)
-        valid = torch.isfinite(entropy_stack)
-        valid_count = valid.sum(dim=0)
-        entropy_sum = torch.where(valid, entropy_stack, torch.zeros_like(entropy_stack)).sum(dim=0)
-        mean_spatial_entropy = torch.where(
-            valid_count > 0,
-            entropy_sum / valid_count.clamp_min(1),
-            fallback_latency.float(),
-        )
-        mean_spatial_entropy = mean_spatial_entropy.clamp(0.0, 1.0)
-
-    # history similarity (per-sample, no batch-mean mixing)
-    sim_in = fallback_latency.float().clone()
-    if inputs_embeds is not None and visual_token_positions is not None:
-        batch_size = inputs_embeds.size(0)
-        hidden_size = inputs_embeds.size(-1)
-        device = inputs_embeds.device
-        dtype = inputs_embeds.dtype
-
-        v_global = torch.zeros((batch_size, hidden_size), device=device, dtype=dtype)
-        v_global_valid = torch.zeros(batch_size, device=device, dtype=torch.bool)
-        for b_idx in range(batch_size):
-            vis_idx = visual_token_positions[b_idx]
-            vis_idx = vis_idx[(vis_idx >= 0) & (vis_idx < inputs_embeds.size(1))]
-            if vis_idx.numel() == 0:
-                continue
-            v_global[b_idx] = inputs_embeds[b_idx, vis_idx].mean(dim=0)
-            v_global_valid[b_idx] = True
-
-        prev_hist = torch.zeros_like(v_global)
-        prev_valid = torch.zeros(batch_size, device=device, dtype=torch.bool)
-        if history_state is not None:
-            prev_hist_raw = history_state.get("v_hist")
-            prev_valid_raw = history_state.get("v_hist_valid")
-            if isinstance(prev_hist_raw, torch.Tensor):
-                if prev_hist_raw.ndim == 1 and prev_hist_raw.numel() == hidden_size:
-                    prev_hist = prev_hist_raw.to(device=device, dtype=dtype).unsqueeze(0).expand(batch_size, -1).clone()
-                    prev_valid = torch.ones(batch_size, device=device, dtype=torch.bool)
-                elif prev_hist_raw.ndim == 2 and prev_hist_raw.size(0) == batch_size and prev_hist_raw.size(1) == hidden_size:
-                    prev_hist = prev_hist_raw.to(device=device, dtype=dtype)
-                    if isinstance(prev_valid_raw, torch.Tensor) and prev_valid_raw.numel() == batch_size:
-                        prev_valid = prev_valid_raw.to(device=device, dtype=torch.bool)
-                    else:
-                        prev_valid = torch.isfinite(prev_hist).all(dim=-1)
-
-        denom = v_global.norm(p=2, dim=-1) * prev_hist.norm(p=2, dim=-1) + eps
-        cosine = (v_global * prev_hist).sum(dim=-1) / denom
-        cosine = cosine.clamp(-1.0, 1.0)
-        sim_from_hist = (0.5 * (1.0 + cosine)).clamp(0.0, 1.0)
-
-        has_hist = v_global_valid & prev_valid
-        first_seen = v_global_valid & (~prev_valid)
-        sim_in = torch.where(has_hist, sim_from_hist, sim_in)
-        sim_in = torch.where(first_seen, torch.ones_like(sim_in), sim_in)
-
-        if history_state is not None:
-            updated_hist = prev_hist.clone()
-            blend_mask = v_global_valid & prev_valid
-            init_mask = v_global_valid & (~prev_valid)
-            if blend_mask.any():
-                updated_hist[blend_mask] = (
-                    history_alpha * v_global[blend_mask] + (1.0 - history_alpha) * prev_hist[blend_mask]
-                )
-            if init_mask.any():
-                updated_hist[init_mask] = v_global[init_mask]
-            updated_valid = prev_valid | v_global_valid
-            history_state["v_hist"] = updated_hist.detach()
-            history_state["v_hist_valid"] = updated_valid.detach()
-
-    return {
-        "spatial_entropy": {
-            "token_source": token_source,
-            "path": path_spatial_entropy,
-            "speed": speed_spatial_entropy,
-            "latency": latency_spatial_entropy,
-            "mean": mean_spatial_entropy,
-        },
-        "history_similarity": {
-            "sim_in": sim_in,
-            "alpha": torch.full_like(fallback_latency, float(history_alpha)),
-        },
-    }
-
-
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Qwen2
 class Qwen2RMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
@@ -1108,97 +895,6 @@ class Qwen2Model(Qwen2PreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    def probe_forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        latency: Optional[torch.FloatTensor] = None,
-        visual_token_positions: Optional[torch.LongTensor] = None,
-        visual_token_coords: Optional[torch.FloatTensor] = None,
-        waypoint_path_token_positions: Optional[torch.LongTensor] = None,
-        waypoint_speed_token_positions: Optional[torch.LongTensor] = None,
-        latency_token_positions: Optional[torch.LongTensor] = None,
-        entropy_token_source: str = "waypoints",
-        history_state: Optional[Dict[str, torch.Tensor]] = None,
-        history_alpha: float = 0.2,
-    ) -> Dict[str, torch.Tensor]:
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
-
-        if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-            )
-        if position_ids is None:
-            position_ids = cache_position.unsqueeze(0)
-
-        causal_mask = self._update_causal_mask(
-            attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions=True
-        )
-        entropy_layer_mask = causal_mask
-        if isinstance(causal_mask, torch.Tensor) and causal_mask.dim() == 2:
-            # For flash-attn configs, non-entropy layers can consume 2D masks.
-            # Entropy layer requests attention maps and may fallback to eager attention,
-            # which requires a 4D causal mask.
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            target_length = past_seen_tokens + inputs_embeds.shape[1] + 1
-            entropy_layer_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
-                attention_mask=causal_mask,
-                sequence_length=inputs_embeds.shape[1],
-                target_length=target_length,
-                dtype=inputs_embeds.dtype,
-                device=inputs_embeds.device,
-                cache_position=cache_position,
-                batch_size=inputs_embeds.shape[0],
-                config=self.config,
-                past_key_values=past_key_values,
-            )
-        hidden_states = inputs_embeds
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
-        num_prefix_layers = self.config.num_prefix_layers
-        entropy_layer_idx = num_prefix_layers - 1
-        prefix_last_attention = None
-
-        for idx, decoder_layer in enumerate(self.layers):
-            if idx > entropy_layer_idx:
-                break
-            layer_attention_mask = entropy_layer_mask if idx == entropy_layer_idx else causal_mask
-            layer_outputs = decoder_layer(
-                hidden_states,
-                attention_mask=layer_attention_mask,
-                position_ids=position_ids,
-                past_key_value=past_key_values,
-                output_attentions=(idx == entropy_layer_idx),
-                use_cache=False,
-                cache_position=cache_position,
-                position_embeddings=position_embeddings,
-                drop_states=None,
-            )
-            hidden_states = layer_outputs[0]
-            if idx == entropy_layer_idx:
-                prefix_last_attention = layer_outputs[1]
-
-        fallback_latency = _to_latency_tensor(latency, hidden_states.size(0), hidden_states.device, hidden_states.dtype)
-        return compute_rule_based_latency(
-            prefix_attentions=[prefix_last_attention] if prefix_last_attention is not None else [],
-            inputs_embeds=inputs_embeds,
-            visual_token_positions=visual_token_positions,
-            visual_token_coords=visual_token_coords,
-            waypoint_path_token_positions=waypoint_path_token_positions,
-            waypoint_speed_token_positions=waypoint_speed_token_positions,
-            fallback_latency=fallback_latency,
-            latency_token_positions=latency_token_positions,
-            entropy_token_source=entropy_token_source,
-            history_state=history_state,
-            history_alpha=history_alpha,
-        )
-
     @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
     def forward(
         self,
@@ -1212,10 +908,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        # === [AdaLLaVA Modification] 新增参数 ===
-        latency: Optional[torch.FloatTensor] = None,
-        latency_token_position: Optional[torch.LongTensor] = None,
-        scheduler: Optional[object] = None,
+        assigner: Optional[object] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -1274,42 +967,26 @@ class Qwen2Model(Qwen2PreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        # === [AdaLLaVA Modification] 初始化变量 ===
         execution_plan = None
-        # Keep latency in scheduler-compatible shape [B].In ruled_based mode this tensor will be replaced by entropy-derived latency.
-        latency_values = _to_latency_tensor(latency, hidden_states.size(0), hidden_states.device, torch.float32)
-        # check latency values
         num_prefix_layers = self.config.num_prefix_layers
         for idx, decoder_layer in enumerate(self.layers):
-            # === [AdaLLaVA Modification] 计划生成===
-            # 仅在指定的锚点层，且存在延迟约束和调度器时执行
-            if idx == num_prefix_layers:
-                if latency is not None and scheduler is not None:
-                    if latency_token_position is None:
-                        raise ValueError("latency_token_position must be provided when latency and scheduler are used.")
-                    else:
-                        # 1. 提取 Latency Token 的特征
-                        batch_indices = torch.arange(hidden_states.size(0), device=hidden_states.device)
-                        latency_token_feat = hidden_states[batch_indices, latency_token_position] 
-
-                        # 2. 调用 Scheduler 生成计划 (假设返回形状需要转置)
-                        # execution_plan: [Layers, Batch, 2, Heads]
-                        execution_plan = scheduler(latency_token_feat.contiguous(), latency_values).transpose(0, 1)
-                        # print(f"plan ratio={execution_plan.float().mean().item():.4f}, target={latency_values.item():.4f}")
-            # === [AdaLLaVA Modification] 当前层开关决策与实现 ===
             drop_states = None
-            if execution_plan is not None and idx >= num_prefix_layers:
-                if idx < len(execution_plan):
-                    drop_states = execution_plan[idx] # drop_states shape: [batch, 2, num_heads],后面自动广播
+            if idx == num_prefix_layers and assigner is not None:
+                execution_plan = assigner.build_execution_plan_on_prefix_layer(
+                    hidden_states=hidden_states,
+                    layer_idx=idx,
+                    num_prefix_layers=num_prefix_layers,
+                )
 
+            if execution_plan is not None and idx >= num_prefix_layers and idx < int(execution_plan.size(0)):
+                drop_states = execution_plan[idx]
+
+            is_inference = not self.training and hidden_states.shape[0] == 1
+            if is_inference and drop_states is not None and torch.all(drop_states == 0):
                 # 只有推理阶段(batch_size=1且非训练)才进行硬跳过，验证阶段(batch_size>1)需保留计算流以计算验证Loss
-                is_inference = not self.training and hidden_states.shape[0] == 1
-                if is_inference:
-                    if drop_states is not None and torch.all(drop_states == 0):
-                        if output_hidden_states:
-                            all_hidden_states += (hidden_states,)
-                        continue
-            # ========================================================
+                if output_hidden_states:
+                    all_hidden_states += (hidden_states,)
+                continue
 
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -1542,42 +1219,6 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     def get_decoder(self):
         return self.model
 
-    def probe_forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        latency: Optional[torch.FloatTensor] = None,
-        visual_token_positions: Optional[torch.LongTensor] = None,
-        visual_token_coords: Optional[torch.FloatTensor] = None,
-        waypoint_path_token_positions: Optional[torch.LongTensor] = None,
-        waypoint_speed_token_positions: Optional[torch.LongTensor] = None,
-        latency_token_positions: Optional[torch.LongTensor] = None,
-        entropy_token_source: str = "waypoints",
-        history_state: Optional[Dict[str, torch.Tensor]] = None,
-        history_alpha: float = 0.2,
-    ) -> Dict[str, torch.Tensor]:
-        return self.model.probe_forward(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            cache_position=cache_position,
-            latency=latency,
-            visual_token_positions=visual_token_positions,
-            visual_token_coords=visual_token_coords,
-            waypoint_path_token_positions=waypoint_path_token_positions,
-            waypoint_speed_token_positions=waypoint_speed_token_positions,
-            latency_token_positions=latency_token_positions,
-            entropy_token_source=entropy_token_source,
-            history_state=history_state,
-            history_alpha=history_alpha,
-        )
-
     @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
     def forward(
@@ -1594,11 +1235,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
-        # === [AdaLLaVA Modification] 新增参数 ===
-        latency: Optional[torch.FloatTensor] = None,
-        latency_token_position: Optional[torch.LongTensor] = None,
-        scheduler: Optional[object] = None,
-        # ========================================
+        assigner: Optional[object] = None,
         **loss_kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
@@ -1638,10 +1275,6 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        # === [AdaLLaVA Modification] 确定调度器 ===
-        scheduler_fn = scheduler
-        # ==========================================
-
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
@@ -1654,11 +1287,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
-            # === [AdaLLaVA Modification] 透传参数 ===
-            latency=latency,
-            latency_token_position=latency_token_position,
-            scheduler=scheduler_fn, # 在QWEN2Model中起作用
-            # ========================================
+            assigner=assigner,
         )
 
         hidden_states = outputs[0]
