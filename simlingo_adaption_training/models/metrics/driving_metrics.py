@@ -22,7 +22,7 @@ class DrivingMetricsComputer:
                 return {k: _to_python(v) for k, v in value.items()}
             if isinstance(value, torch.Tensor):
                 tensor = value.detach().cpu()
-                return float(tensor.item()) if tensor.numel() == 1 else tensor.tolist()
+                return [float(tensor.item())] if tensor.ndim == 0 else tensor.tolist()
             return value
 
         return _to_python(metrics)

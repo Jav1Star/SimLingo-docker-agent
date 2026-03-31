@@ -100,9 +100,9 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.config = GlobalConfig()
         self.eval_budget_mode = os.getenv("SIMLINGO_EVAL_BUDGET_MODE", "fixed")
         self.eval_budget_mode = self.eval_budget_mode.strip().lower()
-        if self.eval_budget_mode not in {"random", "fixed", "rule_based"}:
+        if self.eval_budget_mode not in {"random", "fixed", "rule_based", "smart_assigner"}:
             raise ValueError(
-                f"SIMLINGO_EVAL_BUDGET_MODE must be random/fixed/rule_based, got {self.eval_budget_mode}"
+                f"SIMLINGO_EVAL_BUDGET_MODE must be random/fixed/rule_based/smart_assigner, got {self.eval_budget_mode}"
             )
 
         self.fixed_eval_budget = self._load_fixed_eval_budget()

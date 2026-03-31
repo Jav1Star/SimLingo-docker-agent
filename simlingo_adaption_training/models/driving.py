@@ -16,7 +16,7 @@ from hydra.utils import get_original_cwd
 
 from .adaptors.adaptors import replace_placeholder_tokens
 from simlingo_adaption_training.models.adaptors.adaptors import DrivingAdaptor, LanguageAdaptor, WaypointInputAdaptor, BudgetAdaptor,AdaptorList
-from simlingo_adaption_training.models.budget_assigner import BudgetAssigner
+from simlingo_adaption_training.models.budget_assigner import BaseBudgetAssigner, build_budget_assigner
 from simlingo_adaption_training.models.utils import summarise_losses
 from simlingo_adaption_training.utils.custom_types import (DrivingExample, DrivingInput,
                                                 DrivingOutput,
@@ -44,12 +44,14 @@ class DrivingModel(pl.LightningModule):
     def remap_legacy_state_dict_keys(state_dict):
         if not isinstance(state_dict, dict):
             return state_dict
-        if any(k.startswith("budget_assigner.scheduler.") for k in state_dict.keys()):
-            return state_dict
-        remapped = dict(state_dict)
+        remapped = {}
         for key, value in state_dict.items():
             if key.startswith("scheduler."):
-                remapped["budget_assigner.scheduler." + key[len("scheduler."):]] = value
+                new_key = "budget_assigner.scheduler." + key[len("scheduler."):]
+                if new_key not in remapped:
+                    remapped[new_key] = value
+            else:
+                remapped[key] = value
         return remapped
 
     def __init__(
@@ -73,7 +75,8 @@ class DrivingModel(pl.LightningModule):
         fixed_budget = getattr(self, "fixed_budget", 1.0)
         budget_rule_based_cfg = getattr(self, "budget_rule_based_cfg", None)
         decision_shift_t_lap = getattr(self, "decision_shift_t_lap", 0.2)
-        self.budget_assigner = BudgetAssigner(
+        # Build assigner instance by mode (heuristic or smart skeleton).
+        self.budget_assigner = build_budget_assigner(
             mode=budget_mode,
             fixed_budget=fixed_budget,
             rule_based_cfg=budget_rule_based_cfg,
@@ -177,6 +180,7 @@ class DrivingModel(pl.LightningModule):
         # Bind runtime reference tensor so assigner can infer budget tensor device/dtype.
         self.budget_assigner.bind_runtime_reference(driving_input.camera_images)
         # Decide current-step budget before LLM (for budget-token encoding path).
+        # debug check for budget: assigner.last_decision_info / budget_assigner type
         self.budget_assigner.budget_decide_before_llm(
             batch_size=driving_input.camera_images.size(0),
             route_keys=route_keys,
@@ -184,6 +188,7 @@ class DrivingModel(pl.LightningModule):
 
         # BudgetAdaptor reads the decided budget directly from assigner.
         adaptor_dict = self.adaptors(example, inference=True, budget_assigner=self.budget_assigner)
+        # debug check for budget: assigner.last_decision_info
         features, logits = self.forward_model(driving_input, adaptor_dict)
         outputs_by_adaptor = self.adaptors.split_outputs_by_adaptor(adaptor_dict, features)
         predictions = self.adaptors.driving.get_predictions(outputs_by_adaptor["driving"])
@@ -266,7 +271,7 @@ class DrivingModel(pl.LightningModule):
         """Resolve route ids for current batch and validate against batch size."""
         if route_keys is None:
             route_keys = self._extract_route_keys(example)
-        return BudgetAssigner._resolve_route_keys(route_keys, batch_size)
+        return BaseBudgetAssigner._resolve_route_keys(route_keys, batch_size)
 
     def forward_loss(
         self,

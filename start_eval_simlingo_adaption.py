@@ -71,7 +71,7 @@ def parse_budget_settings(data):
     budget_cfg = data.get("budget", eval_cfg.get("budget", {})) or {}
 
     mode = str(budget_cfg.get("mode", "no mode in config")).strip().lower()
-    allowed_modes = {"random", "fixed", "rule_based"}
+    allowed_modes = {"random", "fixed", "rule_based", "smart_assigner"}
     if mode not in allowed_modes:
         raise ValueError(f"budget.mode must be one of {sorted(allowed_modes)}, got {mode}")
 
@@ -531,7 +531,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, help="用于脚本的随机种子；不传则使用 eval-config 中的 seeds", default=None)
     parser.add_argument("--remote-carla-port", type=int, default=None, help="External CARLA world port")
     parser.add_argument("--remote-tm-port", type=int, default=None, help="External CARLA TM port")
-    parser.add_argument("--gpu", type=int, nargs='+', default=None, help="gpu to use")
+    parser.add_argument("--gpu", type=int, nargs='+', default=0, help="gpu to use")
 
     # 3. 解析命令行传入的参数
     args = parser.parse_args()

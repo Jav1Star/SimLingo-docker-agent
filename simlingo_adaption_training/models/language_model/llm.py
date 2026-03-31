@@ -161,8 +161,6 @@ class LLM(nn.Module):
         }
 
         if assigner is not None:
-            if hasattr(assigner, "on_llm_forward_start"):
-                assigner.on_llm_forward_start()
             model_inputs["assigner"] = assigner
 
         # 3. 调用模型 (self.model 应该是 Qwen2ForCausalLM 或其变体)

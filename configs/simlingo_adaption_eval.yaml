@@ -3,7 +3,7 @@ eval:
   checkpoint: ~/simlingo-adaption/models/simlingoCheckpoints/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin
   benchmark: bench2drive
   route_path: ~/simlingo-adaption/leaderboard/data/bench2drive_split
-  seeds: [20]
+  seeds: [66]
   tries: 0
   out_root: ~/simlingo-adaption/eval_results/Bench2Drive
   carla_root: ~/data/carla0915
@@ -13,7 +13,7 @@ eval:
   agent_config: not_used
 
 budget:
-  mode: fixed # random # fixed # rule_based
+  mode: rule_based # random # fixed # rule_based
   fixed_budget: 0.8
   rule_based:
     k_warmup: 5
