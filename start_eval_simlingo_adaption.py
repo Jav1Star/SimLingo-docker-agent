@@ -27,6 +27,18 @@ def expand_path(path: str) -> str:
     return os.path.expanduser(path)
 
 
+def parse_route_id_list(route_ids):
+    if not route_ids:
+        return None
+    parsed = set()
+    for route_id in route_ids:
+        route_id_str = str(route_id).strip()
+        if not route_id_str:
+            continue
+        parsed.add(route_id_str.zfill(3))
+    return parsed or None
+
+
 def needs_resubmit(job) -> bool:
     result_file = job["result_file"]
     if not os.path.exists(result_file):
@@ -128,6 +140,7 @@ def build_eval_config(args, no_server_launch):
         "budget_mode": budget_mode,
         "fixed_budget": fixed_budget,
         "rule_based_cfg": rule_based_cfg,
+        "route_ids": parse_route_id_list(args.route_id),
     }
     return eval_cfg
 
@@ -225,6 +238,51 @@ def finalize_job(job):
     job.pop("process", None)
     job.pop("ports", None)
     job.pop("gpu_id", None)
+
+
+def export_route_budget_layer_panel(job) -> None:
+    cfg = job["cfg"]
+    script_path = os.path.join(cfg["repo_root"], "tools", "plot_route_budget_layer_panel.py")
+    if not os.path.exists(script_path):
+        print(f"[viz] missing plot script: {script_path}")
+        return
+
+    command = [
+        sys.executable,
+        script_path,
+        "--route-viz-dir",
+        job["viz_path"],
+        "--route-id",
+        str(job["route_id"]),
+        "--result-json",
+        job["result_file"],
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            cwd=cfg["repo_root"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except Exception as exc:
+        print(f"[viz] route {job['route_id']} plot failed to start: {exc}")
+        return
+
+    if completed.returncode == 0:
+        stdout = completed.stdout.strip()
+        if stdout:
+            print(f"[viz] route {job['route_id']} panel exported\n{stdout}")
+        else:
+            print(f"[viz] route {job['route_id']} panel exported")
+        return
+
+    print(
+        f"[viz] route {job['route_id']} panel export failed with code {completed.returncode}\n"
+        f"{completed.stderr.strip()}"
+    )
+
 
 def check_and_kill_dead_job(job):
     """
@@ -352,6 +410,14 @@ def main(args):
         routes = [x for x in os.listdir(route_path) if x.endswith(".xml")]
 
         fill_zeros = 3 if cfg["benchmark"] == "bench2drive" else 2
+        route_filter = cfg.get("route_ids")
+        if route_filter:
+            filtered_routes = []
+            for route in routes:
+                route_id = route.split("_")[-1][:-4].zfill(fill_zeros)
+                if route_id in route_filter:
+                    filtered_routes.append(route)
+            routes = filtered_routes
 
         for seed in cfg["seeds"]:
             seed = str(seed)
@@ -439,6 +505,7 @@ def main(args):
             
 
             if not needs_resubmit(job) and return_code == 0: 
+                export_route_budget_layer_panel(job)
                 job["status"] = "completed"
                 progress.update(1)
                 continue
@@ -532,6 +599,7 @@ if __name__ == "__main__":
     parser.add_argument("--remote-carla-port", type=int, default=None, help="External CARLA world port")
     parser.add_argument("--remote-tm-port", type=int, default=None, help="External CARLA TM port")
     parser.add_argument("--gpu", type=int, nargs='+', default=0, help="gpu to use")
+    parser.add_argument("--route-id", type=str, nargs="+", default=None, help="只评估指定 route id，例如 053")
 
     # 3. 解析命令行传入的参数
     args = parser.parse_args()

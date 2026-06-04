@@ -1,16 +1,19 @@
 eval:
   agent: simlingo
-  checkpoint: ~/simlingo-adaption/models/simlingoCheckpoints/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin
+  checkpoint: ~/simlingo-heuristic/models/simlingoModels/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin
   benchmark: bench2drive
-  route_path: ~/simlingo-adaption/leaderboard/data/bench2drive_split
+  route_path: ~/simlingo-heuristic/leaderboard/data/bench2drive_split
   seeds: [66]
   tries: 0
-  out_root: ~/simlingo-adaption/eval_results/Bench2Drive
+  out_root: ~/simlingo-heuristic/eval_results/66_img
   carla_root: ~/data/carla0915
-  repo_root: ~/simlingo-adaption
-  agent_file: ~/simlingo-adaption/team_code_adaption/agent_simlingo.py
+  repo_root: ~/simlingo-heuristic
+  agent_file: ~/simlingo-heuristic/team_code_adaption/agent_simlingo.py
   team_code: team_code_adaption
   agent_config: not_used
+  save_scene_frames: true
+  scene_frame_stride: 1
+  scene_frame_format: png
 
 budget:
   mode: rule_based # random # fixed # rule_based

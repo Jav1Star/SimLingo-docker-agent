@@ -135,13 +135,37 @@ class BaseBudgetAssigner(nn.Module):
 
     def get_eval_budget(self) -> Dict[str, Any]:
         """Return latest decision/update snapshot for eval logging."""
+        latest_update = self.last_update_info[0] if self.last_update_info else {}
+        latest_decision = self.last_decision_info[0] if self.last_decision_info else {}
+        used_budget = latest_update.get("used_budget", latest_decision.get("used_budget", self.fixed_budget))
+        value = latest_decision.get("value", latest_update.get("used_budget", self.fixed_budget))
+        phase = latest_update.get("phase", latest_decision.get("phase", self.mode))
         return {
             "mode": self.mode,
             "fixed_budget": float(self.fixed_budget),
             "last_decision": self.last_decision_info,
             "last_update": self.last_update_info,
             "last_scene_metrics": self.last_scene_metrics,
+            "route_key": latest_update.get("route_key", latest_decision.get("route_key")),
+            "used_budget": None if used_budget is None else float(used_budget),
+            "value": None if value is None else float(value),
+            "phase": None if phase is None else str(phase),
+            "path_mask_hard": self._get_path_mask_hard_for_logging(),
         }
+
+    def _get_path_mask_hard_for_logging(self) -> Optional[List[int]]:
+        """Collapse the current execution plan to one binary layer-activation mask."""
+        if self._runtime_execution_plan is None:
+            return None
+
+        plan = self._runtime_execution_plan.detach().float().cpu()
+        if plan.ndim != 4:
+            return None
+
+        layer_mask = (plan.sum(dim=(2, 3)) > 0).to(dtype=torch.int64)
+        if layer_mask.size(1) == 0:
+            return None
+        return layer_mask[:, 0].tolist()
 
     @staticmethod
     def _normalize_route_key(route_key: Optional[str]) -> str:

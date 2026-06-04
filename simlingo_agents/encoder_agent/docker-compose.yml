@@ -1,0 +1,32 @@
+services:
+  simlingo-encoder-agent:
+    build:
+      context: ../..
+      dockerfile: simlingo_agents/encoder_agent/Dockerfile
+      additional_contexts:
+        simlingo_models: ${SIMLINGO_MODELS_CONTEXT:-/home/yyj/simlingo-adaption/models}
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-https://download.pytorch.org/whl/cu128}
+    image: simlingo-encoder-agent:0.1.0
+    container_name: simlingo-encoder-agent
+    ports:
+      - "9011:9011"
+    environment:
+      ENCODER_MODEL_VARIANT: ${ENCODER_MODEL_VARIANT:-/app/models/InternVL2-1B}
+      ENCODER_CHECKPOINT_PATH: ${ENCODER_CHECKPOINT_PATH:-/app/checkpoints/simlingo_encoder/pytorch_model.bin}
+      ENCODER_ARTIFACT_DIR: /app/artifacts
+      ENCODER_PUBLISH_BY_DEFAULT: ${ENCODER_PUBLISH_BY_DEFAULT:-true}
+      NATS_SERVER_URL: ${NATS_SERVER_URL:-nats://host.docker.internal:4222}
+      NATS_SUBJECT: ${NATS_SUBJECT:-workflow.simlingo.encoded_tokens}
+      NATS_STREAM: ${NATS_STREAM:-WORKFLOW}
+      NATS_STREAM_SUBJECTS: ${NATS_STREAM_SUBJECTS:-workflow.>}
+      NATS_JETSTREAM_DOMAIN: ${NATS_JETSTREAM_DOMAIN:-hub}
+    volumes:
+      - simlingo-encoder-artifacts:/app/artifacts
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    gpus: all
+
+volumes:
+  simlingo-encoder-artifacts:

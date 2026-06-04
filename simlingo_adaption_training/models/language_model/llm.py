@@ -13,6 +13,34 @@ from torch import Tensor, nn
 
 import os
 
+
+def _find_local_internvl_path(variant: str, cache_dir: Optional[str] = None) -> str:
+    repo_name = variant.split("/")[-1]
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+    candidate_paths = [
+        os.path.join(repo_root, "models", repo_name),
+    ]
+    if cache_dir:
+        candidate_paths.append(cache_dir if os.path.isabs(cache_dir) else os.path.join(repo_root, cache_dir))
+    candidate_paths.append(os.path.join(os.path.dirname(__file__), "internvl_2_1b"))
+
+    required_files = ("config.json", "tokenizer_config.json", "vocab.json", "merges.txt")
+    weight_files = ("model.safetensors", "pytorch_model.bin", "model.safetensors.index.json", "pytorch_model.bin.index.json")
+    missing_by_path = {}
+    for path in candidate_paths:
+        missing = [name for name in required_files if not os.path.exists(os.path.join(path, name))]
+        has_weights = any(os.path.exists(os.path.join(path, name)) for name in weight_files)
+        if not missing and has_weights:
+            return path
+        if os.path.exists(path):
+            missing_by_path[path] = missing + ([] if has_weights else ["model weights"])
+        else:
+            missing_by_path[path] = ["directory"]
+
+    details = "; ".join(f"{path}: missing {', '.join(missing)}" for path, missing in missing_by_path.items())
+    raise FileNotFoundError(f"Could not find a complete local InternVL model for {variant}. {details}")
+
+
 # ... (CONFIGS 字典保持不变) ...
 CONFIGS: Dict[str, Dict[str, Any]] = {
     "debug": dict(num_hidden_layers=2, num_attention_heads=2, hidden_size=32, intermediate_size=64),
@@ -65,9 +93,7 @@ class LLM(nn.Module):
             self.model.embed_tokens = self.model.base_model.embed_tokens
         # === [修改部分] 对接 InternVL2-1B (本地修改版) ===
         elif 'internvl' in self.variant.lower():
-            # 1. 构建本地路径
-            # llm.py 在 models/language_model/ 下，而 internvl_2_1b 在 models/language_model/internvl_2_1b/
-            local_model_path = os.path.join(os.path.dirname(__file__), "internvl_2_1b")
+            local_model_path = _find_local_internvl_path(self.variant, getattr(self, "cache_dir", None))
             print(f'Loading local InternVL model from: {local_model_path}')
             
             # 2. 加载 Wrapper 模型 (InternVLChatModel)
