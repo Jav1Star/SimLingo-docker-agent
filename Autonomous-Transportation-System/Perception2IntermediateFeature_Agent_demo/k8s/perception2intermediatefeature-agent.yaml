@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: perception2intermediatefeature-agent
+  labels:
+    app: perception2intermediatefeature-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: perception2intermediatefeature-agent
+  template:
+    metadata:
+      labels:
+        app: perception2intermediatefeature-agent
+    spec:
+      containers:
+        - name: perception2intermediatefeature-agent
+          image: perception2intermediatefeature-agent:0.1.1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 9001
+              name: http
+          env:
+            - name: MCP_SERVER_HOST
+              value: host.minikube.internal
+            - name: MCP_SERVER_PORT
+              value: "8123"
+            - name: MODEL_CHECKPOINT_PATH
+              value: /app/checkpoints/point_pillar_where2comm/
+            - name: FRONTEND_CALLBACK_URL
+              value: http://host.minikube.internal:9002/temp/post_data
+            - name: NATS_SERVER_URL
+              value: nats://nats:4222
+            - name: NATS_SUBJECT
+              value: workflow.demo.perception2feature.result
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: perception2intermediatefeature-agent
+  labels:
+    app: perception2intermediatefeature-agent
+spec:
+  selector:
+    app: perception2intermediatefeature-agent
+  ports:
+    - name: http
+      protocol: TCP
+      port: 9001
+      targetPort: 9001
+  type: NodePort

@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>融合感知智能体</title>
+    <link rel="icon" type="image/png" href="/static/icon/bupt_logo.png"/>
+    <link rel="stylesheet" type="text/css" href="/static/css/home_5.css">
+    <style>
+        .pcd-viewer {
+            width: 100%;
+            aspect-ratio: 16 / 9;
+        }
+        .coop-map-viewer {
+            width: 100%;
+            aspect-ratio: 11 / 3;
+        }
+        .feature-viewer {
+            aspect-ratio: 11 / 3;
+            width: 100%;
+        }
+        .camera-viewer {
+            aspect-ratio: 4 / 3;
+            width: 100%;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+</head>
+<body>
+    <!-- 头部 -->
+    <header class="site-header">
+        <div class="header-left">
+            <div class="logo"></div>
+            <!-- <div class="platform-title">自主式交通系统互操作验证平台</div> -->
+        </div>
+        
+        <div class="vehicle-info-container">
+            <!-- 基础信息 -->
+            <!-- <div class="vehicle-basic-info"> -->
+                <!-- 本机编号 -->
+                <!-- <div class="info-item vehicle-id"> -->
+                    <!-- <span class="info-label">本机编号</span> -->
+                    <!-- <span id="id" class="info-value">N/A</span> -->
+                <!-- </div> -->
+                
+                <!-- 坐标信息 -->
+                <!-- <div class="coordinate-info"> -->
+                    <!-- <div class="info-item"> -->
+                        <!-- <span class="info-label">经度</span> -->
+                        <!-- <span id="longitude" class="info-value">N/A</span> -->
+                    <!-- </div> -->
+                    <!-- <div class="info-item"> -->
+                        <!-- <span class="info-label">纬度</span> -->
+                        <!-- <span id="latitude" class="info-value">N/A</span> -->
+                    <!-- </div> -->
+                <!-- </div> -->
+                
+                <!-- 航向和速度 -->
+                <!-- <div class="info-item"> -->
+                    <!-- <span class="info-label">航向</span> -->
+                    <!-- <span id="heading" class="info-value">N/A</span> -->
+                <!-- </div> -->
+                <!-- <div class="info-item"> -->
+                    <!-- <span class="info-label">速度</span> -->
+                    <!-- <span id="speed" class="info-value">N/A</span> -->
+                <!-- </div> -->
+            <!-- </div> -->
+            
+            <!-- 操作按钮 -->
+            <!-- <div class="vehicle-actions"> -->
+                <!-- <button class="action-btn mode-select"> -->
+                    <!-- 📊 模式选择 -->
+                <!-- </button> -->
+                <!-- <button class="action-btn work-status"> -->
+                    <!-- ⚙️ 工作状态 -->
+                <!-- </button> -->
+            <!-- </div> -->
+            
+            <!-- 状态指示 -->
+            <div class="status-indicator">
+                <div class="status-dot status-online"></div>
+                <span class="status-text">在线运行</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- 主内容区域 -->
+    <main class="main-content">
+        <!-- 图表区域 -->
+        <section class="charts-section">
+            <!-- 左侧列 - 雷达图、日志、指令输入 -->
+            <div class="left-column">
+                <!-- 雷达图 - 保持16:9比例，去掉头部 -->
+                <div class="data-card radar-container">
+                    <div class="card-body">
+                        <div class="chart-placeholder">
+                            <div class="chart-content">
+                                <img id="pcd-img" class="pcd-viewer">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 日志和输入区域 - 上下排列，去掉头部 -->
+                <div class="log-input-container">
+                    <!-- 日志区域 - 去掉头部 -->
+                    <div class="data-card log-container">
+                        <div class="card-body">
+                            <div class="log-content"  id="logContainer">
+                                <!-- <div class="log-entry">
+                                    <span class="log-timestamp">14:23:45</span>
+                                    <span class="log-message log-info">[INFO] 系统启动完成，所有服务正常运行</span>
+                                </div>
+                                <div class="log-entry">
+                                    <span class="log-timestamp">14:23:47</span>
+                                    <span class="log-message log-info">[INFO] 车辆传感器数据接收正常</span>
+                                </div>
+                                <div class="log-entry">
+                                    <span class="log-timestamp">14:23:50</span>
+                                    <span class="log-message log-warn">[WARN] 边缘节点响应延迟 120ms</span>
+                                </div>
+                                <div class="log-entry">
+                                    <span class="log-timestamp">14:23:52</span>
+                                    <span class="log-message log-info">[INFO] 云端协同计算任务已分配</span>
+                                </div>
+                                <div class="log-entry">
+                                    <span class="log-timestamp">14:23:55</span>
+                                    <span class="log-message log-error">[ERROR] 数据融合模块处理超时</span>
+                                </div> -->
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 输入区域 - 放在日志下方，去掉头部 -->
+                    <!-- <div class="data-card input-container"> -->
+                        <!-- <div class="card-body"> -->
+                            <!-- <div class="input-group"> -->
+                                <!-- <input id="commandInput" type="text" class="input-field" placeholder="输入控制指令..."> -->
+                                <!-- <button class="send-btn">发送指令</button> -->
+                            <!-- </div> -->
+                        <!-- </div> -->
+                    <!-- </div> -->
+                </div>
+                
+                <!-- 语义数据交互码率区域 -->
+                <div class="semantic-data-section">
+                    <div class="semantic-data-card">
+                        <!-- <span class="data-label">语义数据交互码率:</span> -->
+<!--                         <span class="data-label">语义信息压缩率:</span>-->
+                        <span class="data-label">互操作通信效用: </span>
+                        <span id="communication-rate" class="data-value">N/A</span>
+                        <!-- <span class="data-unit">%</span> -->
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 右侧6个小图 - 纵向排列，保留头部 -->
+            <div class="side-charts-container">
+                <!-- <div class="data-card"> -->
+                    <!-- <div class="card-header">请求图</div> -->
+                    <!-- <div class="card-body"> -->
+                        <!-- <div class="chart-placeholder"> -->
+                            <!-- <div class="chart-content"> -->
+                                <!-- <img id="request-map-img" class="coop-map-viewer"> -->
+                            <!-- </div> -->
+                        <!-- </div> -->
+                    <!-- </div> -->
+                <!-- </div> -->
+                <!-- <div class="data-card"> -->
+                    <!-- <div class="card-header">协作图</div> -->
+                    <!-- <div class="card-body"> -->
+                        <!-- <div class="chart-placeholder"> -->
+                            <!-- <div class="chart-content"> -->
+                                <!-- <img id="others-comm-mask-img" class="coop-map-viewer"> -->
+                            <!-- </div> -->
+                        <!-- </div> -->
+                    <!-- </div> -->
+                <!-- </div> -->
+                <div class="data-card">
+                    <div class="card-header">本机特征图</div>
+                    <div class="card-body">
+                        <div class="chart-placeholder">
+                            <div class="chart-content">
+                                <img id="ego-feature-img" class="feature-viewer">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="data-card">
+                    <div class="card-header">融合特征图</div>
+                    <div class="card-body">
+                        <div class="chart-placeholder">
+                            <div class="chart-content">
+                                <img id="fused-feature-img" class="feature-viewer">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <!-- <div class="data-card"> -->
+                    <!-- <div class="card-header">前置摄像头</div> -->
+                    <!-- <div class="card-body"> -->
+                        <!-- <div class="chart-placeholder-2"> -->
+                            <!-- <div class="chart-content"> -->
+                                <!-- <img id="pred-img-0" class="camera-viewer"> -->
+                            <!-- </div> -->
+                        <!-- </div> -->
+                    <!-- </div> -->
+                <!-- </div> -->
+                <!-- <div class="data-card"> -->
+                    <!-- <div class="card-header">后置摄像头</div> -->
+                    <!-- <div class="card-body"> -->
+                        <!-- <div class="chart-placeholder-2"> -->
+                            <!-- <div class="chart-content"> -->
+                                <!-- <img id="pred-img-3" class="camera-viewer"> -->
+                            <!-- </div> -->
+                        <!-- </div> -->
+                    <!-- </div> -->
+                <!-- </div> -->
+            </div>
+        </section>
+    </main>
+
+    <!-- 页脚 -->
+    <footer class="site-footer">
+        <div class="footer-content">
+            <!-- <span>自主式交通系统互操作验证平台 &copy; 2024</span> -->
+        </div>
+    </footer>
+    <script src="/static/js/home_5.js"></script>
+</body>
+</html>

@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-template
+  labels:
+    app: agent-template
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-template
+  template:
+    metadata:
+      labels:
+        app: agent-template
+    spec:
+      containers:
+        - name: agent-template
+          image: agent-template:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 9001
+              name: http
+          env:
+            - name: NATS_SERVER_URL
+              value: nats://nats:4222
+            - name: NATS_IN_SUBJECT
+              value: workflow.previousagent.result
+            - name: NATS_IN_DURABLE
+              value: workflow-previousagent-result
+            - name: NATS_OUT_SUBJECT
+              value: workflow.agenttemplate.result
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-template
+  labels:
+    app: agent-template
+spec:
+  selector:
+    app: agent-template
+  ports:
+    - name: http
+      protocol: TCP
+      port: 9001
+      nodePort: 30091
+      targetPort: 9001
+  type: NodePort

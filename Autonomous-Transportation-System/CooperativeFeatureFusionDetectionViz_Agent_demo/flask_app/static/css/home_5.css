@@ -1,0 +1,522 @@
+/* 基础样式和变量 */
+:root {
+    --primary-dark: #0f1c3f;
+    --primary-light: #1a365f;
+    --tech-blue: #1890ff;
+    --tech-cyan: #13c2c2;
+    --success: #52c41a;
+    --warning: #faad14;
+    --error: #f5222d;
+    --bg-gray: #f5f7fa;
+    --text-primary: rgba(0, 0, 0, 0.85);
+    --text-secondary: rgba(0, 0, 0, 0.65);
+    --text-disabled: rgba(0, 0, 0, 0.45);
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background-color: var(--bg-gray);
+    color: var(--text-primary);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+/* 头部样式 */
+.site-header {
+    background: linear-gradient(135deg, var(--primary-dark) 0%, var(--primary-light) 100%);
+    color: white;
+    padding: 0 24px;
+    height: 64px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    flex-shrink: 0;
+}
+
+.header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.logo {
+    width: 36px;
+    height: 36px;
+    background: linear-gradient(135deg, var(--tech-blue) 0%, var(--tech-cyan) 100%);
+    /* border-radius: 6px; */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    font-size: 16px;
+    color: white;
+    background-image: url('/static/icon/logo_white.png');
+    background-size: cover; /* 使图片覆盖整个元素 */
+    background-position: center; /* 使图片居中 */
+    background-repeat: no-repeat; /* 防止图片重复 */
+}
+
+.platform-title {
+    font-size: 20px;
+    font-weight: 700;
+    color: white;
+}
+
+.vehicle-info-container {
+    display: flex;
+    align-items: center;
+    gap: 32px;
+    flex: 1;
+    justify-content: flex-end;
+}
+
+.vehicle-basic-info {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+}
+
+.info-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+}
+
+.info-label {
+    color: #b8c2cc;
+    font-weight: 400;
+}
+
+.info-value {
+    color: white;
+    font-weight: 500;
+    background: rgba(255, 255, 255, 0.1);
+    padding: 2px 8px;
+    border-radius: 3px;
+    min-width: 60px;
+    text-align: center;
+}
+
+.vehicle-id .info-value {
+    background: linear-gradient(135deg, var(--tech-blue) 0%, #096dd9 100%);
+    font-weight: 600;
+}
+
+.coordinate-info {
+    display: flex;
+    gap: 12px;
+}
+
+.vehicle-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.action-btn {
+    padding: 6px 16px;
+    border: 1px solid;
+    border-radius: 4px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: transparent;
+    color: white;
+}
+
+.mode-select {
+    background: rgba(24, 144, 255, 0.1);
+    border-color: var(--tech-blue);
+    color: var(--tech-blue);
+}
+
+.mode-select:hover {
+    background: var(--tech-blue);
+    color: white;
+    box-shadow: 0 2px 8px rgba(24, 144, 255, 0.4);
+}
+
+.work-status {
+    background: rgba(19, 194, 194, 0.1);
+    border-color: var(--tech-cyan);
+    color: var(--tech-cyan);
+}
+
+.work-status:hover {
+    background: var(--tech-cyan);
+    color: white;
+    box-shadow: 0 2px 8px rgba(19, 194, 194, 0.4);
+}
+
+.status-indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: 20px;
+}
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    animation: pulse 2s infinite;
+}
+
+.status-online {
+    background: var(--success);
+}
+
+.status-text {
+    font-size: 13px;
+    font-weight: 500;
+    color: white;
+}
+
+@keyframes pulse {
+    0% {
+        box-shadow: 0 0 0 0 rgba(82, 196, 26, 0.7);
+    }
+    70% {
+        box-shadow: 0 0 0 6px rgba(82, 196, 26, 0);
+    }
+    100% {
+        box-shadow: 0 0 0 0 rgba(82, 196, 26, 0);
+    }
+}
+
+/* 主内容区域 */
+.main-content {
+    flex: 1;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+/* 图表区域 - 重新设计布局 */
+.charts-section {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 16px;
+    min-height: 600px;
+}
+
+/* 左侧列 - 雷达图、日志、指令输入 */
+.left-column {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+/* 雷达图容器 - 保持16:9比例 */
+.radar-container {
+    display: flex;
+    flex-direction: column;
+}
+
+/* 日志和输入区域容器 - 上下排列 */
+.log-input-container {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+/* 右侧小图纵向排列 */
+.side-charts-container {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+/* 卡片通用样式 */
+.data-card {
+    background: white;
+    border-radius: 6px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    transition: box-shadow 0.3s;
+    display: flex;
+    flex-direction: column;
+}
+
+.data-card:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+/* 保留右侧小图的头部 */
+.side-charts-container .card-header {
+    padding: 12px 16px;
+    background-color: #f0f5ff;
+    border-bottom: 1px solid #e8e8e8;
+    font-weight: 600;
+    color: var(--primary-dark);
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.side-charts-container .card-header::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    background-color: var(--tech-blue);
+}
+
+.card-body {
+    padding: 16px;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* 雷达图、日志、输入区域去掉头部，调整内边距 */
+.radar-container .card-body,
+.log-container .card-body,
+.input-container .card-body {
+    padding: 0;
+}
+
+/* 雷达图占位样式 - 16:9比例 */
+.radar-container .chart-placeholder {
+    width: 100%;
+    height: 0;
+    padding-bottom: 56.25%; /* 16:9 比例 (9/16=0.5625) */
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    border-radius: 6px;
+    position: relative;
+}
+
+/* 小图表占位样式 - 11:3比例 */
+.side-charts-container .chart-placeholder {
+    width: 100%;
+    height: 0;
+    padding-bottom: 27.27%; /* 11:3 比例 (3/11≈0.2727) */
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    border-radius: 4px;
+    position: relative;
+}
+
+/* 小图表占位样式 - 4:3比例 */
+.side-charts-container .chart-placeholder-2 {
+    width: 100%;
+    height: 0;
+    padding-bottom: 75%; /* 4:3 比例 (3/4=0.75) */
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    border-radius: 4px;
+    position: relative;
+}
+
+.chart-content {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-secondary);
+    font-size: 14px;
+    font-weight: 500;
+}
+
+/* 小图内容字体稍小但更清晰 */
+.side-charts-container .chart-content {
+    font-size: 12px;
+}
+
+/* 日志和输入区域 - 上下排列 */
+.log-container {
+    width: 100%;
+    word-wrap: break-word;
+    word-break: break-all;
+    /* white-space: pre-wrap; */
+    overflow-wrap: break-word;
+}
+
+.log-content {
+    flex: 1;
+    background: #fafafa;
+    border-radius: 6px;
+    padding: 16px;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    overflow-y: auto;
+    min-height: 300px;
+    max-height: 1495px;
+}
+
+.log-entry {
+    margin-bottom: 4px;
+    display: flex;
+    gap: 8px;
+}
+
+.log-timestamp {
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.log-message {
+    color: var(--text-primary);
+}
+
+.log-info {
+    color: var(--success);
+}
+
+.log-warn {
+    color: var(--warning);
+}
+
+.log-error {
+    color: var(--error);
+}
+
+.input-container {
+    display: flex;
+    flex-direction: column;
+}
+
+.input-group {
+    display: flex;
+    gap: 8px;
+    padding: 16px;
+    width: 100%;
+}
+
+.input-field {
+    flex: 1;
+    padding: 8px 12px;
+    border: 1px solid #d9d9d9;
+    border-radius: 4px;
+    font-size: 14px;
+    transition: border-color 0.3s;
+}
+
+.input-field:focus {
+    outline: none;
+    border-color: var(--tech-blue);
+    box-shadow: 0 0 0 2px rgba(24, 144, 255, 0.2);
+}
+
+.send-btn {
+    padding: 8px 16px;
+    background: var(--tech-blue);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.3s;
+    white-space: nowrap;
+}
+
+.send-btn:hover {
+    background: #096dd9;
+    box-shadow: 0 2px 6px rgba(24, 144, 255, 0.4);
+}
+
+/* 语义数据交互码率区域 */
+.semantic-data-section {
+    margin-top: 8px;
+}
+
+.semantic-data-card {
+    background: white;
+    border-radius: 6px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    border-left: 4px solid var(--tech-cyan);
+}
+
+.data-label {
+    font-size: 14px;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.data-value {
+    font-size: 24px;
+    color: var(--tech-cyan);
+    font-weight: 700;
+    font-family: 'Consolas', 'Courier New', monospace;
+}
+
+.data-unit {
+    font-size: 14px;
+    color: var(--text-secondary);
+    margin-left: 4px;
+}
+
+/* 页脚样式 */
+.site-footer {
+    background: var(--primary-dark);
+    color: white;
+    padding: 12px 24px;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+/* 响应式调整 */
+@media (max-width: 1200px) {
+    .vehicle-info-container {
+        gap: 20px;
+    }
+    
+    .vehicle-basic-info {
+        gap: 15px;
+    }
+}
+
+@media (max-width: 1024px) {
+    .charts-section {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto auto;
+    }
+    
+    .side-charts-container {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        grid-template-rows: 1fr 1fr;
+        gap: 16px;
+    }
+}
+
+@media (max-width: 768px) {
+    .charts-section {
+        grid-template-rows: auto auto;
+    }
+    
+    .side-charts-container {
+        grid-template-columns: 1fr;
+        grid-template-rows: repeat(4, 1fr);
+    }
+    
+    .input-group {
+        flex-direction: column;
+    }
+}

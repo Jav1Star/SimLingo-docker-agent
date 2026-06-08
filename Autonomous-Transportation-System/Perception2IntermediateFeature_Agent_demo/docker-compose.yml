@@ -1,0 +1,23 @@
+services:
+  perception2intermediatefeature-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-https://download.pytorch.org/whl/cu128}
+    image: perception2intermediatefeature-agent:0.1.3
+    container_name: perception2intermediatefeature-agent
+    ports:
+      - "9001:9001"
+    environment:
+      MCP_SERVER_HOST: host.docker.internal
+      MCP_SERVER_PORT: "8123"
+      MODEL_CHECKPOINT_PATH: /app/checkpoints/point_pillar_where2comm/
+      FRONTEND_CALLBACK_URL: http://host.docker.internal:9002/temp/post_data
+      # NATS_SERVER_URL: nats://nats:4222
+      NATS_SERVER_URL: nats://host.docker.internal:4222
+      NATS_SUBJECT: workflow.demo.perception2feature.result
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    gpus: all
