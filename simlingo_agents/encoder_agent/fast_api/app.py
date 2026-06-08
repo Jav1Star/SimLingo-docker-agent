@@ -1,54 +1,82 @@
 from collections.abc import AsyncIterator
+import asyncio
 from contextlib import asynccontextmanager
+import json
 import os
-import uuid
 from typing import Any
 
-import numpy as np
 from fastapi import FastAPI, HTTPException
 
-from fast_api.model_runtime import encoder_runtime, save_artifacts
+from fast_api.model_runtime import encoder_runtime
 from protocols import A2AMessage, A2ATaskRequest, A2ATaskResponse, NatsComm
 from utils.logger_utils import get_logger
-from utils.numpy_utils import decode_numpy_payload, encode_numpy_payload
+from utils.numpy_utils import decode_structured_numpy, encode_structured_numpy
 
 
 logger = get_logger(__name__)
 
 MODEL_VARIANT = os.getenv("ENCODER_MODEL_VARIANT", "/app/models/InternVL2-1B")
 CHECKPOINT_PATH = os.getenv("ENCODER_CHECKPOINT_PATH", "").strip() or None
-ARTIFACT_DIR = os.getenv("ENCODER_ARTIFACT_DIR", "/app/artifacts")
 NATS_SERVER_URL = os.getenv("NATS_SERVER_URL", "nats://host.docker.internal:4222")
-NATS_SUBJECT = os.getenv("NATS_SUBJECT", "workflow.simlingo.encoded_tokens")
-PUBLISH_BY_DEFAULT = os.getenv("ENCODER_PUBLISH_BY_DEFAULT", "true").strip().lower() in {"1", "true", "yes", "on"}
+NATS_IN_SUBJECT = os.getenv("NATS_IN_SUBJECT", "workflow.previousagent.result")
+NATS_IN_DURABLE = os.getenv("NATS_IN_DURABLE", "workflow-previousagent-result")
+NATS_OUT_SUBJECT = os.getenv("NATS_OUT_SUBJECT", os.getenv("NATS_SUBJECT", "workflow.simlingo.encoded_tokens"))
 
 _nats_comm = NatsComm(servers=[NATS_SERVER_URL])
-
-
-def _as_bool(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     try:
-        encoder_runtime.load_model(MODEL_VARIANT, checkpoint_path=CHECKPOINT_PATH)
-        try:
-            await _nats_comm.connect()
-        except Exception as exc:
-            logger.warning("NATS is unavailable at startup: %s", exc)
+        await asyncio.to_thread(
+            encoder_runtime.load_model,
+            MODEL_VARIANT,
+            checkpoint_path=CHECKPOINT_PATH,
+        )
+        logger.info("Encoder model loaded successfully during startup")
+    except Exception as exc:
+        logger.exception("Failed to load encoder model during startup")
+        raise RuntimeError(f"Startup model loading failed: {exc}") from exc
+    try:
         yield
     finally:
         await _nats_comm.close()
 
 
 app = FastAPI(title="SimLingo Encoder Agent API", lifespan=lifespan)
+
+
+async def _receive_data_from_nats(
+    nats_in_subject: str = NATS_IN_SUBJECT,
+    nats_in_durable: str = NATS_IN_DURABLE,
+) -> dict[str, Any]:
+    try:
+        messages = await _nats_comm.receive(
+            subject=nats_in_subject,
+            durable=nats_in_durable,
+            batch=1,
+            timeout_sec=5,
+        )
+        for message in messages:
+            logger.info("Received message on subject '%s'", nats_in_subject)
+            await message.ack()
+            return message.payload
+        raise HTTPException(
+            status_code=504,
+            detail=f"No messages received on subject '{nats_in_subject}' within timeout",
+        )
+    except Exception as exc:
+        logger.exception("Error receiving message from NATS subject '%s'", nats_in_subject)
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=500, detail=f"Failed to receive message: {exc}") from exc
+    finally:
+        await _nats_comm.close()
+
+
+async def _send_data_to_nats(data: dict[str, Any], nats_out_subject: str = NATS_OUT_SUBJECT) -> None:
+    ack = await _nats_comm.send(subject=nats_out_subject, payload=data)
+    logger.info("Data sent to NATS subject '%s' with ack: %s", nats_out_subject, ack)
 
 
 @app.get("/health")
@@ -58,67 +86,73 @@ async def health() -> dict[str, Any]:
         "agent": "simlingo-encoder-agent",
         "model_loaded": encoder_runtime.is_loaded,
         "device": encoder_runtime.device,
+        "nats_server_url": NATS_SERVER_URL,
+        "nats_in_subject": NATS_IN_SUBJECT,
+        "nats_out_subject": NATS_OUT_SUBJECT,
     }
 
 
-@app.post("/encoder/encode")
-async def encode(payload: dict[str, Any]) -> dict[str, Any]:
-    """Encode prompt/images into token ids and dense encoder outputs.
+async def agent_function(
+    nats_in_subject: str = NATS_IN_SUBJECT,
+    nats_in_durable: str = NATS_IN_DURABLE,
+    nats_out_subject: str = NATS_OUT_SUBJECT,
+) -> dict[str, Any]:
+    data = await _receive_data_from_nats(
+        nats_in_subject=nats_in_subject,
+        nats_in_durable=nats_in_durable,
+    )
+    decoded_data = decode_structured_numpy(data)
 
-    By default large arrays are written to ENCODER_ARTIFACT_DIR and returned as
-    file URIs. Set inline_payload=true for small debugging requests.
-    """
     try:
-        decoded_payload = decode_numpy_payload(payload)
-        encoded = encoder_runtime.encode(decoded_payload)
-        frame_id = str(encoded.get("frame_id") or uuid.uuid4().hex)
-        inline_payload = _as_bool(payload.get("inline_payload"), default=False)
-        if inline_payload:
-            response_payload = encode_numpy_payload(encoded)
-        else:
-            response_payload = save_artifacts(encoded, ARTIFACT_DIR, frame_id)
-
-        nats_subject = payload.get("nats_subject", NATS_SUBJECT)
-        publish = _as_bool(payload.get("publish"), default=PUBLISH_BY_DEFAULT)
-        ack = None
-        if publish:
-            ack = await _nats_comm.send(subject=nats_subject, payload=response_payload)
-
-        return {
-            "status": "success",
-            "agent": "simlingo-encoder-agent",
-            "frame_id": frame_id,
-            "published": publish,
-            "nats_ack": ack,
-            "payload": response_payload,
-        }
+        encoded_result = await asyncio.to_thread(encoder_runtime.encode, decoded_data)
+    except ValueError as exc:
+        logger.warning("Encoder request validation failed: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
-        logger.exception("Encoder forward failed")
+        logger.exception("Encoder runtime failed")
         raise HTTPException(status_code=500, detail=f"Encoder failed: {exc}") from exc
+
+    result = {
+        "status": "success",
+        "encoded_payload": encode_structured_numpy(encoded_result),
+    }
+    await _send_data_to_nats(result, nats_out_subject=nats_out_subject)
+    return {
+        "status": "success",
+        "frame_id": encoded_result.get("frame_id"),
+    }
 
 
 @app.post("/a2a/execute")
-async def execute_a2a(message: dict[str, Any]) -> dict[str, Any]:
+async def agent_execute(message: dict[str, Any]) -> dict[str, Any]:
+    logger.info("Received message: %s", message)
     request_message = A2AMessage(**message)
     task_request = A2ATaskRequest(**request_message.payload)
-    metadata = task_request.metadata or {}
-    context = dict(task_request.context or {})
-    if metadata.get("nats_subject"):
-        context["nats_subject"] = metadata["nats_subject"]
-    if "publish" not in context:
-        context["publish"] = True
+    metadata = getattr(task_request, "metadata", {}) or {}
 
-    result = await encode(context)
+    if "nats_in_subject" in metadata and metadata.get("nats_in_subject"):
+        nats_in_subject = metadata["nats_in_subject"]
+        nats_in_durable = metadata.get("nats_in_durable") or nats_in_subject.replace(".", "-")
+    else:
+        nats_in_subject = NATS_IN_SUBJECT
+        nats_in_durable = NATS_IN_DURABLE
+
+    nats_out_subject = metadata.get("nats_out_subject") or NATS_OUT_SUBJECT
+
+    result = await agent_function(
+        nats_in_subject=nats_in_subject,
+        nats_in_durable=nats_in_durable,
+        nats_out_subject=nats_out_subject,
+    )
     task_response = A2ATaskResponse(
         task_id=task_request.task_id,
-        status=result.get("status", "error"),
-        result=result,
+        status=result.get("status", "unknown"),
+        result=json.dumps(result),
     )
     response_message = A2AMessage(
         sender_id="SimLingoEncoderAgent",
         receiver_id=request_message.sender_id,
         message_type="response",
-        payload=task_response.model_dump(),
-        correlation_id=request_message.correlation_id,
+        payload=task_response.dict(),
     )
-    return response_message.model_dump()
+    return response_message.dict()

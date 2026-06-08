@@ -908,6 +908,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        execution_plan: Optional[torch.Tensor] = None,
         assigner: Optional[object] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -967,19 +968,34 @@ class Qwen2Model(Qwen2PreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        execution_plan = None
+        prepared_execution_plan = execution_plan
+        if prepared_execution_plan is not None:
+            if prepared_execution_plan.ndim != 4:
+                raise ValueError(
+                    "execution_plan must have shape [B, L, 2, H] or [L, B, 2, H], "
+                    f"got {tuple(prepared_execution_plan.shape)}"
+                )
+            if prepared_execution_plan.size(0) == hidden_states.size(0):
+                prepared_execution_plan = prepared_execution_plan.transpose(0, 1)
+            elif prepared_execution_plan.size(1) != hidden_states.size(0):
+                raise ValueError(
+                    "execution_plan batch dimension does not match hidden_states batch size: "
+                    f"{tuple(prepared_execution_plan.shape)} vs batch={hidden_states.size(0)}"
+                )
+            prepared_execution_plan = prepared_execution_plan.to(device=hidden_states.device)
+
         num_prefix_layers = self.config.num_prefix_layers
         for idx, decoder_layer in enumerate(self.layers):
             drop_states = None
-            if idx == num_prefix_layers and assigner is not None:
-                execution_plan = assigner.build_execution_plan_on_prefix_layer(
+            if idx == num_prefix_layers and prepared_execution_plan is None and assigner is not None:
+                prepared_execution_plan = assigner.build_execution_plan_on_prefix_layer(
                     hidden_states=hidden_states,
                     layer_idx=idx,
                     num_prefix_layers=num_prefix_layers,
                 )
 
-            if execution_plan is not None and idx >= num_prefix_layers and idx < int(execution_plan.size(0)):
-                drop_states = execution_plan[idx]
+            if prepared_execution_plan is not None and idx >= num_prefix_layers and idx < int(prepared_execution_plan.size(0)):
+                drop_states = prepared_execution_plan[idx]
 
             is_inference = not self.training and hidden_states.shape[0] == 1
             if is_inference and drop_states is not None and torch.all(drop_states == 0):
@@ -1235,6 +1251,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
+        execution_plan: Optional[torch.Tensor] = None,
         assigner: Optional[object] = None,
         **loss_kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
@@ -1287,6 +1304,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
+            execution_plan=execution_plan,
             assigner=assigner,
         )
 

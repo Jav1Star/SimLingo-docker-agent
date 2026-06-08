@@ -27,3 +27,7 @@ simlingo_agents/artifacts
 !simlingo_agents
 !simlingo_agents/encoder_agent
 !simlingo_agents/encoder_agent/**
+!simlingo_agents/llm_agent
+!simlingo_agents/llm_agent/**
+!simlingo_agents/scheduler_agent
+!simlingo_agents/scheduler_agent/**

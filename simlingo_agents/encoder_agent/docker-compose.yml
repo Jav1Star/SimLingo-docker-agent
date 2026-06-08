@@ -6,6 +6,7 @@ services:
       additional_contexts:
         simlingo_models: ${SIMLINGO_MODELS_CONTEXT:-/home/yyj/simlingo-adaption/models}
       args:
+        BASE_IMAGE: ${BASE_IMAGE:-nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
         PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-https://download.pytorch.org/whl/cu128}
     image: simlingo-encoder-agent:0.1.0
@@ -15,18 +16,13 @@ services:
     environment:
       ENCODER_MODEL_VARIANT: ${ENCODER_MODEL_VARIANT:-/app/models/InternVL2-1B}
       ENCODER_CHECKPOINT_PATH: ${ENCODER_CHECKPOINT_PATH:-/app/checkpoints/simlingo_encoder/pytorch_model.bin}
-      ENCODER_ARTIFACT_DIR: /app/artifacts
-      ENCODER_PUBLISH_BY_DEFAULT: ${ENCODER_PUBLISH_BY_DEFAULT:-true}
       NATS_SERVER_URL: ${NATS_SERVER_URL:-nats://host.docker.internal:4222}
-      NATS_SUBJECT: ${NATS_SUBJECT:-workflow.simlingo.encoded_tokens}
+      NATS_IN_SUBJECT: ${ENCODER_NATS_IN_SUBJECT:-workflow.previousagent.result}
+      NATS_IN_DURABLE: ${ENCODER_NATS_IN_DURABLE:-workflow-previousagent-result}
+      NATS_OUT_SUBJECT: ${ENCODER_NATS_OUT_SUBJECT:-workflow.simlingo.encoded_tokens}
       NATS_STREAM: ${NATS_STREAM:-WORKFLOW}
       NATS_STREAM_SUBJECTS: ${NATS_STREAM_SUBJECTS:-workflow.>}
       NATS_JETSTREAM_DOMAIN: ${NATS_JETSTREAM_DOMAIN:-hub}
-    volumes:
-      - simlingo-encoder-artifacts:/app/artifacts
     extra_hosts:
       - "host.docker.internal:host-gateway"
     gpus: all
-
-volumes:
-  simlingo-encoder-artifacts:

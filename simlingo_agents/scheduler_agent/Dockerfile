@@ -17,8 +17,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     build-essential \
     git \
-    libgl1 \
-    libglib2.0-0 \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y --no-install-recommends \
     python3.12 \
@@ -37,25 +35,36 @@ RUN python -m pip config set global.index-url ${PIP_INDEX_URL} && \
     python -m pip config set global.timeout 120 && \
     python -m pip config set global.retries 5
 
-COPY simlingo_agents/encoder_agent/requirements.docker.txt /app/requirements.docker.txt
+COPY simlingo_agents/scheduler_agent/requirements.docker.txt /app/requirements.docker.txt
 
 RUN python -m pip install --upgrade pip setuptools wheel && \
     python -m pip install -r /app/requirements.docker.txt
 
 COPY simlingo_adaption_training /app/simlingo_adaption_training
-COPY simlingo_agents/encoder_agent /app
-RUN mkdir -p /app/models /app/checkpoints/simlingo_encoder
+COPY simlingo_agents/scheduler_agent /app
+RUN mkdir -p /app/models /app/checkpoints/simlingo_scheduler
 COPY --from=simlingo_models InternVL2-1B /app/models/InternVL2-1B
-COPY --from=simlingo_models simlingoModels/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin /app/checkpoints/simlingo_encoder/pytorch_model.bin
+COPY --from=simlingo_models simlingoModels/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin /app/checkpoints/simlingo_scheduler/pytorch_model.bin
 
 ENV PYTHONPATH=/app \
-    ENCODER_MODEL_VARIANT=/app/models/InternVL2-1B \
-    ENCODER_CHECKPOINT_PATH=/app/checkpoints/simlingo_encoder/pytorch_model.bin \
+    SCHEDULER_MODEL_VARIANT=/app/models/InternVL2-1B \
+    SCHEDULER_CHECKPOINT_PATH=/app/checkpoints/simlingo_scheduler/pytorch_model.bin \
+    SCHEDULER_MODE=rule_based \
+    SCHEDULER_FIXED_BUDGET=0.8 \
+    SCHEDULER_HISTORY_ALPHA=0.6 \
+    SCHEDULER_DECISION_SHIFT_T_LAP=0.2 \
+    SCHEDULER_TARGET=simlingo_adaption_training.models.scheduler.simple_scheduler.SimpleScheduler_L \
+    SCHEDULER_TAU=5 \
+    SCHEDULER_IS_HARD=true \
+    SCHEDULER_THRESHOLD=0.5 \
+    SCHEDULER_BIAS=true \
+    SCHEDULER_NUM_PREFIX_LAYERS=2 \
+    SCHEDULER_PHASE=budget \
     NATS_SERVER_URL=nats://host.docker.internal:4222 \
-    NATS_IN_SUBJECT=workflow.previousagent.result \
-    NATS_IN_DURABLE=workflow-previousagent-result \
-    NATS_OUT_SUBJECT=workflow.simlingo.encoded_tokens
+    NATS_IN_SUBJECT=workflow.simlingo.encoded_tokens \
+    NATS_IN_DURABLE=workflow-simlingo-encoded-tokens \
+    NATS_OUT_SUBJECT=workflow.simlingo.llm_prefix_input
 
-EXPOSE 9011
+EXPOSE 9013
 
 CMD ["python", "main.py"]

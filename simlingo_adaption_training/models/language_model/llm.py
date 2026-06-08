@@ -172,6 +172,7 @@ class LLM(nn.Module):
         attention_mask: Tensor = None,
         return_dict: bool = True,
         position_ids: Optional[Tensor] = None,
+        execution_plan: Optional[Tensor] = None,
         assigner: Optional[object] = None,
         **kwargs
     ) -> Tensor:
@@ -186,7 +187,9 @@ class LLM(nn.Module):
             "return_dict": return_dict
         }
 
-        if assigner is not None:
+        if execution_plan is not None:
+            model_inputs["execution_plan"] = execution_plan
+        elif assigner is not None:
             model_inputs["assigner"] = assigner
 
         # 3. 调用模型 (self.model 应该是 Qwen2ForCausalLM 或其变体)

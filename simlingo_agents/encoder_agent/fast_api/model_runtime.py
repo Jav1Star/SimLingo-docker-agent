@@ -69,6 +69,7 @@ class EncoderRuntime:
             logger.info("Loading SimLingo encoder from %s", model_variant)
             processor = AutoProcessor.from_pretrained(model_variant, trust_remote_code=True)
             tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
+            self._ensure_padding_token(tokenizer)
             tokenizer.add_special_tokens({"additional_special_tokens": DRIVING_SPECIAL_TOKENS})
             tokenizer.padding_side = "left"
 
@@ -103,6 +104,25 @@ class EncoderRuntime:
             self._num_image_token = num_image_token
             self._hidden_size = hidden_size
             logger.info("Encoder loaded: hidden_size=%s num_image_token=%s", hidden_size, num_image_token)
+
+    def _ensure_padding_token(self, tokenizer: Any) -> None:
+        if getattr(tokenizer, "pad_token_id", None) is not None:
+            return
+
+        if getattr(tokenizer, "eos_token_id", None) is not None and getattr(tokenizer, "eos_token", None) is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+            logger.info("Tokenizer pad_token was missing; using eos_token as padding token.")
+            return
+
+        if getattr(tokenizer, "unk_token_id", None) is not None and getattr(tokenizer, "unk_token", None) is not None:
+            tokenizer.pad_token = tokenizer.unk_token
+            logger.info("Tokenizer pad_token was missing; using unk_token as padding token.")
+            return
+
+        raise ValueError(
+            "Tokenizer does not define pad_token_id and has no eos_token/unk_token fallback. "
+            "Please provide a tokenizer with a valid padding token."
+        )
 
     def _load_encoder_weights(
         self,
@@ -178,7 +198,10 @@ class EncoderRuntime:
             add_special_tokens=add_special_tokens,
         )
         input_ids = encoded["input_ids"].cpu().numpy().astype(np.int64)
-        attention_mask = (encoded["input_ids"] != tokenizer.pad_token_id).cpu().numpy().astype(np.bool_)
+        pad_token_id = getattr(tokenizer, "pad_token_id", None)
+        if pad_token_id is None:
+            raise RuntimeError("Tokenizer padding token is not configured after initialization.")
+        attention_mask = (encoded["input_ids"] != pad_token_id).cpu().numpy().astype(np.bool_)
         img_context_id = tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
         visual_positions = [np.where(row == img_context_id)[0].astype(np.int64) for row in input_ids]
         return {
@@ -212,15 +235,59 @@ class EncoderRuntime:
         _, _, wp_encoder = self._require_loaded()
         if placeholder_values is None:
             return {}
+
+        batches = self._normalize_placeholder_batches(placeholder_values)
         encoded: dict[str, Any] = {}
-        for batch_idx, item in enumerate(placeholder_values):
-            encoded[str(batch_idx)] = {}
+        for batch_key, item in batches:
+            encoded[batch_key] = {}
             for token_id, coords in item.items():
-                coords_tensor = torch.as_tensor(coords, device=self._device, dtype=self._dtype)
+                try:
+                    coords_tensor = torch.as_tensor(coords, device=self._device, dtype=self._dtype)
+                except Exception as exc:
+                    raise ValueError(
+                        f"Invalid waypoint coordinates for batch {batch_key}, token {token_id}: {exc}"
+                    ) from exc
+                if coords_tensor.ndim != 2 or coords_tensor.size(-1) != 2:
+                    raise ValueError(
+                        f"Waypoint coordinates for batch {batch_key}, token {token_id} "
+                        f"must have shape [N, 2], got {tuple(coords_tensor.shape)}"
+                    )
                 with torch.no_grad():
                     embeds = wp_encoder(coords_tensor.unsqueeze(0)).squeeze(0)
-                encoded[str(batch_idx)][str(token_id)] = embeds.detach().float().cpu().numpy()
+                encoded[batch_key][str(token_id)] = embeds.detach().float().cpu().numpy()
         return encoded
+
+    def _normalize_placeholder_batches(self, placeholder_values: Any) -> list[tuple[str, dict[Any, Any]]]:
+        if isinstance(placeholder_values, dict):
+            if not placeholder_values:
+                return []
+            if all(hasattr(value, "items") for value in placeholder_values.values()):
+                return [(str(batch_key), value) for batch_key, value in placeholder_values.items()]
+            if all(not hasattr(value, "items") for value in placeholder_values.values()):
+                return [("0", placeholder_values)]
+            raise ValueError(
+                "placeholder_values dict has mixed value types; expected either "
+                "{token_id: coords} or {batch_id: {token_id: coords}}."
+            )
+
+        if isinstance(placeholder_values, (list, tuple)):
+            batches: list[tuple[str, dict[Any, Any]]] = []
+            for batch_idx, item in enumerate(placeholder_values):
+                if item is None:
+                    batches.append((str(batch_idx), {}))
+                    continue
+                if not hasattr(item, "items"):
+                    raise ValueError(
+                        f"placeholder_values[{batch_idx}] must be a mapping of token_id -> coords, "
+                        f"got {type(item).__name__}."
+                    )
+                batches.append((str(batch_idx), item))
+            return batches
+
+        raise ValueError(
+            "placeholder_values must be a list/tuple of mappings, a mapping of token_id -> coords, "
+            f"or a mapping of batch_id -> mapping. Got {type(placeholder_values).__name__}."
+        )
 
     def encode(self, payload: dict[str, Any]) -> dict[str, Any]:
         prompt_texts = payload.get("prompt_texts")

@@ -37,25 +37,39 @@ RUN python -m pip config set global.index-url ${PIP_INDEX_URL} && \
     python -m pip config set global.timeout 120 && \
     python -m pip config set global.retries 5
 
-COPY simlingo_agents/encoder_agent/requirements.docker.txt /app/requirements.docker.txt
+COPY simlingo_agents/llm_agent/requirements.docker.txt /app/requirements.docker.txt
 
 RUN python -m pip install --upgrade pip setuptools wheel && \
     python -m pip install -r /app/requirements.docker.txt
 
 COPY simlingo_adaption_training /app/simlingo_adaption_training
-COPY simlingo_agents/encoder_agent /app
-RUN mkdir -p /app/models /app/checkpoints/simlingo_encoder
+COPY simlingo_agents/llm_agent /app
+RUN mkdir -p /app/models /app/checkpoints/simlingo_llm
 COPY --from=simlingo_models InternVL2-1B /app/models/InternVL2-1B
-COPY --from=simlingo_models simlingoModels/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin /app/checkpoints/simlingo_encoder/pytorch_model.bin
+COPY --from=simlingo_models simlingoModels/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin /app/checkpoints/simlingo_llm/pytorch_model.bin
 
 ENV PYTHONPATH=/app \
-    ENCODER_MODEL_VARIANT=/app/models/InternVL2-1B \
-    ENCODER_CHECKPOINT_PATH=/app/checkpoints/simlingo_encoder/pytorch_model.bin \
+    LLM_MODEL_VARIANT=/app/models/InternVL2-1B \
+    LLM_CHECKPOINT_PATH=/app/checkpoints/simlingo_llm/pytorch_model.bin \
+    LLM_SPEED_WPS_MODE=2d \
+    LLM_PREDICT_ROUTE_AS_WPS=true \
+    LLM_LORA=true \
+    LLM_ADAPTION_TRAIN=false \
+    LLM_LORA_ALPHA=64 \
+    LLM_LORA_R=32 \
+    LLM_LORA_DROPOUT=0.1 \
+    LLM_NUM_PREFIX_LAYERS=2 \
+    LLM_PHASE=prefix \
+    LLM_SCHEDULER_TARGET=simlingo_adaption_training.models.scheduler.simple_scheduler.SimpleScheduler_L \
+    LLM_SCHEDULER_TAU=5 \
+    LLM_SCHEDULER_IS_HARD=true \
+    LLM_SCHEDULER_THRESHOLD=0.5 \
+    LLM_SCHEDULER_BIAS=true \
     NATS_SERVER_URL=nats://host.docker.internal:4222 \
-    NATS_IN_SUBJECT=workflow.previousagent.result \
-    NATS_IN_DURABLE=workflow-previousagent-result \
-    NATS_OUT_SUBJECT=workflow.simlingo.encoded_tokens
+    NATS_IN_SUBJECT=workflow.simlingo.llm_prefix_input \
+    NATS_IN_DURABLE=workflow-simlingo-llm-prefix-input \
+    NATS_OUT_SUBJECT=workflow.simlingo.llm_prefix_output
 
-EXPOSE 9011
+EXPOSE 9012
 
 CMD ["python", "main.py"]

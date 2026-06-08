@@ -1,0 +1,45 @@
+services:
+  simlingo-llm-agent:
+    build:
+      context: ../..
+      dockerfile: simlingo_agents/llm_agent/Dockerfile
+      additional_contexts:
+        simlingo_models: ${SIMLINGO_MODELS_CONTEXT:-/home/yyj/simlingo-adaption/models}
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-https://download.pytorch.org/whl/cu128}
+    image: simlingo-llm-agent:0.1.0
+    container_name: simlingo-llm-agent
+    ports:
+      - "9012:9012"
+    environment:
+      LLM_MODEL_VARIANT: ${LLM_MODEL_VARIANT:-/app/models/InternVL2-1B}
+      LLM_CHECKPOINT_PATH: ${LLM_CHECKPOINT_PATH:-/app/checkpoints/simlingo_llm/pytorch_model.bin}
+      LLM_SPEED_WPS_MODE: ${LLM_SPEED_WPS_MODE:-2d}
+      LLM_PREDICT_ROUTE_AS_WPS: ${LLM_PREDICT_ROUTE_AS_WPS:-true}
+      LLM_LORA: ${LLM_LORA:-true}
+      LLM_ADAPTION_TRAIN: ${LLM_ADAPTION_TRAIN:-false}
+      LLM_LORA_ALPHA: ${LLM_LORA_ALPHA:-64}
+      LLM_LORA_R: ${LLM_LORA_R:-32}
+      LLM_LORA_DROPOUT: ${LLM_LORA_DROPOUT:-0.1}
+      LLM_NUM_PREFIX_LAYERS: ${LLM_NUM_PREFIX_LAYERS:-2}
+      LLM_PHASE: ${LLM_PHASE:-prefix}
+      LLM_SCHEDULER_TARGET: ${LLM_SCHEDULER_TARGET:-simlingo_adaption_training.models.scheduler.simple_scheduler.SimpleScheduler_L}
+      LLM_SCHEDULER_TAU: ${LLM_SCHEDULER_TAU:-5}
+      LLM_SCHEDULER_IS_HARD: ${LLM_SCHEDULER_IS_HARD:-true}
+      LLM_SCHEDULER_THRESHOLD: ${LLM_SCHEDULER_THRESHOLD:-0.5}
+      LLM_SCHEDULER_BIAS: ${LLM_SCHEDULER_BIAS:-true}
+      NATS_SERVER_URL: ${NATS_SERVER_URL:-nats://host.docker.internal:4222}
+      LLM_PREFIX_IN_SUBJECT: ${LLM_PREFIX_IN_SUBJECT:-workflow.simlingo.llm_prefix_input}
+      LLM_PREFIX_IN_DURABLE: ${LLM_PREFIX_IN_DURABLE:-workflow-simlingo-llm-prefix-input}
+      LLM_PREFIX_OUT_SUBJECT: ${LLM_PREFIX_OUT_SUBJECT:-workflow.simlingo.llm_prefix_output}
+      LLM_FINAL_IN_SUBJECT: ${LLM_FINAL_IN_SUBJECT:-workflow.simlingo.llm_final_input}
+      LLM_FINAL_IN_DURABLE: ${LLM_FINAL_IN_DURABLE:-workflow-simlingo-llm-final-input}
+      LLM_FINAL_OUT_SUBJECT: ${LLM_FINAL_OUT_SUBJECT:-workflow.simlingo.llm_output}
+      NATS_STREAM: ${NATS_STREAM:-WORKFLOW}
+      NATS_STREAM_SUBJECTS: ${NATS_STREAM_SUBJECTS:-workflow.>}
+      NATS_JETSTREAM_DOMAIN: ${NATS_JETSTREAM_DOMAIN:-hub}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    gpus: all
