@@ -131,6 +131,7 @@ def build_eval_config(args, no_server_launch):
         "tries": int(cfg.get("tries", 0)),
         "out_root": expand_path(cfg["out_root"]),
         "carla_root": expand_path(cfg["carla_root"]),
+        "carla_host": cfg.get("carla_host", args.remote_carla_host or "localhost"),
         "repo_root": expand_path(cfg["repo_root"]),
         "agent_file": expand_path(cfg["agent_file"]),
         "team_code": cfg.get("team_code", "team_code_adaption"),
@@ -179,6 +180,7 @@ def launch_job(job, gpu_id, world_port, tm_port):
         sys.executable,
         "-u",
         f"{repo_root}/Bench2Drive/leaderboard/leaderboard/leaderboard_evaluator.py",
+        f"--host={cfg.get('carla_host', 'localhost')}",
         f"--routes={job['route']}",
         "--repetitions=1",
         "--track=SENSORS",
@@ -388,7 +390,10 @@ def main(args):
         else:
              carla_tm_ports = {args.remote_carla_port + 8000}
         no_server_launch = True
-        print(f"Using remote CARLA at port {args.remote_carla_port}")
+        print(
+            f"Using remote CARLA at host {args.remote_carla_host or 'localhost'} "
+            f"port {args.remote_carla_port}"
+        )
     
     global GPU_IDS
     GPU_IDS = 0
@@ -598,6 +603,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, help="用于脚本的随机种子；不传则使用 eval-config 中的 seeds", default=None)
     parser.add_argument("--remote-carla-port", type=int, default=None, help="External CARLA world port")
     parser.add_argument("--remote-tm-port", type=int, default=None, help="External CARLA TM port")
+    parser.add_argument("--remote-carla-host", type=str, default=None, help="External CARLA host")
     parser.add_argument("--gpu", type=int, nargs='+', default=0, help="gpu to use")
     parser.add_argument("--route-id", type=str, nargs="+", default=None, help="只评估指定 route id，例如 053")
 

@@ -1,0 +1,17 @@
+checkpoint_path: /home/yyj/models/stage2Model/2026_04_29_22_57_57_smart_assigner_stage2_GRPO_seed_9876/checkpoints/loss_plateau.ckpt
+train_test_split: navtest
+experiment_name: navsim_smart_assigner_stage2_smoke10_failures
+worker: ray_distributed
+device: cuda
+verbose: true
+open_scene_data_root: /home/yyj/navsim/download
+navsim_exp_root: /home/yyj/navsim/exp
+nuplan_maps_root: /home/yyj/navsim/download/maps
+navsim_log_path: /home/yyj/navsim/download/test_navsim_logs/test
+original_sensor_path: /home/yyj/navsim/download/test_sensor_blobs/test
+metric_cache_path: /home/yyj/navsim/exp/metric_cache_navtest_stage2_full
+hydra_overrides:
+  # Keep all sliding windows from these failure scenarios so adjacent samples
+  # stay continuous, matching the full navtest evaluation setup.
+  - worker.threads_per_node=2
+  - train_test_split.scene_filter.log_names=['2021.09.16.19.27.01_veh-45_01749_03230','2021.05.25.14.16.10_veh-35_02482_02649','2021.09.09.17.18.51_veh-48_00098_00328','2021.09.16.13.53.10_veh-42_01510_01591','2021.09.16.15.12.03_veh-42_01037_01434','2021.10.06.08.16.17_veh-52_00032_00170','2021.06.03.12.02.06_veh-35_01100_01227','2021.09.29.18.19.40_veh-28_00844_01218','2021.09.16.13.53.10_veh-42_00077_00153','2021.06.03.13.55.17_veh-35_00789_00999']

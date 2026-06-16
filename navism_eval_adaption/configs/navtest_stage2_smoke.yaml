@@ -1,0 +1,15 @@
+checkpoint_path: /home/yyj/models/stage2Model/2026_04_29_22_57_57_smart_assigner_stage2_GRPO_seed_9876/checkpoints/loss_plateau.ckpt
+train_test_split: navtest
+experiment_name: navsim_smart_assigner_stage2_smoke
+worker: sequential
+device: cuda
+verbose: true
+open_scene_data_root: /home/yyj/navsim/download
+navsim_exp_root: /home/yyj/navsim/exp
+nuplan_maps_root: /home/yyj/navsim/download/maps
+navsim_log_path: /home/yyj/navsim/download/test_navsim_logs/test
+original_sensor_path: /home/yyj/navsim/download/test_sensor_blobs/test
+metric_cache_path: /home/yyj/navsim/exp/metric_cache_navtest_stage2_smoke_2
+hydra_overrides:
+  - train_test_split.scene_filter.max_scenes=2
+  - train_test_split.scene_filter.log_names=['2021.05.25.14.16.10_veh-35_01690_02183']
