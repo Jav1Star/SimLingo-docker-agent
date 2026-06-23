@@ -70,8 +70,6 @@ async def _receive_data_from_nats(
         if isinstance(exc, HTTPException):
             raise
         raise HTTPException(status_code=500, detail=f"Failed to receive message: {exc}") from exc
-    finally:
-        await _nats_comm.close()
 
 
 async def _send_data_to_nats(data: dict[str, Any], nats_out_subject: str = NATS_OUT_SUBJECT) -> None:
