@@ -5,9 +5,12 @@ import json
 import os
 import pathlib
 import signal
+import socket
 import subprocess
 import sys
 import time
+import urllib.parse
+import urllib.request
 import uuid
 from collections import deque
 from dataclasses import dataclass
@@ -78,6 +81,9 @@ class EvaluationSessionManager:
 
     def __init__(self, repo_root: str, runtime_root: str | None = None) -> None:
         self.repo_root = _expand(repo_root) or os.getcwd()
+        self.config_root = os.path.join(self.repo_root, "configs")
+        self.bench_root = os.path.join(self.repo_root, "Bench2Drive")
+        self.team_code_root = os.path.join(self.repo_root, "team_code_adaption")
         self.runtime_root = _expand(runtime_root) or os.path.join(
             self.repo_root,
             "simlingo_agents",
@@ -93,6 +99,10 @@ class EvaluationSessionManager:
         eval_config_path: str,
         route_ids: list[str] | None = None,
         seed: int | None = None,
+        carla_host: str | None = None,
+        carla_port: int | None = None,
+        traffic_manager_port: int | None = None,
+        use_existing_carla: bool = True,
         remote_carla_port: int | None = None,
         remote_tm_port: int | None = None,
         remote_carla_host: str | None = None,
@@ -104,15 +114,27 @@ class EvaluationSessionManager:
         if not eval_config_path or not os.path.exists(eval_config_path):
             raise FileNotFoundError(f"eval_config_path does not exist: {eval_config_path}")
 
+        eval_doc, eval_cfg = self._load_eval_document(eval_config_path)
+        carla_conn = self._resolve_carla_connection(
+            eval_cfg=eval_cfg,
+            carla_host=carla_host,
+            carla_port=carla_port,
+            traffic_manager_port=traffic_manager_port,
+            remote_carla_host=remote_carla_host,
+            remote_carla_port=remote_carla_port,
+            remote_tm_port=remote_tm_port,
+            use_existing_carla=use_existing_carla,
+        )
+
         session_id = self._new_session_id(session_label)
         paths = self._build_paths(session_id)
         os.makedirs(paths.session_dir, exist_ok=True)
 
         generated_cfg = self._build_generated_eval_config(
-            source_eval_config=eval_config_path,
+            source_eval_document=eval_doc,
             session_id=session_id,
             output_root=output_root,
-            remote_carla_host=remote_carla_host,
+            carla_host=carla_conn["carla_host"],
         )
         with open(paths.generated_eval_yaml, "w", encoding="utf-8") as f:
             yaml.safe_dump(generated_cfg, f, allow_unicode=True, sort_keys=False)
@@ -132,12 +154,10 @@ class EvaluationSessionManager:
         if route_ids:
             command.append("--route-id")
             command.extend([str(item) for item in route_ids])
-        if remote_carla_port is not None:
-            command.extend(["--remote-carla-port", str(remote_carla_port)])
-        if remote_tm_port is not None:
-            command.extend(["--remote-tm-port", str(remote_tm_port)])
-        if remote_carla_host:
-            command.extend(["--remote-carla-host", remote_carla_host])
+        if carla_conn["use_existing_carla"]:
+            command.extend(["--remote-carla-port", str(carla_conn["carla_port"])])
+            command.extend(["--remote-tm-port", str(carla_conn["traffic_manager_port"])])
+            command.extend(["--remote-carla-host", carla_conn["carla_host"]])
         if gpu_ids:
             command.append("--gpu")
             command.extend([str(item) for item in gpu_ids])
@@ -172,9 +192,10 @@ class EvaluationSessionManager:
             "command": command,
             "route_ids": route_ids,
             "seed": seed,
-            "remote_carla_port": remote_carla_port,
-            "remote_tm_port": remote_tm_port,
-            "remote_carla_host": remote_carla_host,
+            "carla_mode": "external" if carla_conn["use_existing_carla"] else "managed",
+            "carla_host": carla_conn["carla_host"],
+            "carla_port": carla_conn["carla_port"],
+            "traffic_manager_port": carla_conn["traffic_manager_port"],
             "gpu_ids": gpu_ids,
             "result_root": generated_cfg["eval"]["out_root"],
             "agent_name": generated_cfg["eval"]["agent"],
@@ -183,6 +204,173 @@ class EvaluationSessionManager:
         }
         _write_json(paths.session_json, session)
         return self.get_session_status(session_id)
+
+    def describe_runtime(self) -> dict[str, Any]:
+        stack = self._split_stack_config()
+        config_candidates = self.list_eval_configs()
+        active_sessions = self.list_sessions()
+        return {
+            "repo_root": self.repo_root,
+            "bench_root": self.bench_root,
+            "runtime_root": self.runtime_root,
+            "team_code_root": self.team_code_root,
+            "default_carla": {
+                "host": os.getenv("SIMLINGO_CARLA_HOST", "127.0.0.1"),
+                "port": int(os.getenv("SIMLINGO_CARLA_PORT", "2000")),
+                "traffic_manager_port": int(os.getenv("SIMLINGO_CARLA_TM_PORT", "8000")),
+                "mode": "external",
+            },
+            "split_stack": stack,
+            "paths": {
+                "start_eval_script": os.path.join(self.repo_root, "start_eval_simlingo_adaption.py"),
+                "remote_agent_file": os.path.join(self.team_code_root, "agent_simlingo_remote.py"),
+                "leaderboard_evaluator": os.path.join(
+                    self.bench_root, "leaderboard", "leaderboard", "leaderboard_evaluator.py"
+                ),
+            },
+            "available_eval_configs": config_candidates,
+            "session_count": len(active_sessions),
+        }
+
+    def validate_runtime(
+        self,
+        *,
+        eval_config_path: str | None = None,
+        carla_host: str | None = None,
+        carla_port: int | None = None,
+        traffic_manager_port: int | None = None,
+        require_carla: bool = True,
+        require_agents: bool = True,
+        require_nats: bool = True,
+    ) -> dict[str, Any]:
+        checks: dict[str, Any] = {
+            "files": {},
+            "services": {},
+            "overall_status": "ok",
+        }
+
+        start_eval_script = os.path.join(self.repo_root, "start_eval_simlingo_adaption.py")
+        remote_agent_file = os.path.join(self.team_code_root, "agent_simlingo_remote.py")
+        leaderboard_evaluator = os.path.join(
+            self.bench_root, "leaderboard", "leaderboard", "leaderboard_evaluator.py"
+        )
+        for label, path in {
+            "start_eval_script": start_eval_script,
+            "remote_agent_file": remote_agent_file,
+            "leaderboard_evaluator": leaderboard_evaluator,
+        }.items():
+            checks["files"][label] = {
+                "path": path,
+                "exists": os.path.exists(path),
+            }
+
+        if eval_config_path:
+            expanded = _expand(eval_config_path)
+            exists = bool(expanded and os.path.exists(expanded))
+            checks["files"]["eval_config"] = {
+                "path": expanded,
+                "exists": exists,
+            }
+            if exists:
+                _doc, eval_cfg = self._load_eval_document(expanded)
+                route_path = _expand(eval_cfg.get("route_path"))
+                checkpoint = _expand(eval_cfg.get("checkpoint"))
+                checks["files"]["route_path"] = {
+                    "path": route_path,
+                    "exists": bool(route_path and os.path.isdir(route_path)),
+                }
+                checks["files"]["checkpoint"] = {
+                    "path": checkpoint,
+                    "exists": bool(checkpoint and os.path.exists(checkpoint)),
+                }
+
+        stack = self._split_stack_config()
+        if require_agents:
+            for agent_name, execute_url in stack["agent_execute_urls"].items():
+                checks["services"][agent_name] = self._probe_http_health(execute_url)
+
+        if require_nats:
+            checks["services"]["nats"] = self._probe_socket(stack["nats_server_url"])
+
+        if require_carla:
+            checks["services"]["carla"] = self._probe_carla(
+                carla_host=carla_host,
+                carla_port=carla_port,
+                traffic_manager_port=traffic_manager_port,
+            )
+
+        failed = []
+        for group in ("files", "services"):
+            for name, item in checks[group].items():
+                if not item.get("exists", item.get("ok", False)):
+                    failed.append(f"{group}.{name}")
+        if failed:
+            checks["overall_status"] = "error"
+            checks["failed_checks"] = failed
+        return checks
+
+    def list_eval_configs(self, search_root: str | None = None) -> list[dict[str, Any]]:
+        root = _expand(search_root) or self.config_root
+        patterns = [
+            os.path.join(root, "*.yaml"),
+            os.path.join(root, "*.yml"),
+        ]
+        configs: list[dict[str, Any]] = []
+        for pattern in patterns:
+            for path in sorted(glob.glob(pattern)):
+                try:
+                    _doc, eval_cfg = self._load_eval_document(path)
+                except Exception as exc:
+                    configs.append(
+                        {
+                            "path": path,
+                            "status": "error",
+                            "error": str(exc),
+                        }
+                    )
+                    continue
+                configs.append(
+                    {
+                        "path": path,
+                        "benchmark": eval_cfg.get("benchmark"),
+                        "agent": eval_cfg.get("agent"),
+                        "route_path": eval_cfg.get("route_path"),
+                        "out_root": eval_cfg.get("out_root"),
+                        "carla_root": eval_cfg.get("carla_root"),
+                        "status": "ok",
+                    }
+                )
+        return configs
+
+    def list_routes(self, eval_config_path: str, route_ids: list[str] | None = None) -> dict[str, Any]:
+        eval_config_path = _expand(eval_config_path)
+        if not eval_config_path or not os.path.exists(eval_config_path):
+            raise FileNotFoundError(f"eval_config_path does not exist: {eval_config_path}")
+        _doc, eval_cfg = self._load_eval_document(eval_config_path)
+        route_path = _expand(eval_cfg["route_path"])
+        if not route_path or not os.path.isdir(route_path):
+            raise FileNotFoundError(f"route_path does not exist or is not a directory: {route_path}")
+
+        routes = []
+        wanted = {str(item).zfill(3) for item in route_ids} if route_ids else None
+        for filename in sorted(os.listdir(route_path)):
+            if not filename.endswith(".xml"):
+                continue
+            route_id = filename.split("_")[-1][:-4].zfill(3)
+            if wanted and route_id not in wanted:
+                continue
+            routes.append(
+                {
+                    "route_id": route_id,
+                    "path": os.path.join(route_path, filename),
+                }
+            )
+        return {
+            "eval_config_path": eval_config_path,
+            "route_path": route_path,
+            "route_count": len(routes),
+            "routes": routes,
+        }
 
     def list_sessions(self) -> list[dict[str, Any]]:
         sessions = []
@@ -328,6 +516,8 @@ class EvaluationSessionManager:
     ) -> list[str]:
         eval_cfg = generated_cfg.get("eval", generated_cfg)
         route_path = _expand(eval_cfg["route_path"])
+        if not route_path or not os.path.isdir(route_path):
+            raise FileNotFoundError(f"route_path does not exist or is not a directory: {route_path}")
         routes = sorted(
             route_id.split("_")[-1][:-4].zfill(3)
             for route_id in os.listdir(route_path)
@@ -341,13 +531,12 @@ class EvaluationSessionManager:
     def _build_generated_eval_config(
         self,
         *,
-        source_eval_config: str,
+        source_eval_document: dict[str, Any],
         session_id: str,
         output_root: str | None,
-        remote_carla_host: str | None,
+        carla_host: str | None,
     ) -> dict[str, Any]:
-        with open(source_eval_config, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+        data = dict(source_eval_document)
         if "eval" not in data:
             data = {"eval": data}
         eval_cfg = data["eval"]
@@ -358,9 +547,141 @@ class EvaluationSessionManager:
         eval_cfg["agent_file"] = agent_file
         eval_cfg["out_root"] = session_out_root
         eval_cfg["repo_root"] = self.repo_root
-        if remote_carla_host:
-            eval_cfg["carla_host"] = remote_carla_host
+        if carla_host:
+            eval_cfg["carla_host"] = carla_host
         return data
+
+    def _load_eval_document(self, path: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        if not isinstance(data, dict):
+            raise TypeError(f"YAML root must be a mapping: {path}")
+        eval_cfg = data.get("eval", data)
+        if not isinstance(eval_cfg, dict):
+            raise TypeError(f"'eval' section must be a mapping: {path}")
+        return data, eval_cfg
+
+    def _resolve_carla_connection(
+        self,
+        *,
+        eval_cfg: dict[str, Any],
+        carla_host: str | None,
+        carla_port: int | None,
+        traffic_manager_port: int | None,
+        remote_carla_host: str | None,
+        remote_carla_port: int | None,
+        remote_tm_port: int | None,
+        use_existing_carla: bool,
+    ) -> dict[str, Any]:
+        resolved_host = (
+            carla_host
+            or remote_carla_host
+            or eval_cfg.get("carla_host")
+            or os.getenv("SIMLINGO_CARLA_HOST", "127.0.0.1")
+        )
+        resolved_port = int(
+            carla_port
+            or remote_carla_port
+            or os.getenv("SIMLINGO_CARLA_PORT", "2000")
+        )
+        resolved_tm_port = int(
+            traffic_manager_port
+            or remote_tm_port
+            or os.getenv("SIMLINGO_CARLA_TM_PORT", "8000")
+        )
+        if use_existing_carla is None:
+            use_existing_carla = True
+        return {
+            "use_existing_carla": bool(use_existing_carla),
+            "carla_host": str(resolved_host),
+            "carla_port": resolved_port,
+            "traffic_manager_port": resolved_tm_port,
+        }
+
+    def _split_stack_config(self) -> dict[str, Any]:
+        encoder_url = os.getenv("SIMLINGO_ENCODER_AGENT_URL", "http://127.0.0.1:9011/a2a/execute")
+        scheduler_url = os.getenv("SIMLINGO_SCHEDULER_AGENT_URL", "http://127.0.0.1:9013/a2a/execute")
+        llm_url = os.getenv("SIMLINGO_LLM_AGENT_URL", "http://127.0.0.1:9012/a2a/execute")
+        return {
+            "agent_execute_urls": {
+                "encoder": encoder_url,
+                "scheduler": scheduler_url,
+                "llm": llm_url,
+            },
+            "nats_server_url": os.getenv("NATS_SERVER_URL", "nats://127.0.0.1:4222"),
+            "nats_stream": os.getenv("NATS_STREAM", "WORKFLOW"),
+            "nats_stream_subjects": [
+                item.strip()
+                for item in os.getenv("NATS_STREAM_SUBJECTS", "workflow.>").split(",")
+                if item.strip()
+            ],
+            "nats_jetstream_domain": os.getenv("NATS_JETSTREAM_DOMAIN", "hub"),
+        }
+
+    def _probe_http_health(self, execute_url: str) -> dict[str, Any]:
+        parsed = urllib.parse.urlparse(execute_url)
+        health_path = parsed.path
+        if health_path.endswith("/a2a/execute"):
+            health_path = health_path[: -len("/a2a/execute")] + "/health"
+        else:
+            health_path = "/health"
+        health_url = urllib.parse.urlunparse(parsed._replace(path=health_path, query="", fragment=""))
+        result = {
+            "ok": False,
+            "execute_url": execute_url,
+            "health_url": health_url,
+        }
+        try:
+            with urllib.request.urlopen(health_url, timeout=3.0) as response:
+                body = response.read().decode("utf-8", errors="replace")
+            payload = json.loads(body) if body else {}
+            result["ok"] = True
+            result["response"] = payload
+        except Exception as exc:
+            result["error"] = str(exc)
+        return result
+
+    def _probe_socket(self, target_url: str) -> dict[str, Any]:
+        parsed = urllib.parse.urlparse(target_url)
+        host = parsed.hostname
+        port = parsed.port
+        result = {
+            "ok": False,
+            "url": target_url,
+            "host": host,
+            "port": port,
+        }
+        if not host or not port:
+            result["error"] = "unable to parse host/port"
+            return result
+        try:
+            with socket.create_connection((host, port), timeout=3.0):
+                pass
+            result["ok"] = True
+        except OSError as exc:
+            result["error"] = str(exc)
+        return result
+
+    def _probe_carla(
+        self,
+        *,
+        carla_host: str | None,
+        carla_port: int | None,
+        traffic_manager_port: int | None,
+    ) -> dict[str, Any]:
+        host = carla_host or os.getenv("SIMLINGO_CARLA_HOST", "127.0.0.1")
+        port = int(carla_port or os.getenv("SIMLINGO_CARLA_PORT", "2000"))
+        tm_port = int(traffic_manager_port or os.getenv("SIMLINGO_CARLA_TM_PORT", "8000"))
+        rpc_check = self._probe_socket(f"tcp://{host}:{port}")
+        tm_check = self._probe_socket(f"tcp://{host}:{tm_port}")
+        return {
+            "ok": bool(rpc_check.get("ok")),
+            "host": host,
+            "carla_port": port,
+            "traffic_manager_port": tm_port,
+            "rpc": rpc_check,
+            "traffic_manager": tm_check,
+        }
 
     def _load_session(self, session_id: str) -> dict[str, Any]:
         session_json = self._build_paths(session_id).session_json

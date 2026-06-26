@@ -97,6 +97,7 @@ class NatsComm:
     async def close(self) -> None:
         if self._nc.is_connected:
             await self._nc.drain()
+        self._nc = NATS()
         self._js = None
 
     async def _ensure_stream(self) -> None:

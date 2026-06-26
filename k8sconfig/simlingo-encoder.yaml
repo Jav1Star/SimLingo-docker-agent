@@ -12,15 +12,26 @@ spec:
   template:
     metadata:
       labels:
-        app: simlingo-encoder-agent
+        app: simlingo-encoder-agent 
     spec:
+      nodeSelector:
+        feature.node.kubernetes.io/pci-10de.present: "true"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
       containers:
         - name: simlingo-encoder-agent
-          image: simlingo-encoder-agent:0.1.0
+          image: simlingo-encoder-agent:0.1.1
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 9011
               name: http
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+            limits:
+              nvidia.com/gpu: "1"
           env:
             - name: NATS_SERVER_URL
               value: nats://nats:4222
