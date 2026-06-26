@@ -39,6 +39,16 @@ def parse_route_id_list(route_ids):
     return parsed or None
 
 
+def tflops_recording_enabled() -> bool:
+    return os.getenv("SIMLINGO_EVAL_RECORD_TFLOPS", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def tflops_file_for_result(result_file: str) -> str:
+    if result_file.endswith("_res.json"):
+        return result_file[:-len("_res.json")] + "_tflops.json"
+    return os.path.splitext(result_file)[0] + ".tflops.json"
+
+
 def needs_resubmit(job) -> bool:
     result_file = job["result_file"]
     if not os.path.exists(result_file):
@@ -62,6 +72,9 @@ def needs_resubmit(job) -> bool:
     for record in evaluation_data['_checkpoint']['records']:
         if record.get("status") in failure_statuses:
             return True
+
+    if tflops_recording_enabled() and not os.path.exists(job.get("tflops_file", tflops_file_for_result(result_file))):
+        return True
 
     return False
 
@@ -171,6 +184,8 @@ def launch_job(job, gpu_id, world_port, tm_port):
     env["SCENARIO_RUNNER_ROOT"] = f"{repo_root}/Bench2Drive/scenario_runner"
     env["SAVE_PATH"] = job["viz_path"]
     env["LEADERBOARD_ROOT"] = f"{repo_root}/Bench2Drive/leaderboard"
+    env["SIMLINGO_EVAL_RESULT_FILE"] = job["result_file"]
+    env["SIMLINGO_EVAL_ROUTE_ID"] = str(job["route_id"])
     # 通过环境变量把 mode 与固定 budget 值传给 agent
     env["SIMLINGO_EVAL_BUDGET_MODE"] = str(job["budget_mode"])
     env["SIMLINGO_EVAL_FIXED_BUDGET"] = str(job["fixed_budget"])
@@ -445,6 +460,7 @@ def main(args):
                 log_file = os.path.join(base_dir, "out", f"{route_id}_out.log")
                 err_file = os.path.join(base_dir, "err", f"{route_id}_err.log")
                 result_file = os.path.join(base_dir, "res", f"{route_id}_res.json")
+                tflops_file = tflops_file_for_result(result_file)
                 # 修改后的筛选：基于 res.json 的 status 字段判断
                 should_skip = False
                 if os.path.exists(result_file):
@@ -457,8 +473,11 @@ def main(args):
                         if "_checkpoint" in res_data and "global_record" in res_data["_checkpoint"]:
                             status = res_data["_checkpoint"]["global_record"].get("status", "Failed")
                         if status == "Completed":
-                            should_skip = True
-                            print(f"[skip] route {route_id} mode {cfg['budget_mode']} status is Completed -> skip")
+                            if tflops_recording_enabled() and not os.path.exists(tflops_file):
+                                print(f"[queue] route {route_id} mode {cfg['budget_mode']} status is Completed but TFLOPs file is missing -> queue")
+                            else:
+                                should_skip = True
+                                print(f"[skip] route {route_id} mode {cfg['budget_mode']} status is Completed -> skip")
                         else:
                             # 状态是 Failed 或其他，需要重跑
                             print(f"[queue] route {route_id} mode {cfg['budget_mode']} status is {status} -> queue")
@@ -481,6 +500,7 @@ def main(args):
                     "rule_based_cfg": cfg["rule_based_cfg"],
                     "viz_path": viz_path,
                     "result_file": result_file,
+                    "tflops_file": tflops_file,
                     "log_file": log_file,
                     "err_file": err_file,
                     "tries_initial": cfg["tries"],

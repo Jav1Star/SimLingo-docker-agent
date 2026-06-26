@@ -16,8 +16,8 @@ eval:
   scene_frame_format: png
 
 budget:
-  mode: rule_based # random # fixed # rule_based
-  fixed_budget: 0.8
+  mode: fixed # random # fixed # rule_based
+  fixed_budget: 1.0
   rule_based:
     k_warmup: 5
     eta: 0.03
