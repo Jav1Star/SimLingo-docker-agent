@@ -419,13 +419,23 @@ class LLMRuntime:
                     driving_mask=driving_mask,
                 )
 
-                outputs = llm.model(
-                    inputs_embeds=inputs_embeds.to(dtype=self._model_param_dtype or inputs_embeds.dtype),
-                    attention_mask=inputs_mask,
-                    output_hidden_states=True,
-                    return_dict=True,
-                    execution_plan=execution_plan_tensor,
-                )
+                model_kwargs: dict[str, Any] = {
+                    "inputs_embeds": inputs_embeds.to(dtype=self._model_param_dtype or inputs_embeds.dtype),
+                    "attention_mask": inputs_mask,
+                    "output_hidden_states": True,
+                    "return_dict": True,
+                    "execution_plan": execution_plan_tensor,
+                }
+                if phase == "prefix":
+                    model_kwargs.update(
+                        {
+                            "stop_at_layer": self._num_prefix_layers,
+                            "skip_logits": True,
+                            "use_cache": False,
+                        }
+                    )
+
+                outputs = llm.model(**model_kwargs)
 
         route_key = encoded_payload.get("route_key")
         frame_id = encoded_payload.get("frame_id")
