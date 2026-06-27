@@ -30,7 +30,7 @@ SCHEDULER_TAU = float(os.getenv("SCHEDULER_TAU", "5"))
 SCHEDULER_IS_HARD = os.getenv("SCHEDULER_IS_HARD", "true").strip().lower() in {"1", "true", "yes", "on"}
 SCHEDULER_THRESHOLD = float(os.getenv("SCHEDULER_THRESHOLD", "0.5"))
 SCHEDULER_BIAS = os.getenv("SCHEDULER_BIAS", "true").strip().lower() in {"1", "true", "yes", "on"}
-SCHEDULER_NUM_PREFIX_LAYERS = 2
+SCHEDULER_NUM_PREFIX_LAYERS = int(os.getenv("SCHEDULER_NUM_PREFIX_LAYERS", "10"))
 RULE_BASED_CFG_JSON = os.getenv("SCHEDULER_RULE_BASED_CFG_JSON", "").strip() or None
 
 NATS_SERVER_URL = os.getenv("NATS_SERVER_URL", "nats://host.docker.internal:4222")

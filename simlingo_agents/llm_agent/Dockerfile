@@ -59,6 +59,7 @@ ENV PYTHONPATH=/app \
     LLM_LORA_R=32 \
     LLM_LORA_DROPOUT=0.1 \
     LLM_NUM_PREFIX_LAYERS=2 \
+    LLM_SCHEDULER_NUM_PREFIX_LAYERS=10 \
     LLM_SCHEDULER_TARGET=simlingo_adaption_training.models.scheduler.simple_scheduler.SimpleScheduler_L \
     LLM_SCHEDULER_TAU=5 \
     LLM_SCHEDULER_IS_HARD=true \

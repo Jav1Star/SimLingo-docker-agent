@@ -19,7 +19,8 @@ from utils.logger_utils import get_logger
 logger = get_logger(__name__)
 
 
-INFERENCE_NUM_PREFIX_LAYERS = 2
+LLM_PREFIX_NUM_LAYERS = 2
+SCHEDULER_NUM_PREFIX_LAYERS = 10
 
 DRIVING_SPECIAL_TOKENS = [
     "<WAYPOINTS>",
@@ -50,6 +51,7 @@ class LLMRuntime:
         self._num_hidden_layers: Optional[int] = None
         self._num_attention_heads: Optional[int] = None
         self._num_prefix_layers: Optional[int] = None
+        self._scheduler_num_prefix_layers: Optional[int] = None
         self._img_context_token_id: Optional[int] = None
         self._model_param_dtype: Optional[torch.dtype] = None
 
@@ -78,14 +80,16 @@ class LLMRuntime:
         lora_alpha: int = 64,
         lora_r: int = 32,
         lora_dropout: float = 0.1,
-        num_prefix_layers: int = 2,
+        num_prefix_layers: int = LLM_PREFIX_NUM_LAYERS,
+        scheduler_num_prefix_layers: int = SCHEDULER_NUM_PREFIX_LAYERS,
         scheduler_target: str,
         scheduler_tau: float = 5.0,
         scheduler_is_hard: bool = True,
         scheduler_threshold: float = 0.5,
         scheduler_bias: bool = True,
     ) -> None:
-        num_prefix_layers = INFERENCE_NUM_PREFIX_LAYERS
+        num_prefix_layers = int(num_prefix_layers)
+        scheduler_num_prefix_layers = int(scheduler_num_prefix_layers)
 
         if self.is_loaded and self._model_variant == model_variant:
             return
@@ -133,7 +137,7 @@ class LLMRuntime:
                 is_hard=scheduler_is_hard,
                 threshold=scheduler_threshold,
                 bias=scheduler_bias,
-                num_prefix_layers=num_prefix_layers,
+                num_prefix_layers=scheduler_num_prefix_layers,
             )
             budget_encoder.to(device=self._device, dtype=torch.float32)
             budget_encoder.eval()
@@ -155,14 +159,19 @@ class LLMRuntime:
             self._num_hidden_layers = int(llm.config.num_hidden_layers)
             self._num_attention_heads = int(llm.config.num_attention_heads)
             self._num_prefix_layers = int(num_prefix_layers)
+            self._scheduler_num_prefix_layers = int(scheduler_num_prefix_layers)
             self._img_context_token_id = int(tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>"))
             self._model_param_dtype = next(llm.model.parameters()).dtype
             logger.info(
-                "Two-stage LLM loaded: hidden_size=%s num_hidden_layers=%s num_attention_heads=%s num_prefix_layers=%s",
+                (
+                    "Two-stage LLM loaded: hidden_size=%s num_hidden_layers=%s "
+                    "num_attention_heads=%s llm_num_prefix_layers=%s scheduler_num_prefix_layers=%s"
+                ),
                 self._hidden_size,
                 self._num_hidden_layers,
                 self._num_attention_heads,
                 self._num_prefix_layers,
+                self._scheduler_num_prefix_layers,
             )
 
     def _ensure_padding_token(self, tokenizer: Any) -> None:
@@ -320,7 +329,7 @@ class LLMRuntime:
                 "Skipped %d incompatible %s weights while forcing num_prefix_layers=%d: %s",
                 len(skipped),
                 module_name,
-                INFERENCE_NUM_PREFIX_LAYERS,
+                int(getattr(module, "num_prefix_layers", SCHEDULER_NUM_PREFIX_LAYERS)),
                 preview,
             )
         return compatible
@@ -441,6 +450,7 @@ class LLMRuntime:
                     "num_hidden_layers": self._num_hidden_layers,
                     "num_attention_heads": self._num_attention_heads,
                     "num_prefix_layers": self._num_prefix_layers,
+                    "scheduler_num_prefix_layers": self._scheduler_num_prefix_layers,
                     "device": self._device,
                     "dtype": str(self._dtype),
                 },
@@ -478,6 +488,7 @@ class LLMRuntime:
                     "num_hidden_layers": self._num_hidden_layers,
                     "num_attention_heads": self._num_attention_heads,
                     "num_prefix_layers": self._num_prefix_layers,
+                    "scheduler_num_prefix_layers": self._scheduler_num_prefix_layers,
                     "device": self._device,
                     "dtype": str(self._dtype),
                 },

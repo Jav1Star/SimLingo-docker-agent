@@ -25,7 +25,8 @@ ADAPTION_TRAIN = os.getenv("LLM_ADAPTION_TRAIN", "false").strip().lower() in {"1
 LORA_ALPHA = int(os.getenv("LLM_LORA_ALPHA", "64"))
 LORA_R = int(os.getenv("LLM_LORA_R", "32"))
 LORA_DROPOUT = float(os.getenv("LLM_LORA_DROPOUT", "0.1"))
-NUM_PREFIX_LAYERS = 2
+NUM_PREFIX_LAYERS = int(os.getenv("LLM_NUM_PREFIX_LAYERS", "2"))
+SCHEDULER_NUM_PREFIX_LAYERS = int(os.getenv("LLM_SCHEDULER_NUM_PREFIX_LAYERS", "10"))
 LLM_SCHEDULER_TARGET = os.getenv(
     "LLM_SCHEDULER_TARGET",
     "simlingo_adaption_training.models.scheduler.simple_scheduler.SimpleScheduler_L",
@@ -73,6 +74,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             lora_r=LORA_R,
             lora_dropout=LORA_DROPOUT,
             num_prefix_layers=NUM_PREFIX_LAYERS,
+            scheduler_num_prefix_layers=SCHEDULER_NUM_PREFIX_LAYERS,
             scheduler_target=LLM_SCHEDULER_TARGET,
             scheduler_tau=LLM_SCHEDULER_TAU,
             scheduler_is_hard=LLM_SCHEDULER_IS_HARD,

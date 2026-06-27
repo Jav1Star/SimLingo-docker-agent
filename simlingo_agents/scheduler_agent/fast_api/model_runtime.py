@@ -20,7 +20,7 @@ from utils.logger_utils import get_logger
 logger = get_logger(__name__)
 
 
-INFERENCE_NUM_PREFIX_LAYERS = 2
+SCHEDULER_NUM_PREFIX_LAYERS = 10
 
 DEFAULT_RULE_BASED_CFG = {
     "k_warmup": 5,
@@ -83,10 +83,10 @@ class SchedulerRuntime:
         is_hard: bool = True,
         threshold: float = 0.5,
         bias: bool = True,
-        num_prefix_layers: int = 2,
+        num_prefix_layers: int = SCHEDULER_NUM_PREFIX_LAYERS,
         rule_based_cfg_json: Optional[str] = None,
     ) -> None:
-        num_prefix_layers = INFERENCE_NUM_PREFIX_LAYERS
+        num_prefix_layers = int(num_prefix_layers)
 
         if self.is_loaded and self._model_variant == model_variant:
             return
@@ -231,7 +231,7 @@ class SchedulerRuntime:
                 "Skipped %d incompatible %s weights while forcing num_prefix_layers=%d: %s",
                 len(skipped),
                 module_name,
-                INFERENCE_NUM_PREFIX_LAYERS,
+                int(getattr(module, "num_prefix_layers", SCHEDULER_NUM_PREFIX_LAYERS)),
                 preview,
             )
         return compatible
