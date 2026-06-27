@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: simlingo-scheduler-agent
+  namespace: simlingo-test
   labels:
     app: simlingo-scheduler-agent
 spec:
@@ -24,8 +25,9 @@ spec:
           effect: NoSchedule
       containers:
         - name: simlingo-scheduler-agent
-          image: REGISTRY_HOST/PROJECT/simlingo-scheduler-agent:0.1.2-mcp
-          imagePullPolicy: Always
+          image: simlingo-scheduler-agent:0.1.2
+          imagePullPolicy: IfNotPresent
+          terminationMessagePolicy: FallbackToLogsOnError
           ports:
             - containerPort: 9013
               name: http
@@ -35,16 +37,42 @@ spec:
             limits:
               nvidia.com/gpu: "1"
           env:
+            - name: SCHEDULER_MODEL_VARIANT
+              value: /app/models/InternVL2-1B
+            - name: SCHEDULER_CHECKPOINT_PATH
+              value: /app/checkpoints/simlingo_scheduler/pytorch_model.bin
+            - name: SCHEDULER_MODE
+              value: rule_based
+            - name: SCHEDULER_FIXED_BUDGET
+              value: "0.8"
+            - name: SCHEDULER_HISTORY_ALPHA
+              value: "0.6"
+            - name: SCHEDULER_DECISION_SHIFT_T_LAP
+              value: "0.2"
+            - name: SCHEDULER_TARGET
+              value: simlingo_adaption_training.models.scheduler.simple_scheduler.SimpleScheduler_L
+            - name: SCHEDULER_TAU
+              value: "5"
+            - name: SCHEDULER_IS_HARD
+              value: "true"
+            - name: SCHEDULER_THRESHOLD
+              value: "0.5"
+            - name: SCHEDULER_BIAS
+              value: "true"
+            - name: SCHEDULER_NUM_PREFIX_LAYERS
+              value: "10"
+            - name: SCHEDULER_RULE_BASED_CFG_JSON
+              value: ""
+            - name: SCHEDULER_PHASE
+              value: budget
             - name: NATS_SERVER_URL
               value: nats://nats:4222
-            # Phase 1: Budget 阶段输入与输出
             - name: SCHEDULER_BUDGET_IN_SUBJECT
               value: workflow.simlingo.encoded_tokens
             - name: SCHEDULER_BUDGET_IN_DURABLE
               value: workflow-simlingo-encoded-tokens
             - name: SCHEDULER_BUDGET_OUT_SUBJECT
               value: workflow.simlingo.llm_prefix_input
-            # Phase 2: Plan 阶段输入与输出
             - name: SCHEDULER_PLAN_IN_SUBJECT
               value: workflow.simlingo.llm_prefix_output
             - name: SCHEDULER_PLAN_IN_DURABLE
@@ -63,6 +91,7 @@ spec:
               port: http
             failureThreshold: 120
             periodSeconds: 10
+            timeoutSeconds: 10
           readinessProbe:
             httpGet:
               path: /health
@@ -70,11 +99,13 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 6
+            timeoutSeconds: 10
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: simlingo-scheduler-service
+  namespace: simlingo-test
 spec:
   selector:
     app: simlingo-scheduler-agent
@@ -82,6 +113,6 @@ spec:
     - name: http
       protocol: TCP
       port: 9013
-      nodePort: 30013
+      nodePort: 30113
       targetPort: 9013
   type: NodePort

@@ -1,20 +1,21 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: simlingo-llm-agent
+  name: simlingo-encoder-agent
+  namespace: simlingo-test
   labels:
-    app: simlingo-llm-agent
+    app: simlingo-encoder-agent
 spec:
   replicas: 1
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app: simlingo-llm-agent
+      app: simlingo-encoder-agent
   template:
     metadata:
       labels:
-        app: simlingo-llm-agent
+        app: simlingo-encoder-agent
     spec:
       nodeSelector:
         feature.node.kubernetes.io/pci-10de.present: "true"
@@ -23,11 +24,11 @@ spec:
           operator: Exists
           effect: NoSchedule
       containers:
-        - name: simlingo-llm-agent
-          image: REGISTRY_HOST/PROJECT/simlingo-llm-agent:0.1.2-mcp
-          imagePullPolicy: Always
+        - name: simlingo-encoder-agent
+          image: simlingo-encoder-agent:0.1.1
+          imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 9012
+            - containerPort: 9011
               name: http
           resources:
             requests:
@@ -35,22 +36,18 @@ spec:
             limits:
               nvidia.com/gpu: "1"
           env:
+            - name: ENCODER_MODEL_VARIANT
+              value: /app/models/InternVL2-1B
+            - name: ENCODER_CHECKPOINT_PATH
+              value: /app/checkpoints/simlingo_encoder/pytorch_model.bin
             - name: NATS_SERVER_URL
               value: nats://nats:4222
-            # Phase 1: Prefix 阶段输入与输出
-            - name: LLM_PREFIX_IN_SUBJECT
-              value: workflow.simlingo.llm_prefix_input
-            - name: LLM_PREFIX_IN_DURABLE
-              value: workflow-simlingo-llm-prefix-input
-            - name: LLM_PREFIX_OUT_SUBJECT
-              value: workflow.simlingo.llm_prefix_output
-            # Phase 2: Final 阶段输入与输出
-            - name: LLM_FINAL_IN_SUBJECT
-              value: workflow.simlingo.llm_final_input
-            - name: LLM_FINAL_IN_DURABLE
-              value: workflow-simlingo-llm-final-input
-            - name: LLM_FINAL_OUT_SUBJECT
-              value: workflow.simlingo.llm_output
+            - name: NATS_IN_SUBJECT
+              value: workflow.previousagent.result
+            - name: NATS_IN_DURABLE
+              value: workflow-previousagent-result
+            - name: NATS_OUT_SUBJECT
+              value: workflow.simlingo.encoded_tokens
             - name: NATS_STREAM
               value: WORKFLOW
             - name: NATS_STREAM_SUBJECTS
@@ -61,7 +58,7 @@ spec:
             httpGet:
               path: /health
               port: http
-            failureThreshold: 180
+            failureThreshold: 120
             periodSeconds: 10
           readinessProbe:
             httpGet:
@@ -74,14 +71,15 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: simlingo-llm-service
+  name: simlingo-encoder-service
+  namespace: simlingo-test
 spec:
   selector:
-    app: simlingo-llm-agent
+    app: simlingo-encoder-agent
   ports:
     - name: http
       protocol: TCP
-      port: 9012
-      nodePort: 30012
-      targetPort: 9012
+      port: 9011
+      nodePort: 30111
+      targetPort: 9011
   type: NodePort

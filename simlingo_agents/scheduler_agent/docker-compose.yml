@@ -37,7 +37,7 @@ services:
       SCHEDULER_PLAN_OUT_SUBJECT: ${SCHEDULER_PLAN_OUT_SUBJECT:-workflow.simlingo.llm_final_input}
       NATS_STREAM: ${NATS_STREAM:-WORKFLOW}
       NATS_STREAM_SUBJECTS: ${NATS_STREAM_SUBJECTS:-workflow.>}
-      NATS_JETSTREAM_DOMAIN: ${NATS_JETSTREAM_DOMAIN:-hub}
+      NATS_JETSTREAM_DOMAIN: ${NATS_JETSTREAM_DOMAIN:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     gpus: all

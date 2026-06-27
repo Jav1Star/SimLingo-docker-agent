@@ -615,7 +615,7 @@ class EvaluationSessionManager:
                 for item in os.getenv("NATS_STREAM_SUBJECTS", "workflow.>").split(",")
                 if item.strip()
             ],
-            "nats_jetstream_domain": os.getenv("NATS_JETSTREAM_DOMAIN", "hub"),
+            "nats_jetstream_domain": os.getenv("NATS_JETSTREAM_DOMAIN", ""),
         }
 
     def _probe_http_health(self, execute_url: str) -> dict[str, Any]:

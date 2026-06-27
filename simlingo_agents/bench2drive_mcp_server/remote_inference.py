@@ -53,7 +53,11 @@ class SplitAgentPipelineClient:
         self.nats_stream = nats_stream or os.getenv("NATS_STREAM", "WORKFLOW")
         raw_subjects = os.getenv("NATS_STREAM_SUBJECTS", "workflow.>")
         self.nats_stream_subjects = nats_stream_subjects or [item.strip() for item in raw_subjects.split(",") if item.strip()]
-        self.nats_jetstream_domain = nats_jetstream_domain or os.getenv("NATS_JETSTREAM_DOMAIN", "hub")
+        self.nats_jetstream_domain = (
+            nats_jetstream_domain
+            if nats_jetstream_domain is not None
+            else os.getenv("NATS_JETSTREAM_DOMAIN", "")
+        )
         self.http_timeout_sec = float(http_timeout_sec or os.getenv("SIMLINGO_AGENT_HTTP_TIMEOUT_SEC", "60"))
         self.nats_timeout_sec = float(nats_timeout_sec or os.getenv("SIMLINGO_AGENT_NATS_TIMEOUT_SEC", "120"))
         self.subject_prefix = (subject_prefix or os.getenv("SIMLINGO_MCP_SUBJECT_PREFIX", "workflow.mcp")).rstrip(".")
