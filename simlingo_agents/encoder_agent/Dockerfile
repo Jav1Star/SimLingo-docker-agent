@@ -54,7 +54,7 @@ ENV PYTHONPATH=/app \
     NATS_SERVER_URL=nats://host.docker.internal:4222 \
     NATS_IN_SUBJECT=workflow.previousagent.result \
     NATS_IN_DURABLE=workflow-previousagent-result \
-    NATS_OUT_SUBJECT=workflow.simlingo.encoded_tokens
+    NATS_OUT_SUBJECT=workflow.simlingo.scheduler_budget_input
 
 EXPOSE 9011
 

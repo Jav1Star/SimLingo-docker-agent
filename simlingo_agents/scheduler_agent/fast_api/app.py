@@ -3,6 +3,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import json
 import os
+import re
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -29,26 +30,34 @@ SCHEDULER_TAU = float(os.getenv("SCHEDULER_TAU", "5"))
 SCHEDULER_IS_HARD = os.getenv("SCHEDULER_IS_HARD", "true").strip().lower() in {"1", "true", "yes", "on"}
 SCHEDULER_THRESHOLD = float(os.getenv("SCHEDULER_THRESHOLD", "0.5"))
 SCHEDULER_BIAS = os.getenv("SCHEDULER_BIAS", "true").strip().lower() in {"1", "true", "yes", "on"}
-SCHEDULER_NUM_PREFIX_LAYERS = int(os.getenv("SCHEDULER_NUM_PREFIX_LAYERS", "2"))
+SCHEDULER_NUM_PREFIX_LAYERS = 2
 RULE_BASED_CFG_JSON = os.getenv("SCHEDULER_RULE_BASED_CFG_JSON", "").strip() or None
-SCHEDULER_PHASE = os.getenv("SCHEDULER_PHASE", "budget").strip().lower()
 
 NATS_SERVER_URL = os.getenv("NATS_SERVER_URL", "nats://host.docker.internal:4222")
 SCHEDULER_BUDGET_IN_SUBJECT = os.getenv(
     "SCHEDULER_BUDGET_IN_SUBJECT",
-    os.getenv("NATS_IN_SUBJECT", "workflow.simlingo.encoded_tokens"),
+    os.getenv("NATS_IN_SUBJECT", "workflow.simlingo.scheduler_budget_input"),
 )
 SCHEDULER_BUDGET_IN_DURABLE = os.getenv(
     "SCHEDULER_BUDGET_IN_DURABLE",
-    os.getenv("NATS_IN_DURABLE", "workflow-simlingo-encoded-tokens"),
+    os.getenv("NATS_IN_DURABLE", "workflow-simlingo-scheduler-budget-input"),
 )
 SCHEDULER_BUDGET_OUT_SUBJECT = os.getenv(
     "SCHEDULER_BUDGET_OUT_SUBJECT",
-    os.getenv("NATS_OUT_SUBJECT", "workflow.simlingo.llm_prefix_input"),
+    os.getenv("NATS_OUT_SUBJECT", "workflow.simlingo.scheduler_budget_output.llm_prefix_input"),
 )
-SCHEDULER_PLAN_IN_SUBJECT = os.getenv("SCHEDULER_PLAN_IN_SUBJECT", "workflow.simlingo.llm_prefix_output")
-SCHEDULER_PLAN_IN_DURABLE = os.getenv("SCHEDULER_PLAN_IN_DURABLE", "workflow-simlingo-llm-prefix-output")
-SCHEDULER_PLAN_OUT_SUBJECT = os.getenv("SCHEDULER_PLAN_OUT_SUBJECT", "workflow.simlingo.llm_final_input")
+SCHEDULER_PLAN_IN_SUBJECT = os.getenv(
+    "SCHEDULER_PLAN_IN_SUBJECT",
+    "workflow.simlingo.llm_prefix_output.scheduler_plan_input",
+)
+SCHEDULER_PLAN_IN_DURABLE = os.getenv(
+    "SCHEDULER_PLAN_IN_DURABLE",
+    "workflow-simlingo-llm-prefix-output-scheduler-plan-input",
+)
+SCHEDULER_PLAN_OUT_SUBJECT = os.getenv(
+    "SCHEDULER_PLAN_OUT_SUBJECT",
+    "workflow.simlingo.scheduler_plan_output.llm_final_input",
+)
 
 _nats_comm = NatsComm(servers=[NATS_SERVER_URL])
 
@@ -91,24 +100,48 @@ def _phase_default_routes(scheduler_phase: str) -> tuple[str, str, str]:
     return SCHEDULER_BUDGET_IN_SUBJECT, SCHEDULER_BUDGET_IN_DURABLE, SCHEDULER_BUDGET_OUT_SUBJECT
 
 
+def _subject_tokens(subject: str) -> set[str]:
+    normalized = re.sub(r"[^a-z0-9]+", "_", subject.lower()).strip("_")
+    parts = [part for part in normalized.split("_") if part]
+    tokens = set(parts)
+    for size in (2, 3):
+        tokens.update("_".join(parts[index : index + size]) for index in range(len(parts) - size + 1))
+    return tokens
+
+
+def _infer_scheduler_phase_from_subject(subject: str) -> str:
+    if subject == SCHEDULER_BUDGET_IN_SUBJECT:
+        return "budget"
+    if subject == SCHEDULER_PLAN_IN_SUBJECT:
+        return "plan"
+
+    tokens = _subject_tokens(subject)
+    if {"scheduler_budget", "budget_input", "encoded_tokens"} & tokens:
+        return "budget"
+    if {"scheduler_plan", "plan_input", "llm_prefix_output"} & tokens:
+        return "plan"
+
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            "Unable to infer scheduler phase from NATS subject "
+            f"'{subject}'. Include scheduler_budget or scheduler_plan in the subject name."
+        ),
+    )
+
+
 async def _receive_data_from_nats(
     nats_in_subject: str,
     nats_in_durable: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], str]:
     try:
-        messages = await _nats_comm.receive(
-            subject=nats_in_subject,
-            durable=nats_in_durable,
-            batch=1,
-            timeout_sec=5,
-        )
-        for message in messages:
-            logger.info("Received message on subject '%s'", nats_in_subject)
-            await message.ack()
-            return message.payload
+        message = await _nats_comm.receive_last(subject=nats_in_subject)
+        if message is not None:
+            logger.info("Received latest message on subject '%s'", message.subject)
+            return message.payload, message.subject
         raise HTTPException(
             status_code=504,
-            detail=f"No messages received on subject '{nats_in_subject}' within timeout",
+            detail=f"No messages found on subject '{nats_in_subject}'",
         )
     except Exception as exc:
         logger.exception("Error receiving message from NATS subject '%s'", nats_in_subject)
@@ -130,7 +163,7 @@ async def health() -> dict[str, Any]:
         "model_loaded": scheduler_runtime.is_loaded,
         "device": scheduler_runtime.device,
         "nats_server_url": NATS_SERVER_URL,
-        "scheduler_phase": SCHEDULER_PHASE,
+        "phase_source": "nats_subject",
         "budget_in_subject": SCHEDULER_BUDGET_IN_SUBJECT,
         "budget_out_subject": SCHEDULER_BUDGET_OUT_SUBJECT,
         "plan_in_subject": SCHEDULER_PLAN_IN_SUBJECT,
@@ -141,13 +174,15 @@ async def health() -> dict[str, Any]:
 async def agent_function(
     nats_in_subject: str,
     nats_in_durable: str,
-    nats_out_subject: str,
-    scheduler_phase: str = SCHEDULER_PHASE,
+    nats_out_subject: str | None = None,
 ) -> dict[str, Any]:
-    data = await _receive_data_from_nats(
+    data, received_subject = await _receive_data_from_nats(
         nats_in_subject=nats_in_subject,
         nats_in_durable=nats_in_durable,
     )
+    scheduler_phase = _infer_scheduler_phase_from_subject(received_subject)
+    _, _, default_out_subject = _phase_default_routes(scheduler_phase)
+    nats_out_subject = nats_out_subject or default_out_subject
     decoded_data = decode_structured_numpy(data)
 
     try:
@@ -176,23 +211,20 @@ async def agent_execute(message: dict[str, Any]) -> dict[str, Any]:
     task_request = A2ATaskRequest(**request_message.payload)
     metadata = getattr(task_request, "metadata", {}) or {}
 
-    scheduler_phase = str(metadata.get("scheduler_phase") or SCHEDULER_PHASE).strip().lower()
-    default_in_subject, default_in_durable, default_out_subject = _phase_default_routes(scheduler_phase)
-
     if "nats_in_subject" in metadata and metadata.get("nats_in_subject"):
         nats_in_subject = metadata["nats_in_subject"]
         nats_in_durable = metadata.get("nats_in_durable") or nats_in_subject.replace(".", "-")
     else:
+        default_in_subject, default_in_durable, _ = _phase_default_routes("budget")
         nats_in_subject = default_in_subject
         nats_in_durable = default_in_durable
 
-    nats_out_subject = metadata.get("nats_out_subject") or default_out_subject
+    nats_out_subject = metadata.get("nats_out_subject")
 
     result = await agent_function(
         nats_in_subject=nats_in_subject,
         nats_in_durable=nats_in_durable,
         nats_out_subject=nats_out_subject,
-        scheduler_phase=scheduler_phase,
     )
     task_response = A2ATaskResponse(
         task_id=task_request.task_id,

@@ -118,6 +118,10 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.total_inference_flops = 0
         self.inference_profiled_steps = 0
         self.flops_profile_errors = []
+        self.forward_latency_ms_values = []
+        self.forward_latency_ms_sum = 0.0
+        self.forward_latency_ms_max = 0.0
+        self.forward_latency_ms_count = 0
 
         if self.config.eval_route_as == -1:
             self.config.eval_route_as = self.model.route_as
@@ -1000,19 +1004,32 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         try:
             activities = [torch.profiler.ProfilerActivity.CPU]
+            start_event = None
+            end_event = None
+            latency_ms = None
             if torch.cuda.is_available():
                 activities.append(torch.profiler.ProfilerActivity.CUDA)
                 torch.cuda.synchronize()
+                start_event = torch.cuda.Event(enable_timing=True)
+                end_event = torch.cuda.Event(enable_timing=True)
+                start_event.record()
 
             with torch.profiler.profile(activities=activities, with_flops=True) as prof:
                 outputs = self.model(model_input, route_keys=[self.route_key])
 
             if torch.cuda.is_available():
+                end_event.record()
                 torch.cuda.synchronize()
+                latency_ms = float(start_event.elapsed_time(end_event))
 
             step_flops = sum(int(getattr(evt, "flops", 0) or 0) for evt in prof.key_averages())
             self.total_inference_flops += step_flops
             self.inference_profiled_steps += 1
+            if latency_ms is not None:
+                self.forward_latency_ms_values.append(latency_ms)
+                self.forward_latency_ms_sum += latency_ms
+                self.forward_latency_ms_max = max(self.forward_latency_ms_max, latency_ms)
+                self.forward_latency_ms_count += 1
             return outputs
         except Exception as exc:
             if len(self.flops_profile_errors) < 5:
@@ -1038,13 +1055,30 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             return
 
         total_flops = int(getattr(self, "total_inference_flops", 0))
+        profiled_steps = int(getattr(self, "inference_profiled_steps", 0))
+        avg_flops_per_step = (total_flops / profiled_steps) if profiled_steps > 0 else None
+        latency_count = int(getattr(self, "forward_latency_ms_count", 0))
+        latency_values = list(getattr(self, "forward_latency_ms_values", []))
+        avg_forward_latency_ms = None if latency_count == 0 else float(getattr(self, "forward_latency_ms_sum", 0.0)) / latency_count
+        max_forward_latency_ms = None if latency_count == 0 else float(getattr(self, "forward_latency_ms_max", 0.0))
+        p50_forward_latency_ms = None if latency_count == 0 else float(np.percentile(latency_values, 50))
+        p90_forward_latency_ms = None if latency_count == 0 else float(np.percentile(latency_values, 90))
         summary = {
             "route_id": os.getenv("SIMLINGO_EVAL_ROUTE_ID"),
             "route_key": getattr(self, "route_key", None),
             "record_tflops": bool(getattr(self, "record_tflops", False)),
-            "inference_profiled_steps": int(getattr(self, "inference_profiled_steps", 0)),
+            "compute_steps": profiled_steps,
+            "inference_profiled_steps": profiled_steps,
             "total_inference_flops": total_flops,
             "total_inference_tflops": total_flops / 1e12,
+            "avg_inference_flops_per_step": avg_flops_per_step,
+            "avg_inference_tflops_per_step": None if avg_flops_per_step is None else avg_flops_per_step / 1e12,
+            "forward_latency_ms_values": latency_values,
+            "forward_latency_ms_count": latency_count,
+            "avg_forward_latency_ms": avg_forward_latency_ms,
+            "max_forward_latency_ms": max_forward_latency_ms,
+            "p50_forward_latency_ms": p50_forward_latency_ms,
+            "p90_forward_latency_ms": p90_forward_latency_ms,
             "profiler": "torch.profiler.profile(with_flops=True)",
             "note": "FLOPs are accumulated over LingoAgent model forward calls for this route.",
             "profile_errors": getattr(self, "flops_profile_errors", []),

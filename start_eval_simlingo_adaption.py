@@ -116,6 +116,8 @@ def build_eval_config(args, no_server_launch):
     eval_yaml = load_eval_yaml(args.eval_config)
     cfg = eval_yaml.get("eval", eval_yaml)
     budget_mode, fixed_budget, rule_based_cfg = parse_budget_settings(eval_yaml)
+    config_route_ids = cfg.get("route_ids", eval_yaml.get("route_ids"))
+    route_ids = parse_route_id_list(args.route_id) or parse_route_id_list(config_route_ids)
 
     required_keys = [
         "agent",
@@ -154,7 +156,7 @@ def build_eval_config(args, no_server_launch):
         "budget_mode": budget_mode,
         "fixed_budget": fixed_budget,
         "rule_based_cfg": rule_based_cfg,
-        "route_ids": parse_route_id_list(args.route_id),
+        "route_ids": route_ids,
     }
     return eval_cfg
 

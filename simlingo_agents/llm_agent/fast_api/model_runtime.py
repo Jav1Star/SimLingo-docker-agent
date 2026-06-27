@@ -19,6 +19,8 @@ from utils.logger_utils import get_logger
 logger = get_logger(__name__)
 
 
+INFERENCE_NUM_PREFIX_LAYERS = 2
+
 DRIVING_SPECIAL_TOKENS = [
     "<WAYPOINTS>",
     "<WAYPOINTS_DIFF>",
@@ -83,6 +85,8 @@ class LLMRuntime:
         scheduler_threshold: float = 0.5,
         scheduler_bias: bool = True,
     ) -> None:
+        num_prefix_layers = INFERENCE_NUM_PREFIX_LAYERS
+
         if self.is_loaded and self._model_variant == model_variant:
             return
 
@@ -275,6 +279,12 @@ class LLMRuntime:
                     scheduler_state.setdefault(key[len(prefix):], value)
                     break
         if scheduler_state:
+            scheduler_state = self._filter_compatible_state_dict(
+                scheduler_state,
+                budget_encoder,
+                module_name="budget encoder",
+            )
+        if scheduler_state:
             missing, unexpected = budget_encoder.load_state_dict(scheduler_state, strict=False)
             logger.info(
                 "Loaded budget encoder partial weights: missing=%d unexpected=%d",
@@ -282,7 +292,38 @@ class LLMRuntime:
                 len(unexpected),
             )
         else:
-            logger.warning("No scheduler weights found with prefixes %s", scheduler_prefixes)
+            logger.warning("No compatible scheduler weights found with prefixes %s", scheduler_prefixes)
+
+    def _filter_compatible_state_dict(
+        self,
+        state_dict: dict[str, Any],
+        module: torch.nn.Module,
+        *,
+        module_name: str,
+    ) -> dict[str, Any]:
+        target_state = module.state_dict()
+        compatible: dict[str, Any] = {}
+        skipped: list[str] = []
+        for key, value in state_dict.items():
+            target_value = target_state.get(key)
+            if target_value is None:
+                skipped.append(f"{key}: unexpected")
+                continue
+            if tuple(value.shape) != tuple(target_value.shape):
+                skipped.append(f"{key}: checkpoint{tuple(value.shape)} != runtime{tuple(target_value.shape)}")
+                continue
+            compatible[key] = value
+
+        if skipped:
+            preview = "; ".join(skipped[:5])
+            logger.warning(
+                "Skipped %d incompatible %s weights while forcing num_prefix_layers=%d: %s",
+                len(skipped),
+                module_name,
+                INFERENCE_NUM_PREFIX_LAYERS,
+                preview,
+            )
+        return compatible
 
     def _require_loaded(self) -> tuple[LLM, DrivingAdaptor, Any, torch.nn.Module]:
         if self._llm is None or self._driving_adaptor is None or self._tokenizer is None or self._budget_encoder is None:

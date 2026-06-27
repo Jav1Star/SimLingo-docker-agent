@@ -59,16 +59,18 @@ ENV PYTHONPATH=/app \
     LLM_LORA_R=32 \
     LLM_LORA_DROPOUT=0.1 \
     LLM_NUM_PREFIX_LAYERS=2 \
-    LLM_PHASE=prefix \
     LLM_SCHEDULER_TARGET=simlingo_adaption_training.models.scheduler.simple_scheduler.SimpleScheduler_L \
     LLM_SCHEDULER_TAU=5 \
     LLM_SCHEDULER_IS_HARD=true \
     LLM_SCHEDULER_THRESHOLD=0.5 \
     LLM_SCHEDULER_BIAS=true \
     NATS_SERVER_URL=nats://host.docker.internal:4222 \
-    NATS_IN_SUBJECT=workflow.simlingo.llm_prefix_input \
-    NATS_IN_DURABLE=workflow-simlingo-llm-prefix-input \
-    NATS_OUT_SUBJECT=workflow.simlingo.llm_prefix_output
+    LLM_PREFIX_IN_SUBJECT=workflow.simlingo.scheduler_budget_output.llm_prefix_input \
+    LLM_PREFIX_IN_DURABLE=workflow-simlingo-scheduler-budget-output-llm-prefix-input \
+    LLM_PREFIX_OUT_SUBJECT=workflow.simlingo.llm_prefix_output.scheduler_plan_input \
+    LLM_FINAL_IN_SUBJECT=workflow.simlingo.scheduler_plan_output.llm_final_input \
+    LLM_FINAL_IN_DURABLE=workflow-simlingo-scheduler-plan-output-llm-final-input \
+    LLM_FINAL_OUT_SUBJECT=workflow.simlingo.llm_final_output
 
 EXPOSE 9012
 

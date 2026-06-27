@@ -20,7 +20,7 @@ CHECKPOINT_PATH = os.getenv("ENCODER_CHECKPOINT_PATH", "").strip() or None
 NATS_SERVER_URL = os.getenv("NATS_SERVER_URL", "nats://host.docker.internal:4222")
 NATS_IN_SUBJECT = os.getenv("NATS_IN_SUBJECT", "workflow.previousagent.result")
 NATS_IN_DURABLE = os.getenv("NATS_IN_DURABLE", "workflow-previousagent-result")
-NATS_OUT_SUBJECT = os.getenv("NATS_OUT_SUBJECT", os.getenv("NATS_SUBJECT", "workflow.simlingo.encoded_tokens"))
+NATS_OUT_SUBJECT = os.getenv("NATS_OUT_SUBJECT", os.getenv("NATS_SUBJECT", "workflow.simlingo.scheduler_budget_input"))
 
 _nats_comm = NatsComm(servers=[NATS_SERVER_URL])
 
@@ -51,19 +51,13 @@ async def _receive_data_from_nats(
     nats_in_durable: str = NATS_IN_DURABLE,
 ) -> dict[str, Any]:
     try:
-        messages = await _nats_comm.receive(
-            subject=nats_in_subject,
-            durable=nats_in_durable,
-            batch=1,
-            timeout_sec=5,
-        )
-        for message in messages:
-            logger.info("Received message on subject '%s'", nats_in_subject)
-            await message.ack()
+        message = await _nats_comm.receive_last(subject=nats_in_subject)
+        if message is not None:
+            logger.info("Received latest message on subject '%s'", message.subject)
             return message.payload
         raise HTTPException(
             status_code=504,
-            detail=f"No messages received on subject '{nats_in_subject}' within timeout",
+            detail=f"No messages found on subject '{nats_in_subject}'",
         )
     except Exception as exc:
         logger.exception("Error receiving message from NATS subject '%s'", nats_in_subject)

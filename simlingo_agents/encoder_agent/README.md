@@ -90,7 +90,7 @@ curl -X POST http://127.0.0.1:9011/a2a/execute \
       "task_description": "Run SimLingo encoder",
       "metadata": {
         "nats_in_subject": "workflow.previousagent.result",
-        "nats_out_subject": "workflow.simlingo.encoded_tokens"
+        "nats_out_subject": "workflow.simlingo.scheduler_budget_input"
       }
     }
   }'

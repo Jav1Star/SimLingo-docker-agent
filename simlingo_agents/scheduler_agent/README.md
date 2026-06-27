@@ -7,10 +7,10 @@
 
 默认链路：
 
-- `budget` 阶段输入：`workflow.simlingo.encoded_tokens`
-- `budget` 阶段输出：`workflow.simlingo.llm_prefix_input`
-- `plan` 阶段输入：`workflow.simlingo.llm_prefix_output`
-- `plan` 阶段输出：`workflow.simlingo.llm_final_input`
+- `budget` 阶段输入：`workflow.simlingo.scheduler_budget_input`
+- `budget` 阶段输出：`workflow.simlingo.scheduler_budget_output.llm_prefix_input`
+- `plan` 阶段输入：`workflow.simlingo.llm_prefix_output.scheduler_plan_input`
+- `plan` 阶段输出：`workflow.simlingo.scheduler_plan_output.llm_final_input`
 - HTTP 触发：`POST /a2a/execute`
 - 默认端口：`9013`
 
@@ -18,4 +18,4 @@
 
 - `scheduler_agent` 不直接控制 LLM 内部推理。
 - 它只输出 `budget_value` 或 `execution_plan`，再交由 `llm_agent` 执行对应阶段。
-- `POST /a2a/execute` 时可以通过 `metadata.scheduler_phase` 选择 `budget` 或 `plan`。
+- `POST /a2a/execute` 不再读取 `metadata.scheduler_phase`；agent 会根据实际收到的 NATS subject 自动推断 `budget` 或 `plan`。

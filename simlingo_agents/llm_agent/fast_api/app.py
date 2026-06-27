@@ -3,6 +3,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import json
 import os
+import re
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -24,8 +25,7 @@ ADAPTION_TRAIN = os.getenv("LLM_ADAPTION_TRAIN", "false").strip().lower() in {"1
 LORA_ALPHA = int(os.getenv("LLM_LORA_ALPHA", "64"))
 LORA_R = int(os.getenv("LLM_LORA_R", "32"))
 LORA_DROPOUT = float(os.getenv("LLM_LORA_DROPOUT", "0.1"))
-NUM_PREFIX_LAYERS = int(os.getenv("LLM_NUM_PREFIX_LAYERS", "2"))
-LLM_PHASE = os.getenv("LLM_PHASE", "prefix").strip().lower()
+NUM_PREFIX_LAYERS = 2
 LLM_SCHEDULER_TARGET = os.getenv(
     "LLM_SCHEDULER_TARGET",
     "simlingo_adaption_training.models.scheduler.simple_scheduler.SimpleScheduler_L",
@@ -36,12 +36,24 @@ LLM_SCHEDULER_THRESHOLD = float(os.getenv("LLM_SCHEDULER_THRESHOLD", "0.5"))
 LLM_SCHEDULER_BIAS = os.getenv("LLM_SCHEDULER_BIAS", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 NATS_SERVER_URL = os.getenv("NATS_SERVER_URL", "nats://host.docker.internal:4222")
-LLM_PREFIX_IN_SUBJECT = os.getenv("LLM_PREFIX_IN_SUBJECT", os.getenv("NATS_IN_SUBJECT", "workflow.simlingo.llm_prefix_input"))
-LLM_PREFIX_IN_DURABLE = os.getenv("LLM_PREFIX_IN_DURABLE", os.getenv("NATS_IN_DURABLE", "workflow-simlingo-llm-prefix-input"))
-LLM_PREFIX_OUT_SUBJECT = os.getenv("LLM_PREFIX_OUT_SUBJECT", os.getenv("NATS_OUT_SUBJECT", "workflow.simlingo.llm_prefix_output"))
-LLM_FINAL_IN_SUBJECT = os.getenv("LLM_FINAL_IN_SUBJECT", "workflow.simlingo.llm_final_input")
-LLM_FINAL_IN_DURABLE = os.getenv("LLM_FINAL_IN_DURABLE", "workflow-simlingo-llm-final-input")
-LLM_FINAL_OUT_SUBJECT = os.getenv("LLM_FINAL_OUT_SUBJECT", "workflow.simlingo.llm_output")
+LLM_PREFIX_IN_SUBJECT = os.getenv(
+    "LLM_PREFIX_IN_SUBJECT",
+    os.getenv("NATS_IN_SUBJECT", "workflow.simlingo.scheduler_budget_output.llm_prefix_input"),
+)
+LLM_PREFIX_IN_DURABLE = os.getenv(
+    "LLM_PREFIX_IN_DURABLE",
+    os.getenv("NATS_IN_DURABLE", "workflow-simlingo-scheduler-budget-output-llm-prefix-input"),
+)
+LLM_PREFIX_OUT_SUBJECT = os.getenv(
+    "LLM_PREFIX_OUT_SUBJECT",
+    os.getenv("NATS_OUT_SUBJECT", "workflow.simlingo.llm_prefix_output.scheduler_plan_input"),
+)
+LLM_FINAL_IN_SUBJECT = os.getenv("LLM_FINAL_IN_SUBJECT", "workflow.simlingo.scheduler_plan_output.llm_final_input")
+LLM_FINAL_IN_DURABLE = os.getenv(
+    "LLM_FINAL_IN_DURABLE",
+    "workflow-simlingo-scheduler-plan-output-llm-final-input",
+)
+LLM_FINAL_OUT_SUBJECT = os.getenv("LLM_FINAL_OUT_SUBJECT", "workflow.simlingo.llm_final_output")
 
 _nats_comm = NatsComm(servers=[NATS_SERVER_URL])
 
@@ -86,24 +98,48 @@ def _phase_default_routes(llm_phase: str) -> tuple[str, str, str]:
     return LLM_PREFIX_IN_SUBJECT, LLM_PREFIX_IN_DURABLE, LLM_PREFIX_OUT_SUBJECT
 
 
+def _subject_tokens(subject: str) -> set[str]:
+    normalized = re.sub(r"[^a-z0-9]+", "_", subject.lower()).strip("_")
+    parts = [part for part in normalized.split("_") if part]
+    tokens = set(parts)
+    for size in (2, 3):
+        tokens.update("_".join(parts[index : index + size]) for index in range(len(parts) - size + 1))
+    return tokens
+
+
+def _infer_llm_phase_from_subject(subject: str) -> str:
+    if subject == LLM_PREFIX_IN_SUBJECT:
+        return "prefix"
+    if subject == LLM_FINAL_IN_SUBJECT:
+        return "final"
+
+    tokens = _subject_tokens(subject)
+    if {"llm_prefix", "prefix_input"} & tokens:
+        return "prefix"
+    if {"llm_final", "final_input"} & tokens:
+        return "final"
+
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            "Unable to infer LLM phase from NATS subject "
+            f"'{subject}'. Include llm_prefix or llm_final in the subject name."
+        ),
+    )
+
+
 async def _receive_data_from_nats(
     nats_in_subject: str,
     nats_in_durable: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], str]:
     try:
-        messages = await _nats_comm.receive(
-            subject=nats_in_subject,
-            durable=nats_in_durable,
-            batch=1,
-            timeout_sec=5,
-        )
-        for message in messages:
-            logger.info("Received message on subject '%s'", nats_in_subject)
-            await message.ack()
-            return message.payload
+        message = await _nats_comm.receive_last(subject=nats_in_subject)
+        if message is not None:
+            logger.info("Received latest message on subject '%s'", message.subject)
+            return message.payload, message.subject
         raise HTTPException(
             status_code=504,
-            detail=f"No messages received on subject '{nats_in_subject}' within timeout",
+            detail=f"No messages found on subject '{nats_in_subject}'",
         )
     except Exception as exc:
         logger.exception("Error receiving message from NATS subject '%s'", nats_in_subject)
@@ -125,7 +161,7 @@ async def health() -> dict[str, Any]:
         "model_loaded": llm_runtime.is_loaded,
         "device": llm_runtime.device,
         "nats_server_url": NATS_SERVER_URL,
-        "llm_phase": LLM_PHASE,
+        "phase_source": "nats_subject",
         "prefix_in_subject": LLM_PREFIX_IN_SUBJECT,
         "prefix_out_subject": LLM_PREFIX_OUT_SUBJECT,
         "final_in_subject": LLM_FINAL_IN_SUBJECT,
@@ -136,13 +172,15 @@ async def health() -> dict[str, Any]:
 async def agent_function(
     nats_in_subject: str,
     nats_in_durable: str,
-    nats_out_subject: str,
-    llm_phase: str = LLM_PHASE,
+    nats_out_subject: str | None = None,
 ) -> dict[str, Any]:
-    data = await _receive_data_from_nats(
+    data, received_subject = await _receive_data_from_nats(
         nats_in_subject=nats_in_subject,
         nats_in_durable=nats_in_durable,
     )
+    llm_phase = _infer_llm_phase_from_subject(received_subject)
+    _, _, default_out_subject = _phase_default_routes(llm_phase)
+    nats_out_subject = nats_out_subject or default_out_subject
     decoded_data = decode_structured_numpy(data)
 
     try:
@@ -171,23 +209,20 @@ async def agent_execute(message: dict[str, Any]) -> dict[str, Any]:
     task_request = A2ATaskRequest(**request_message.payload)
     metadata = getattr(task_request, "metadata", {}) or {}
 
-    llm_phase = str(metadata.get("llm_phase") or LLM_PHASE).strip().lower()
-    default_in_subject, default_in_durable, default_out_subject = _phase_default_routes(llm_phase)
-
     if "nats_in_subject" in metadata and metadata.get("nats_in_subject"):
         nats_in_subject = metadata["nats_in_subject"]
         nats_in_durable = metadata.get("nats_in_durable") or nats_in_subject.replace(".", "-")
     else:
+        default_in_subject, default_in_durable, _ = _phase_default_routes("prefix")
         nats_in_subject = default_in_subject
         nats_in_durable = default_in_durable
 
-    nats_out_subject = metadata.get("nats_out_subject") or default_out_subject
+    nats_out_subject = metadata.get("nats_out_subject")
 
     result = await agent_function(
         nats_in_subject=nats_in_subject,
         nats_in_durable=nats_in_durable,
         nats_out_subject=nats_out_subject,
-        llm_phase=llm_phase,
     )
     task_response = A2ATaskResponse(
         task_id=task_request.task_id,
