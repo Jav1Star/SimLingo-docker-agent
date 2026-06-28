@@ -114,6 +114,14 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             "last_decision": {},
             "last_update": {},
         }
+        self.record_tflops = os.getenv("SIMLINGO_EVAL_RECORD_TFLOPS", "1").strip().lower() not in {"0", "false", "no", "off"}
+        self.total_inference_flops = 0
+        self.inference_profiled_steps = 0
+        self.flops_profile_errors = []
+        self.forward_latency_ms_values = []
+        self.forward_latency_ms_sum = 0.0
+        self.forward_latency_ms_max = 0.0
+        self.forward_latency_ms_count = 0
 
         if self.config.eval_route_as == -1:
             self.config.eval_route_as = self.model.route_as
@@ -763,7 +771,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         # initialize DrivingInput with dict self.DrivingInput
         model_input = DrivingInput(**self.DrivingInput)
-        pred_speed_wps, pred_route, language = self.model(model_input, route_keys=[self.route_key])
+        pred_speed_wps, pred_route, language = self._profile_model_forward(model_input)
         self.eval_budget = copy.deepcopy(getattr(self.model, "eval_budget", self.eval_budget))
         pred_speed_wps = pred_speed_wps.float() if pred_speed_wps is not None else None
         pred_route = pred_route.float() if pred_route is not None else None
@@ -945,6 +953,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         The leaderboard client doesn't properly clear up the agent after the route finishes so we need to do it here.
         Also writes logging files to disk.
         """
+        self._write_tflops_summary()
         if hasattr(self, "model") and hasattr(self.model, "decision_shift_state"):
             self.model.decision_shift_state = {}
         del self.model
@@ -988,6 +997,96 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         except Exception:
             value = 1.0
         return float(np.clip(value, 0.0, 1.0))
+
+    def _profile_model_forward(self, model_input):
+        if not self.record_tflops:
+            return self.model(model_input, route_keys=[self.route_key])
+
+        try:
+            activities = [torch.profiler.ProfilerActivity.CPU]
+            start_event = None
+            end_event = None
+            latency_ms = None
+            if torch.cuda.is_available():
+                activities.append(torch.profiler.ProfilerActivity.CUDA)
+                torch.cuda.synchronize()
+                start_event = torch.cuda.Event(enable_timing=True)
+                end_event = torch.cuda.Event(enable_timing=True)
+                start_event.record()
+
+            with torch.profiler.profile(activities=activities, with_flops=True) as prof:
+                outputs = self.model(model_input, route_keys=[self.route_key])
+
+            if torch.cuda.is_available():
+                end_event.record()
+                torch.cuda.synchronize()
+                latency_ms = float(start_event.elapsed_time(end_event))
+
+            step_flops = sum(int(getattr(evt, "flops", 0) or 0) for evt in prof.key_averages())
+            self.total_inference_flops += step_flops
+            self.inference_profiled_steps += 1
+            if latency_ms is not None:
+                self.forward_latency_ms_values.append(latency_ms)
+                self.forward_latency_ms_sum += latency_ms
+                self.forward_latency_ms_max = max(self.forward_latency_ms_max, latency_ms)
+                self.forward_latency_ms_count += 1
+            return outputs
+        except Exception as exc:
+            if len(self.flops_profile_errors) < 5:
+                self.flops_profile_errors.append(str(exc))
+            return self.model(model_input, route_keys=[self.route_key])
+
+    def _resolve_tflops_output_path(self):
+        result_file = os.getenv("SIMLINGO_EVAL_RESULT_FILE", "").strip()
+        if result_file:
+            result_path = Path(result_file)
+            if result_path.name.endswith("_res.json"):
+                return result_path.with_name(result_path.name.replace("_res.json", "_tflops.json"))
+            return result_path.with_suffix(".tflops.json")
+
+        save_path = getattr(self, "save_path", None)
+        if save_path is not None:
+            return Path(save_path) / "route_tflops.json"
+        return None
+
+    def _write_tflops_summary(self):
+        output_path = self._resolve_tflops_output_path()
+        if output_path is None:
+            return
+
+        total_flops = int(getattr(self, "total_inference_flops", 0))
+        profiled_steps = int(getattr(self, "inference_profiled_steps", 0))
+        avg_flops_per_step = (total_flops / profiled_steps) if profiled_steps > 0 else None
+        latency_count = int(getattr(self, "forward_latency_ms_count", 0))
+        latency_values = list(getattr(self, "forward_latency_ms_values", []))
+        avg_forward_latency_ms = None if latency_count == 0 else float(getattr(self, "forward_latency_ms_sum", 0.0)) / latency_count
+        max_forward_latency_ms = None if latency_count == 0 else float(getattr(self, "forward_latency_ms_max", 0.0))
+        p50_forward_latency_ms = None if latency_count == 0 else float(np.percentile(latency_values, 50))
+        p90_forward_latency_ms = None if latency_count == 0 else float(np.percentile(latency_values, 90))
+        summary = {
+            "route_id": os.getenv("SIMLINGO_EVAL_ROUTE_ID"),
+            "route_key": getattr(self, "route_key", None),
+            "record_tflops": bool(getattr(self, "record_tflops", False)),
+            "compute_steps": profiled_steps,
+            "inference_profiled_steps": profiled_steps,
+            "total_inference_flops": total_flops,
+            "total_inference_tflops": total_flops / 1e12,
+            "avg_inference_flops_per_step": avg_flops_per_step,
+            "avg_inference_tflops_per_step": None if avg_flops_per_step is None else avg_flops_per_step / 1e12,
+            "forward_latency_ms_values": latency_values,
+            "forward_latency_ms_count": latency_count,
+            "avg_forward_latency_ms": avg_forward_latency_ms,
+            "max_forward_latency_ms": max_forward_latency_ms,
+            "p50_forward_latency_ms": p50_forward_latency_ms,
+            "p90_forward_latency_ms": p90_forward_latency_ms,
+            "profiler": "torch.profiler.profile(with_flops=True)",
+            "note": "FLOPs are accumulated over LingoAgent model forward calls for this route.",
+            "profile_errors": getattr(self, "flops_profile_errors", []),
+        }
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=4)
 
 # Filter Functions
 def bicycle_model_forward(x, dt, steer, throttle, brake):

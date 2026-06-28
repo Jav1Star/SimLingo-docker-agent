@@ -9,7 +9,7 @@ services:
         BASE_IMAGE: ${BASE_IMAGE:-nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
         PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-https://download.pytorch.org/whl/cu128}
-    image: simlingo-scheduler-agent:0.1.0
+    image: simlingo-scheduler-agent:0.2.0
     container_name: simlingo-scheduler-agent
     ports:
       - "9013:9013"
@@ -25,16 +25,15 @@ services:
       SCHEDULER_IS_HARD: ${SCHEDULER_IS_HARD:-true}
       SCHEDULER_THRESHOLD: ${SCHEDULER_THRESHOLD:-0.5}
       SCHEDULER_BIAS: ${SCHEDULER_BIAS:-true}
-      SCHEDULER_NUM_PREFIX_LAYERS: ${SCHEDULER_NUM_PREFIX_LAYERS:-2}
+      SCHEDULER_NUM_PREFIX_LAYERS: "10"
       SCHEDULER_RULE_BASED_CFG_JSON: ${SCHEDULER_RULE_BASED_CFG_JSON:-}
-      SCHEDULER_PHASE: ${SCHEDULER_PHASE:-budget}
       NATS_SERVER_URL: ${NATS_SERVER_URL:-nats://host.docker.internal:4222}
-      SCHEDULER_BUDGET_IN_SUBJECT: ${SCHEDULER_BUDGET_IN_SUBJECT:-workflow.simlingo.encoded_tokens}
-      SCHEDULER_BUDGET_IN_DURABLE: ${SCHEDULER_BUDGET_IN_DURABLE:-workflow-simlingo-encoded-tokens}
-      SCHEDULER_BUDGET_OUT_SUBJECT: ${SCHEDULER_BUDGET_OUT_SUBJECT:-workflow.simlingo.llm_prefix_input}
-      SCHEDULER_PLAN_IN_SUBJECT: ${SCHEDULER_PLAN_IN_SUBJECT:-workflow.simlingo.llm_prefix_output}
-      SCHEDULER_PLAN_IN_DURABLE: ${SCHEDULER_PLAN_IN_DURABLE:-workflow-simlingo-llm-prefix-output}
-      SCHEDULER_PLAN_OUT_SUBJECT: ${SCHEDULER_PLAN_OUT_SUBJECT:-workflow.simlingo.llm_final_input}
+      SCHEDULER_BUDGET_IN_SUBJECT: ${SCHEDULER_BUDGET_IN_SUBJECT:-workflow.simlingo.scheduler_budget_input}
+      SCHEDULER_BUDGET_IN_DURABLE: ${SCHEDULER_BUDGET_IN_DURABLE:-workflow-simlingo-scheduler-budget-input}
+      SCHEDULER_BUDGET_OUT_SUBJECT: ${SCHEDULER_BUDGET_OUT_SUBJECT:-workflow.simlingo.scheduler_budget_output.llm_prefix_input}
+      SCHEDULER_PLAN_IN_SUBJECT: ${SCHEDULER_PLAN_IN_SUBJECT:-workflow.simlingo.llm_prefix_output.scheduler_plan_input}
+      SCHEDULER_PLAN_IN_DURABLE: ${SCHEDULER_PLAN_IN_DURABLE:-workflow-simlingo-llm-prefix-output-scheduler-plan-input}
+      SCHEDULER_PLAN_OUT_SUBJECT: ${SCHEDULER_PLAN_OUT_SUBJECT:-workflow.simlingo.scheduler_plan_output.llm_final_input}
       NATS_STREAM: ${NATS_STREAM:-WORKFLOW}
       NATS_STREAM_SUBJECTS: ${NATS_STREAM_SUBJECTS:-workflow.>}
       NATS_JETSTREAM_DOMAIN: ${NATS_JETSTREAM_DOMAIN:-}

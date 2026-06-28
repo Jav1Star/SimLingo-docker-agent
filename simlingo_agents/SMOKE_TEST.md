@@ -89,8 +89,8 @@ curl -X POST http://127.0.0.1:9012/a2a/execute \
 
 ```bash
 sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py fetch-once \
-  --subject workflow.simlingo.encoded_tokens \
-  --durable workflow-simlingo-encoded-tokens-check \
+  --subject workflow.simlingo.scheduler_budget_input \
+  --durable workflow-simlingo-scheduler-budget-input-check \
   --summary
 ```
 
@@ -98,8 +98,8 @@ sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py fetch-on
 
 ```bash
 sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py fetch-once \
-  --subject workflow.simlingo.llm_prefix_input \
-  --durable workflow-simlingo-llm-prefix-input-check \
+  --subject workflow.simlingo.scheduler_budget_output.llm_prefix_input \
+  --durable workflow-simlingo-scheduler-budget-output-llm-prefix-input-check \
   --summary
 ```
 
@@ -107,8 +107,8 @@ sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py fetch-on
 
 ```bash
 sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py fetch-once \
-  --subject workflow.simlingo.llm_prefix_output \
-  --durable workflow-simlingo-llm-prefix-output-check \
+  --subject workflow.simlingo.llm_prefix_output.scheduler_plan_input \
+  --durable workflow-simlingo-llm-prefix-output-scheduler-plan-input-check \
   --summary
 ```
 
@@ -116,8 +116,8 @@ sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py fetch-on
 
 ```bash
 sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py fetch-once \
-  --subject workflow.simlingo.llm_final_input \
-  --durable workflow-simlingo-llm-final-input-check \
+  --subject workflow.simlingo.scheduler_plan_output.llm_final_input \
+  --durable workflow-simlingo-scheduler-plan-output-llm-final-input-check \
   --summary
 ```
 
@@ -125,8 +125,8 @@ sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py fetch-on
 
 ```bash
 sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py fetch-once \
-  --subject workflow.simlingo.llm_output \
-  --durable workflow-simlingo-llm-output-check \
+  --subject workflow.simlingo.llm_final_output \
+  --durable workflow-simlingo-llm-final-output-check \
   --summary
 ```
 
@@ -134,8 +134,8 @@ sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py fetch-on
 
 ```bash
 sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py fetch-once \
-  --subject workflow.simlingo.llm_output \
-  --durable workflow-simlingo-llm-output-check-decode \
+  --subject workflow.simlingo.llm_final_output \
+  --durable workflow-simlingo-llm-final-output-check-decode \
   --decode \
   --summary
 ```
@@ -149,24 +149,24 @@ curl -X POST http://127.0.0.1:9013/a2a/execute -H 'Content-Type: application/jso
 curl -X POST http://127.0.0.1:9012/a2a/execute -H 'Content-Type: application/json' --data @simlingo_agents/smoke_test/llm_prefix_execute.json
 curl -X POST http://127.0.0.1:9013/a2a/execute -H 'Content-Type: application/json' --data @simlingo_agents/smoke_test/scheduler_plan_execute.json
 curl -X POST http://127.0.0.1:9012/a2a/execute -H 'Content-Type: application/json' --data @simlingo_agents/smoke_test/llm_final_execute.json
-sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py fetch-once --subject workflow.simlingo.llm_output --durable workflow-simlingo-llm-output-check --summary
+sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py fetch-once --subject workflow.simlingo.llm_final_output --durable workflow-simlingo-llm-final-output-check --summary
 ```
 
 ## 7. 预期结果
 
-- `encoder_agent` 返回 `status=success`，并向 `workflow.simlingo.encoded_tokens` 发布 `encoded_payload`
-- `scheduler_agent` 的 `budget` 阶段返回 `status=success`，并向 `workflow.simlingo.llm_prefix_input` 发布：
+- `encoder_agent` 返回 `status=success`，并向 `workflow.simlingo.scheduler_budget_input` 发布 `encoded_payload`
+- `scheduler_agent` 的 `budget` 阶段返回 `status=success`，并向 `workflow.simlingo.scheduler_budget_output.llm_prefix_input` 发布：
   - `encoded_payload`
   - `budget_value`
-- `llm_agent` 的 `prefix` 阶段返回 `status=success`，并向 `workflow.simlingo.llm_prefix_output` 发布：
+- `llm_agent` 的 `prefix` 阶段返回 `status=success`，并向 `workflow.simlingo.llm_prefix_output.scheduler_plan_input` 发布：
   - `encoded_payload`
   - `budget_value`
   - `budget_token_prefix_feature`
-- `scheduler_agent` 的 `plan` 阶段返回 `status=success`，并向 `workflow.simlingo.llm_final_input` 发布：
+- `scheduler_agent` 的 `plan` 阶段返回 `status=success`，并向 `workflow.simlingo.scheduler_plan_output.llm_final_input` 发布：
   - `encoded_payload`
   - `budget_value`
   - `execution_plan`
-- `llm_agent` 的 `final` 阶段返回 `status=success`，并向 `workflow.simlingo.llm_output` 发布：
+- `llm_agent` 的 `final` 阶段返回 `status=success`，并向 `workflow.simlingo.llm_final_output` 发布：
   - `llm_payload.speed_wps`
   - `llm_payload.route`
   - `llm_payload.driving_features`

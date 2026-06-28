@@ -910,6 +910,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         cache_position: Optional[torch.LongTensor] = None,
         execution_plan: Optional[torch.Tensor] = None,
         assigner: Optional[object] = None,
+        stop_at_layer: Optional[int] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -967,6 +968,14 @@ class Qwen2Model(Qwen2PreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
+        stopped_early = False
+
+        if stop_at_layer is not None:
+            stop_at_layer = int(stop_at_layer)
+            if stop_at_layer < 0 or stop_at_layer > len(self.layers):
+                raise ValueError(
+                    f"stop_at_layer must be in [0, {len(self.layers)}], got {stop_at_layer}"
+                )
 
         prepared_execution_plan = execution_plan
         if prepared_execution_plan is not None:
@@ -986,6 +995,12 @@ class Qwen2Model(Qwen2PreTrainedModel):
 
         num_prefix_layers = self.config.num_prefix_layers
         for idx, decoder_layer in enumerate(self.layers):
+            if stop_at_layer is not None and idx >= stop_at_layer:
+                if output_hidden_states:
+                    all_hidden_states += (hidden_states,)
+                stopped_early = True
+                break
+
             drop_states = None
             if idx == num_prefix_layers and prepared_execution_plan is None and assigner is not None:
                 prepared_execution_plan = assigner.build_execution_plan_on_prefix_layer(
@@ -1042,10 +1057,12 @@ class Qwen2Model(Qwen2PreTrainedModel):
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
 
-        hidden_states = self.norm(hidden_states)
+        if not stopped_early:
+            hidden_states = self.norm(hidden_states)
 
-        # add hidden states from the last decoder layer
-        if output_hidden_states:
+        # add hidden states from the last decoder layer. Early prefix exits already
+        # appended the pre-next-layer hidden state to match full-forward indexing.
+        if output_hidden_states and not stopped_early:
             all_hidden_states += (hidden_states,)
 
         next_cache = next_decoder_cache if use_cache else None
@@ -1253,6 +1270,8 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         num_logits_to_keep: int = 0,
         execution_plan: Optional[torch.Tensor] = None,
         assigner: Optional[object] = None,
+        stop_at_layer: Optional[int] = None,
+        skip_logits: bool = False,
         **loss_kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
@@ -1306,11 +1325,15 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             cache_position=cache_position,
             execution_plan=execution_plan,
             assigner=assigner,
+            stop_at_layer=stop_at_layer,
         )
 
         hidden_states = outputs[0]
+        if skip_logits and labels is not None:
+            raise ValueError("skip_logits=True cannot be used when labels are provided")
+
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-        logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
+        logits = None if skip_logits else self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
 
         loss = None
         if labels is not None:

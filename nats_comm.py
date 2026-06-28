@@ -64,11 +64,7 @@ class NatsComm:
         self.servers = servers or self._servers_from_env()
         self.stream = stream or os.environ.get("NATS_STREAM", "WORKFLOW")
         self.stream_subjects = stream_subjects or self._stream_subjects_from_env()
-        self.jetstream_domain = (
-            jetstream_domain
-            if jetstream_domain is not None
-            else os.environ.get("NATS_JETSTREAM_DOMAIN", "")
-        )
+        self.jetstream_domain = jetstream_domain or os.environ.get("NATS_JETSTREAM_DOMAIN", "hub")
         self._nc = NATS()
         self._js = None
 

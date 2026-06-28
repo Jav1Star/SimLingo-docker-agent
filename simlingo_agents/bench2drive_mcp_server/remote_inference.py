@@ -107,7 +107,6 @@ class SplitAgentPipelineClient:
                 task_type="budget",
                 task_description="Compute evaluation budget",
                 metadata={
-                    "scheduler_phase": "budget",
                     "nats_in_subject": subjects["encoded_output"],
                     "nats_in_durable": subjects["encoded_durable"],
                     "nats_out_subject": subjects["prefix_input"],
@@ -123,7 +122,6 @@ class SplitAgentPipelineClient:
                 task_type="prefix",
                 task_description="Run LLM prefix phase",
                 metadata={
-                    "llm_phase": "prefix",
                     "nats_in_subject": subjects["prefix_input"],
                     "nats_in_durable": subjects["prefix_input_durable"],
                     "nats_out_subject": subjects["prefix_output"],
@@ -139,7 +137,6 @@ class SplitAgentPipelineClient:
                 task_type="plan",
                 task_description="Compute execution plan",
                 metadata={
-                    "scheduler_phase": "plan",
                     "nats_in_subject": subjects["prefix_output"],
                     "nats_in_durable": subjects["prefix_output_durable"],
                     "nats_out_subject": subjects["final_input"],
@@ -155,7 +152,6 @@ class SplitAgentPipelineClient:
                 task_type="final",
                 task_description="Run LLM final phase",
                 metadata={
-                    "llm_phase": "final",
                     "nats_in_subject": subjects["final_input"],
                     "nats_in_durable": subjects["final_input_durable"],
                     "nats_out_subject": subjects["final_output"],
@@ -256,14 +252,14 @@ class SplitAgentPipelineClient:
         return {
             "source_input": f"{base}.source_input",
             "source_durable": f"{base.replace('.', '-')}-source-input",
-            "encoded_output": f"{base}.encoded",
-            "encoded_durable": f"{base.replace('.', '-')}-encoded",
-            "prefix_input": f"{base}.llm_prefix_input",
-            "prefix_input_durable": f"{base.replace('.', '-')}-llm-prefix-input",
-            "prefix_output": f"{base}.llm_prefix_output",
-            "prefix_output_durable": f"{base.replace('.', '-')}-llm-prefix-output",
-            "final_input": f"{base}.llm_final_input",
-            "final_input_durable": f"{base.replace('.', '-')}-llm-final-input",
-            "final_output": f"{base}.llm_output",
-            "final_output_durable": f"{base.replace('.', '-')}-llm-output",
+            "encoded_output": f"{base}.scheduler_budget_input",
+            "encoded_durable": f"{base.replace('.', '-')}-scheduler-budget-input",
+            "prefix_input": f"{base}.scheduler_budget_output.llm_prefix_input",
+            "prefix_input_durable": f"{base.replace('.', '-')}-scheduler-budget-output-llm-prefix-input",
+            "prefix_output": f"{base}.llm_prefix_output.scheduler_plan_input",
+            "prefix_output_durable": f"{base.replace('.', '-')}-llm-prefix-output-scheduler-plan-input",
+            "final_input": f"{base}.scheduler_plan_output.llm_final_input",
+            "final_input_durable": f"{base.replace('.', '-')}-scheduler-plan-output-llm-final-input",
+            "final_output": f"{base}.llm_final_output",
+            "final_output_durable": f"{base.replace('.', '-')}-llm-final-output",
         }

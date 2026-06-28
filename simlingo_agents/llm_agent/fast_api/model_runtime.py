@@ -19,6 +19,9 @@ from utils.logger_utils import get_logger
 logger = get_logger(__name__)
 
 
+LLM_PREFIX_NUM_LAYERS = 2
+SCHEDULER_NUM_PREFIX_LAYERS = 10
+
 DRIVING_SPECIAL_TOKENS = [
     "<WAYPOINTS>",
     "<WAYPOINTS_DIFF>",
@@ -48,6 +51,7 @@ class LLMRuntime:
         self._num_hidden_layers: Optional[int] = None
         self._num_attention_heads: Optional[int] = None
         self._num_prefix_layers: Optional[int] = None
+        self._scheduler_num_prefix_layers: Optional[int] = None
         self._img_context_token_id: Optional[int] = None
         self._model_param_dtype: Optional[torch.dtype] = None
 
@@ -76,13 +80,17 @@ class LLMRuntime:
         lora_alpha: int = 64,
         lora_r: int = 32,
         lora_dropout: float = 0.1,
-        num_prefix_layers: int = 2,
+        num_prefix_layers: int = LLM_PREFIX_NUM_LAYERS,
+        scheduler_num_prefix_layers: int = SCHEDULER_NUM_PREFIX_LAYERS,
         scheduler_target: str,
         scheduler_tau: float = 5.0,
         scheduler_is_hard: bool = True,
         scheduler_threshold: float = 0.5,
         scheduler_bias: bool = True,
     ) -> None:
+        num_prefix_layers = int(num_prefix_layers)
+        scheduler_num_prefix_layers = int(scheduler_num_prefix_layers)
+
         if self.is_loaded and self._model_variant == model_variant:
             return
 
@@ -129,7 +137,7 @@ class LLMRuntime:
                 is_hard=scheduler_is_hard,
                 threshold=scheduler_threshold,
                 bias=scheduler_bias,
-                num_prefix_layers=num_prefix_layers,
+                num_prefix_layers=scheduler_num_prefix_layers,
             )
             budget_encoder.to(device=self._device, dtype=torch.float32)
             budget_encoder.eval()
@@ -151,14 +159,19 @@ class LLMRuntime:
             self._num_hidden_layers = int(llm.config.num_hidden_layers)
             self._num_attention_heads = int(llm.config.num_attention_heads)
             self._num_prefix_layers = int(num_prefix_layers)
+            self._scheduler_num_prefix_layers = int(scheduler_num_prefix_layers)
             self._img_context_token_id = int(tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>"))
             self._model_param_dtype = next(llm.model.parameters()).dtype
             logger.info(
-                "Two-stage LLM loaded: hidden_size=%s num_hidden_layers=%s num_attention_heads=%s num_prefix_layers=%s",
+                (
+                    "Two-stage LLM loaded: hidden_size=%s num_hidden_layers=%s "
+                    "num_attention_heads=%s llm_num_prefix_layers=%s scheduler_num_prefix_layers=%s"
+                ),
                 self._hidden_size,
                 self._num_hidden_layers,
                 self._num_attention_heads,
                 self._num_prefix_layers,
+                self._scheduler_num_prefix_layers,
             )
 
     def _ensure_padding_token(self, tokenizer: Any) -> None:
@@ -275,6 +288,12 @@ class LLMRuntime:
                     scheduler_state.setdefault(key[len(prefix):], value)
                     break
         if scheduler_state:
+            scheduler_state = self._filter_compatible_state_dict(
+                scheduler_state,
+                budget_encoder,
+                module_name="budget encoder",
+            )
+        if scheduler_state:
             missing, unexpected = budget_encoder.load_state_dict(scheduler_state, strict=False)
             logger.info(
                 "Loaded budget encoder partial weights: missing=%d unexpected=%d",
@@ -282,7 +301,38 @@ class LLMRuntime:
                 len(unexpected),
             )
         else:
-            logger.warning("No scheduler weights found with prefixes %s", scheduler_prefixes)
+            logger.warning("No compatible scheduler weights found with prefixes %s", scheduler_prefixes)
+
+    def _filter_compatible_state_dict(
+        self,
+        state_dict: dict[str, Any],
+        module: torch.nn.Module,
+        *,
+        module_name: str,
+    ) -> dict[str, Any]:
+        target_state = module.state_dict()
+        compatible: dict[str, Any] = {}
+        skipped: list[str] = []
+        for key, value in state_dict.items():
+            target_value = target_state.get(key)
+            if target_value is None:
+                skipped.append(f"{key}: unexpected")
+                continue
+            if tuple(value.shape) != tuple(target_value.shape):
+                skipped.append(f"{key}: checkpoint{tuple(value.shape)} != runtime{tuple(target_value.shape)}")
+                continue
+            compatible[key] = value
+
+        if skipped:
+            preview = "; ".join(skipped[:5])
+            logger.warning(
+                "Skipped %d incompatible %s weights while forcing num_prefix_layers=%d: %s",
+                len(skipped),
+                module_name,
+                int(getattr(module, "num_prefix_layers", SCHEDULER_NUM_PREFIX_LAYERS)),
+                preview,
+            )
+        return compatible
 
     def _require_loaded(self) -> tuple[LLM, DrivingAdaptor, Any, torch.nn.Module]:
         if self._llm is None or self._driving_adaptor is None or self._tokenizer is None or self._budget_encoder is None:
@@ -369,13 +419,23 @@ class LLMRuntime:
                     driving_mask=driving_mask,
                 )
 
-                outputs = llm.model(
-                    inputs_embeds=inputs_embeds.to(dtype=self._model_param_dtype or inputs_embeds.dtype),
-                    attention_mask=inputs_mask,
-                    output_hidden_states=True,
-                    return_dict=True,
-                    execution_plan=execution_plan_tensor,
-                )
+                model_kwargs: dict[str, Any] = {
+                    "inputs_embeds": inputs_embeds.to(dtype=self._model_param_dtype or inputs_embeds.dtype),
+                    "attention_mask": inputs_mask,
+                    "output_hidden_states": True,
+                    "return_dict": True,
+                    "execution_plan": execution_plan_tensor,
+                }
+                if phase == "prefix":
+                    model_kwargs.update(
+                        {
+                            "stop_at_layer": self._num_prefix_layers,
+                            "skip_logits": True,
+                            "use_cache": False,
+                        }
+                    )
+
+                outputs = llm.model(**model_kwargs)
 
         route_key = encoded_payload.get("route_key")
         frame_id = encoded_payload.get("frame_id")
@@ -400,6 +460,7 @@ class LLMRuntime:
                     "num_hidden_layers": self._num_hidden_layers,
                     "num_attention_heads": self._num_attention_heads,
                     "num_prefix_layers": self._num_prefix_layers,
+                    "scheduler_num_prefix_layers": self._scheduler_num_prefix_layers,
                     "device": self._device,
                     "dtype": str(self._dtype),
                 },
@@ -437,6 +498,7 @@ class LLMRuntime:
                     "num_hidden_layers": self._num_hidden_layers,
                     "num_attention_heads": self._num_attention_heads,
                     "num_prefix_layers": self._num_prefix_layers,
+                    "scheduler_num_prefix_layers": self._scheduler_num_prefix_layers,
                     "device": self._device,
                     "dtype": str(self._dtype),
                 },

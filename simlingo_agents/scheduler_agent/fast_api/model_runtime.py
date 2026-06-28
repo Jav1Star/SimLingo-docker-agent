@@ -20,6 +20,8 @@ from utils.logger_utils import get_logger
 logger = get_logger(__name__)
 
 
+SCHEDULER_NUM_PREFIX_LAYERS = 10
+
 DEFAULT_RULE_BASED_CFG = {
     "k_warmup": 5,
     "eta": 0.03,
@@ -81,9 +83,11 @@ class SchedulerRuntime:
         is_hard: bool = True,
         threshold: float = 0.5,
         bias: bool = True,
-        num_prefix_layers: int = 2,
+        num_prefix_layers: int = SCHEDULER_NUM_PREFIX_LAYERS,
         rule_based_cfg_json: Optional[str] = None,
     ) -> None:
+        num_prefix_layers = int(num_prefix_layers)
+
         if self.is_loaded and self._model_variant == model_variant:
             return
 
@@ -185,12 +189,52 @@ class SchedulerRuntime:
             logger.warning("No scheduler weights found with prefixes %s", prefixes)
             return
 
+        scheduler_state = self._filter_compatible_state_dict(
+            scheduler_state,
+            scheduler_module,
+            module_name="scheduler",
+        )
+        if not scheduler_state:
+            logger.warning("No compatible scheduler weights found with prefixes %s", prefixes)
+            return
+
         missing, unexpected = scheduler_module.load_state_dict(scheduler_state, strict=False)
         logger.info(
             "Loaded scheduler partial weights: missing=%d unexpected=%d",
             len(missing),
             len(unexpected),
         )
+
+    def _filter_compatible_state_dict(
+        self,
+        state_dict: dict[str, Any],
+        module: torch.nn.Module,
+        *,
+        module_name: str,
+    ) -> dict[str, Any]:
+        target_state = module.state_dict()
+        compatible: dict[str, Any] = {}
+        skipped: list[str] = []
+        for key, value in state_dict.items():
+            target_value = target_state.get(key)
+            if target_value is None:
+                skipped.append(f"{key}: unexpected")
+                continue
+            if tuple(value.shape) != tuple(target_value.shape):
+                skipped.append(f"{key}: checkpoint{tuple(value.shape)} != runtime{tuple(target_value.shape)}")
+                continue
+            compatible[key] = value
+
+        if skipped:
+            preview = "; ".join(skipped[:5])
+            logger.warning(
+                "Skipped %d incompatible %s weights while forcing num_prefix_layers=%d: %s",
+                len(skipped),
+                module_name,
+                int(getattr(module, "num_prefix_layers", SCHEDULER_NUM_PREFIX_LAYERS)),
+                preview,
+            )
+        return compatible
 
     def _require_loaded(self) -> BaseBudgetAssigner:
         if self._assigner is None or self._assigner.scheduler is None:

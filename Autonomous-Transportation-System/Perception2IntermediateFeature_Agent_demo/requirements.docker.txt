@@ -1,0 +1,16 @@
+fastapi==0.135.1
+uvicorn==0.42.0
+numpy==2.4.3
+pydantic==2.12.5
+requests==2.32.5
+PyYAML==6.0.3
+Cython==3.2.4
+mcp==1.26.0
+opencv-python==4.13.0.92
+matplotlib==3.10.8
+scikit-learn==1.8.0
+shapely==2.1.2
+torch==2.11.0+cu128
+torchvision==0.26.0+cu128
+spconv==2.3.8
+nats-py==2.11.0

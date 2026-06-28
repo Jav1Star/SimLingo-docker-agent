@@ -58,12 +58,14 @@ ENV PYTHONPATH=/app \
     SCHEDULER_IS_HARD=true \
     SCHEDULER_THRESHOLD=0.5 \
     SCHEDULER_BIAS=true \
-    SCHEDULER_NUM_PREFIX_LAYERS=2 \
-    SCHEDULER_PHASE=budget \
+    SCHEDULER_NUM_PREFIX_LAYERS=10 \
     NATS_SERVER_URL=nats://host.docker.internal:4222 \
-    NATS_IN_SUBJECT=workflow.simlingo.encoded_tokens \
-    NATS_IN_DURABLE=workflow-simlingo-encoded-tokens \
-    NATS_OUT_SUBJECT=workflow.simlingo.llm_prefix_input
+    SCHEDULER_BUDGET_IN_SUBJECT=workflow.simlingo.scheduler_budget_input \
+    SCHEDULER_BUDGET_IN_DURABLE=workflow-simlingo-scheduler-budget-input \
+    SCHEDULER_BUDGET_OUT_SUBJECT=workflow.simlingo.scheduler_budget_output.llm_prefix_input \
+    SCHEDULER_PLAN_IN_SUBJECT=workflow.simlingo.llm_prefix_output.scheduler_plan_input \
+    SCHEDULER_PLAN_IN_DURABLE=workflow-simlingo-llm-prefix-output-scheduler-plan-input \
+    SCHEDULER_PLAN_OUT_SUBJECT=workflow.simlingo.scheduler_plan_output.llm_final_input
 
 EXPOSE 9013
 
