@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: simlingo-llm-agent
-  namespace: simlingo-test
+  namespace: default
   labels:
     app: simlingo-llm-agent
 spec:
@@ -25,7 +25,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: simlingo-llm-agent
-          image: simlingo-llm-agent:0.1.1
+          image: simlingo-llm-agent:0.1.4
           imagePullPolicy: IfNotPresent
           terminationMessagePolicy: FallbackToLogsOnError
           ports:
@@ -56,9 +56,9 @@ spec:
             - name: LLM_LORA_DROPOUT
               value: "0.1"
             - name: LLM_NUM_PREFIX_LAYERS
+              value: "2"
+            - name: LLM_SCHEDULER_NUM_PREFIX_LAYERS
               value: "10"
-            - name: LLM_PHASE
-              value: prefix
             - name: LLM_SCHEDULER_TARGET
               value: simlingo_adaption_training.models.scheduler.simple_scheduler.SimpleScheduler_L
             - name: LLM_SCHEDULER_TAU
@@ -72,23 +72,23 @@ spec:
             - name: NATS_SERVER_URL
               value: nats://nats:4222
             - name: LLM_PREFIX_IN_SUBJECT
-              value: workflow.simlingo.llm_prefix_input
+              value: workflow.simlingo.scheduler_budget_output.llm_prefix_input
             - name: LLM_PREFIX_IN_DURABLE
-              value: workflow-simlingo-llm-prefix-input
+              value: workflow-simlingo-scheduler-budget-output-llm-prefix-input
             - name: LLM_PREFIX_OUT_SUBJECT
-              value: workflow.simlingo.llm_prefix_output
+              value: workflow.simlingo.llm_prefix_output.scheduler_plan_input
             - name: LLM_FINAL_IN_SUBJECT
-              value: workflow.simlingo.llm_final_input
+              value: workflow.simlingo.scheduler_plan_output.llm_final_input
             - name: LLM_FINAL_IN_DURABLE
-              value: workflow-simlingo-llm-final-input
+              value: workflow-simlingo-scheduler-plan-output-llm-final-input
             - name: LLM_FINAL_OUT_SUBJECT
-              value: workflow.simlingo.llm_output
+              value: workflow.simlingo.llm_final_output
             - name: NATS_STREAM
               value: WORKFLOW
             - name: NATS_STREAM_SUBJECTS
               value: workflow.>
             - name: NATS_JETSTREAM_DOMAIN
-              value: ""
+              value: "hub"
           startupProbe:
             httpGet:
               path: /health
@@ -109,7 +109,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: simlingo-llm-service
-  namespace: simlingo-test
+  namespace: default
 spec:
   selector:
     app: simlingo-llm-agent

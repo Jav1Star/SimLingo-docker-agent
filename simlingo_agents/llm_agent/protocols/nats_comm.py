@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from nats.aio.client import Client as NATS
 from nats.errors import TimeoutError as NatsTimeoutError
+from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 from nats.js.errors import NotFoundError
 
 logger = logging.getLogger(__name__)
@@ -182,6 +183,43 @@ class NatsComm:
             )
         except NotFoundError:
             return None
+        except NatsTimeoutError:
+            logger.warning(
+                "get_last_msg timed out for stream=%s subject=%s; falling back to LAST_PER_SUBJECT consumer",
+                self.stream,
+                subject,
+            )
+            return await self._receive_last_via_consumer(subject)
+
+    async def _receive_last_via_consumer(self, subject: str) -> Optional[NatsMessage]:
+        consumer_config = ConsumerConfig(
+            filter_subject=subject,
+            deliver_policy=DeliverPolicy.LAST_PER_SUBJECT,
+            ack_policy=AckPolicy.EXPLICIT,
+        )
+        sub = await self._js.pull_subscribe(subject, stream=self.stream, config=consumer_config)
+
+        try:
+            raw_messages = await sub.fetch(1, timeout=5.0)
+        except NatsTimeoutError:
+            return None
+
+        if not raw_messages:
+            return None
+
+        raw = raw_messages[0]
+        data = json.loads(raw.data.decode())
+        metadata = raw.metadata
+        await raw.ack()
+        return NatsMessage(
+            subject=raw.subject,
+            payload=data,
+            stream=metadata.stream,
+            consumer=metadata.consumer,
+            stream_seq=metadata.sequence.stream,
+            consumer_seq=metadata.sequence.consumer,
+            _raw=None,
+        )
 
     async def serve(
         self,

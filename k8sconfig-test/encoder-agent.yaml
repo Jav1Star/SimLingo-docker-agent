@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: simlingo-encoder-agent
-  namespace: simlingo-test
+  namespace: default
   labels:
     app: simlingo-encoder-agent
 spec:
@@ -25,7 +25,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: simlingo-encoder-agent
-          image: simlingo-encoder-agent:0.1.1
+          image: simlingo-encoder-agent:0.1.4
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 9011
@@ -47,13 +47,13 @@ spec:
             - name: NATS_IN_DURABLE
               value: workflow-previousagent-result
             - name: NATS_OUT_SUBJECT
-              value: workflow.simlingo.encoded_tokens
+              value: workflow.simlingo.scheduler_budget_input
             - name: NATS_STREAM
               value: WORKFLOW
             - name: NATS_STREAM_SUBJECTS
               value: workflow.>
             - name: NATS_JETSTREAM_DOMAIN
-              value: ""
+              value: "hub"
           startupProbe:
             httpGet:
               path: /health
@@ -72,7 +72,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: simlingo-encoder-service
-  namespace: simlingo-test
+  namespace: default
 spec:
   selector:
     app: simlingo-encoder-agent

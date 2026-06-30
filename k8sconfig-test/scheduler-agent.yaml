@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: simlingo-scheduler-agent
-  namespace: simlingo-test
+  namespace: default
   labels:
     app: simlingo-scheduler-agent
 spec:
@@ -25,7 +25,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: simlingo-scheduler-agent
-          image: simlingo-scheduler-agent:0.1.2
+          image: simlingo-scheduler-agent:0.1.4
           imagePullPolicy: IfNotPresent
           terminationMessagePolicy: FallbackToLogsOnError
           ports:
@@ -63,28 +63,26 @@ spec:
               value: "10"
             - name: SCHEDULER_RULE_BASED_CFG_JSON
               value: ""
-            - name: SCHEDULER_PHASE
-              value: budget
             - name: NATS_SERVER_URL
               value: nats://nats:4222
             - name: SCHEDULER_BUDGET_IN_SUBJECT
-              value: workflow.simlingo.encoded_tokens
+              value: workflow.simlingo.scheduler_budget_input
             - name: SCHEDULER_BUDGET_IN_DURABLE
-              value: workflow-simlingo-encoded-tokens
+              value: workflow-simlingo-scheduler-budget-input
             - name: SCHEDULER_BUDGET_OUT_SUBJECT
-              value: workflow.simlingo.llm_prefix_input
+              value: workflow.simlingo.scheduler_budget_output.llm_prefix_input
             - name: SCHEDULER_PLAN_IN_SUBJECT
-              value: workflow.simlingo.llm_prefix_output
+              value: workflow.simlingo.llm_prefix_output.scheduler_plan_input
             - name: SCHEDULER_PLAN_IN_DURABLE
-              value: workflow-simlingo-llm-prefix-output
+              value: workflow-simlingo-llm-prefix-output-scheduler-plan-input
             - name: SCHEDULER_PLAN_OUT_SUBJECT
-              value: workflow.simlingo.llm_final_input
+              value: workflow.simlingo.scheduler_plan_output.llm_final_input
             - name: NATS_STREAM
               value: WORKFLOW
             - name: NATS_STREAM_SUBJECTS
               value: workflow.>
             - name: NATS_JETSTREAM_DOMAIN
-              value: ""
+              value: "hub"
           startupProbe:
             httpGet:
               path: /health
@@ -105,7 +103,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: simlingo-scheduler-service
-  namespace: simlingo-test
+  namespace: default
 spec:
   selector:
     app: simlingo-scheduler-agent

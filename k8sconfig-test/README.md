@@ -1,13 +1,12 @@
 # SimLingo split-agent Kubernetes test
 
-This directory deploys the three SimLingo split agents plus a NATS broker used
-for agent-to-agent message passing. Bench2Drive MCP is intentionally excluded.
+This directory deploys the three SimLingo split agents into the `default`
+namespace. Bench2Drive MCP and the NATS broker are intentionally excluded.
 
 ## Manifests
 
-- `nats.yaml`: namespace `simlingo-test` and NATS JetStream broker
 - `encoder-agent.yaml`: `simlingo-encoder-agent:0.1.1`
-- `scheduler-agent.yaml`: `simlingo-scheduler-agent:0.1.1`
+- `scheduler-agent.yaml`: `simlingo-scheduler-agent:0.1.2`
 - `llm-agent.yaml`: `simlingo-llm-agent:0.1.1`
 
 Each agent requests and limits one GPU:
@@ -22,12 +21,11 @@ resources:
 
 ## Deploy
 
-Make sure the `:0.1.1` images are available to the Kubernetes nodes. If the
+Make sure the listed images are available to the Kubernetes nodes. If the
 cluster cannot see local Docker images directly, push the images to a registry
 and update the `image:` fields first.
 
 ```bash
-kubectl apply -f k8sconfig-test/nats.yaml
 kubectl apply -f k8sconfig-test/encoder-agent.yaml
 kubectl apply -f k8sconfig-test/scheduler-agent.yaml
 kubectl apply -f k8sconfig-test/llm-agent.yaml
@@ -36,7 +34,7 @@ kubectl apply -f k8sconfig-test/llm-agent.yaml
 Check status:
 
 ```bash
-kubectl get pods,svc -n simlingo-test
+kubectl get pods,svc -n default
 ```
 
 ## Service ports
@@ -44,13 +42,16 @@ kubectl get pods,svc -n simlingo-test
 - encoder HTTP: service port `9011`, nodePort `30111`
 - llm HTTP: service port `9012`, nodePort `30112`
 - scheduler HTTP: service port `9013`, nodePort `30113`
-- NATS: service port `4222`, nodePort `30423`
 
-Inside the namespace all agents use:
+The agents expect an existing NATS JetStream Service named `nats` in the same
+`default` namespace:
 
 ```text
 nats://nats:4222
 ```
+
+If the existing NATS Service has a different name, update `NATS_SERVER_URL` in
+the three agent manifests.
 
 ## Smoke test entry points
 
