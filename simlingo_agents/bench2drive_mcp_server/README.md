@@ -54,7 +54,7 @@ simlingo_agents/bench2drive_mcp_server/start.sh start
 
 1. 先单独启动 `CARLA`。
 2. 启动 `NATS`。
-3. 启动三个 docker agent。
+3. 启动三个 docker/k8s agent。
 4. 启动 Bench2Drive MCP server。
 5. 先调用 `validate_runtime(...)`。
 6. 再调用 `start_evaluation(...)`。
@@ -67,6 +67,47 @@ simlingo_agents/bench2drive_mcp_server/start.sh start
 - `use_existing_carla=true`
 
 如果确实想退回旧行为，让评测脚本自行拉起 CARLA，可以显式传 `use_existing_carla=false`。
+
+## 对接 `k8sconfig-test`
+
+新版 `k8sconfig-test` 里的三个 agent 通过 Kubernetes Service 暴露：
+
+- `simlingo-encoder-service:9011`
+- `simlingo-llm-service:9012`
+- `simlingo-scheduler-service:9013`
+
+MCP 侧通过 `SIMLINGO_SPLIT_STACK_PROFILE` 选择默认寻址方式：
+
+- `local`: 默认连接 `127.0.0.1:9011/9012/9013`，适合本地 docker/端口转发。
+- `k8s`: 默认连接上述 Service DNS，适合 MCP 也运行在同一个 k8s namespace。
+- `nodeport`: 默认连接 `SIMLINGO_K8S_NODE_HOST` 上的 `30111/30112/30113`，适合 MCP 在集群外访问 `k8sconfig-test` 的 NodePort。
+- `auto`: 默认值；如果检测到 `KUBERNETES_SERVICE_HOST` 就按 `k8s`，否则按 `local`。
+
+示例：MCP 运行在同一个 k8s 集群内：
+
+```bash
+export SIMLINGO_SPLIT_STACK_PROFILE=k8s
+export NATS_SERVER_URL=nats://nats:4222
+export NATS_JETSTREAM_DOMAIN=hub
+```
+
+示例：MCP 运行在集群外，通过 NodePort 访问三个 agent，并通过本地/端口转发访问 NATS：
+
+```bash
+export SIMLINGO_SPLIT_STACK_PROFILE=nodeport
+export SIMLINGO_K8S_NODE_HOST=<node-ip>
+export NATS_SERVER_URL=nats://127.0.0.1:4222
+export NATS_JETSTREAM_DOMAIN=hub
+```
+
+如果你的网络环境不同，也可以直接覆盖：
+
+```bash
+export SIMLINGO_ENCODER_AGENT_URL=http://<host>:<port>/a2a/execute
+export SIMLINGO_SCHEDULER_AGENT_URL=http://<host>:<port>/a2a/execute
+export SIMLINGO_LLM_AGENT_URL=http://<host>:<port>/a2a/execute
+export NATS_SERVER_URL=nats://<host>:4222
+```
 
 ## MCP Tools
 

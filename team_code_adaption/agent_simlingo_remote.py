@@ -287,6 +287,9 @@ class RemoteSplitLingoAgent(LingoAgent):
         camera_images = self.DrivingInput.get("camera_images")
         if camera_images is None:
             raise RuntimeError("Camera input is missing from DrivingInput")
+        if camera_images.ndim != 6:
+            raise RuntimeError(f"camera_images must have shape [B,T,NP,C,H,W], got {tuple(camera_images.shape)}")
+        num_patches = int(camera_images.shape[2])
 
         runtime_context = {
             "timestamp": float(timestamp),
@@ -306,6 +309,7 @@ class RemoteSplitLingoAgent(LingoAgent):
             "prompt_texts": list(prompt_label.language_string),
             "placeholder_values": prompt_label.placeholder_values,
             "camera_images": camera_images.detach().float().cpu().numpy(),
+            "num_patches": num_patches,
             "runtime_context": runtime_context,
         }
 

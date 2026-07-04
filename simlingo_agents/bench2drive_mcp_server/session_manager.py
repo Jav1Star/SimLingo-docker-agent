@@ -18,6 +18,13 @@ from typing import Any
 
 import yaml
 
+from simlingo_agents.bench2drive_mcp_server.remote_inference import (
+    configured_jetstream_domain,
+    configured_nats_server_url,
+    configured_pipeline_endpoints,
+    split_stack_profile,
+)
+
 
 def _now_ts() -> float:
     return time.time()
@@ -599,23 +606,22 @@ class EvaluationSessionManager:
         }
 
     def _split_stack_config(self) -> dict[str, Any]:
-        encoder_url = os.getenv("SIMLINGO_ENCODER_AGENT_URL", "http://127.0.0.1:9011/a2a/execute")
-        scheduler_url = os.getenv("SIMLINGO_SCHEDULER_AGENT_URL", "http://127.0.0.1:9013/a2a/execute")
-        llm_url = os.getenv("SIMLINGO_LLM_AGENT_URL", "http://127.0.0.1:9012/a2a/execute")
+        endpoints = configured_pipeline_endpoints()
         return {
+            "profile": split_stack_profile(),
             "agent_execute_urls": {
-                "encoder": encoder_url,
-                "scheduler": scheduler_url,
-                "llm": llm_url,
+                "encoder": endpoints.encoder_url,
+                "scheduler": endpoints.scheduler_url,
+                "llm": endpoints.llm_url,
             },
-            "nats_server_url": os.getenv("NATS_SERVER_URL", "nats://127.0.0.1:4222"),
+            "nats_server_url": configured_nats_server_url(),
             "nats_stream": os.getenv("NATS_STREAM", "WORKFLOW"),
             "nats_stream_subjects": [
                 item.strip()
                 for item in os.getenv("NATS_STREAM_SUBJECTS", "workflow.>").split(",")
                 if item.strip()
             ],
-            "nats_jetstream_domain": os.getenv("NATS_JETSTREAM_DOMAIN", ""),
+            "nats_jetstream_domain": configured_jetstream_domain(),
         }
 
     def _probe_http_health(self, execute_url: str) -> dict[str, Any]:

@@ -28,6 +28,69 @@ class PipelineEndpoints:
     llm_url: str
 
 
+def split_stack_profile() -> str:
+    profile = os.getenv("SIMLINGO_SPLIT_STACK_PROFILE", "auto").strip().lower()
+    if profile in {"k8s", "kubernetes", "cluster"}:
+        return "k8s"
+    if profile in {"nodeport", "node_port"}:
+        return "nodeport"
+    if profile in {"local", "localhost"}:
+        return "local"
+    if os.getenv("KUBERNETES_SERVICE_HOST"):
+        return "k8s"
+    return "local"
+
+
+def default_pipeline_endpoints() -> PipelineEndpoints:
+    profile = split_stack_profile()
+    if profile == "k8s":
+        return PipelineEndpoints(
+            encoder_url="http://simlingo-encoder-service:9011/a2a/execute",
+            scheduler_url="http://simlingo-scheduler-service:9013/a2a/execute",
+            llm_url="http://simlingo-llm-service:9012/a2a/execute",
+        )
+    if profile == "nodeport":
+        host = os.getenv("SIMLINGO_K8S_NODE_HOST", os.getenv("K8S_NODE_HOST", "127.0.0.1"))
+        return PipelineEndpoints(
+            encoder_url=f"http://{host}:{os.getenv('SIMLINGO_ENCODER_NODEPORT', '30111')}/a2a/execute",
+            scheduler_url=f"http://{host}:{os.getenv('SIMLINGO_SCHEDULER_NODEPORT', '30113')}/a2a/execute",
+            llm_url=f"http://{host}:{os.getenv('SIMLINGO_LLM_NODEPORT', '30112')}/a2a/execute",
+        )
+    return PipelineEndpoints(
+        encoder_url="http://127.0.0.1:9011/a2a/execute",
+        scheduler_url="http://127.0.0.1:9013/a2a/execute",
+        llm_url="http://127.0.0.1:9012/a2a/execute",
+    )
+
+
+def configured_pipeline_endpoints() -> PipelineEndpoints:
+    defaults = default_pipeline_endpoints()
+    return PipelineEndpoints(
+        encoder_url=os.getenv("SIMLINGO_ENCODER_AGENT_URL", defaults.encoder_url),
+        scheduler_url=os.getenv("SIMLINGO_SCHEDULER_AGENT_URL", defaults.scheduler_url),
+        llm_url=os.getenv("SIMLINGO_LLM_AGENT_URL", defaults.llm_url),
+    )
+
+
+def default_nats_server_url() -> str:
+    profile = split_stack_profile()
+    if profile == "k8s":
+        return "nats://nats:4222"
+    return f"nats://{os.getenv('SIMLINGO_NATS_HOST', '127.0.0.1')}:{os.getenv('SIMLINGO_NATS_PORT', '4222')}"
+
+
+def configured_nats_server_url() -> str:
+    return os.getenv("NATS_SERVER_URL", default_nats_server_url())
+
+
+def configured_jetstream_domain() -> str:
+    if "NATS_JETSTREAM_DOMAIN" in os.environ:
+        return os.environ["NATS_JETSTREAM_DOMAIN"]
+    if split_stack_profile() in {"k8s", "nodeport"}:
+        return "hub"
+    return ""
+
+
 class SplitAgentPipelineClient:
     """Bridges one Bench2Drive frame to the split encoder/scheduler/llm agents."""
 
@@ -44,21 +107,17 @@ class SplitAgentPipelineClient:
         subject_prefix: str | None = None,
         sender_id: str | None = None,
     ) -> None:
-        self.endpoints = endpoints or PipelineEndpoints(
-            encoder_url=os.getenv("SIMLINGO_ENCODER_AGENT_URL", "http://127.0.0.1:9011/a2a/execute"),
-            scheduler_url=os.getenv("SIMLINGO_SCHEDULER_AGENT_URL", "http://127.0.0.1:9013/a2a/execute"),
-            llm_url=os.getenv("SIMLINGO_LLM_AGENT_URL", "http://127.0.0.1:9012/a2a/execute"),
-        )
-        self.nats_server_url = nats_server_url or os.getenv("NATS_SERVER_URL", "nats://127.0.0.1:4222")
+        self.endpoints = endpoints or configured_pipeline_endpoints()
+        self.nats_server_url = nats_server_url or configured_nats_server_url()
         self.nats_stream = nats_stream or os.getenv("NATS_STREAM", "WORKFLOW")
         raw_subjects = os.getenv("NATS_STREAM_SUBJECTS", "workflow.>")
         self.nats_stream_subjects = nats_stream_subjects or [item.strip() for item in raw_subjects.split(",") if item.strip()]
         self.nats_jetstream_domain = (
             nats_jetstream_domain
             if nats_jetstream_domain is not None
-            else os.getenv("NATS_JETSTREAM_DOMAIN", "")
+            else configured_jetstream_domain()
         )
-        self.http_timeout_sec = float(http_timeout_sec or os.getenv("SIMLINGO_AGENT_HTTP_TIMEOUT_SEC", "60"))
+        self.http_timeout_sec = float(http_timeout_sec or os.getenv("SIMLINGO_AGENT_HTTP_TIMEOUT_SEC", "180"))
         self.nats_timeout_sec = float(nats_timeout_sec or os.getenv("SIMLINGO_AGENT_NATS_TIMEOUT_SEC", "120"))
         self.subject_prefix = (subject_prefix or os.getenv("SIMLINGO_MCP_SUBJECT_PREFIX", "workflow.mcp")).rstrip(".")
         self.sender_id = sender_id or os.getenv("SIMLINGO_MCP_SENDER_ID", "Bench2DriveMCP")
@@ -177,10 +236,15 @@ class SplitAgentPipelineClient:
                 {
                     "request_id": request_id,
                     "subjects": subjects,
+                    "endpoints": self.endpoints.__dict__,
+                    "nats_server_url": self.nats_server_url,
+                    "nats_stream": self.nats_stream,
+                    "nats_jetstream_domain": self.nats_jetstream_domain,
                     "stage_durations_ms": stage_durations_ms,
                     "total_duration_ms": int((time.time() - started) * 1000),
                 }
             )
+            self._validate_final_result(decoded)
             return decoded
         finally:
             await nats.close()
@@ -231,6 +295,18 @@ class SplitAgentPipelineClient:
         if status and status != "success":
             raise RemoteInferenceError(f"{url} returned task status={status}: {response_payload}")
         return payload
+
+    def _validate_final_result(self, result: dict[str, Any]) -> None:
+        if result.get("status") not in {None, "success"}:
+            raise RemoteInferenceError(f"Final output status is not success: {result.get('status')}")
+        if result.get("phase") != "final":
+            raise RemoteInferenceError(f"Expected final LLM phase, got: {result.get('phase')}")
+        llm_payload = result.get("llm_payload")
+        if not isinstance(llm_payload, dict):
+            raise RemoteInferenceError("Final output does not contain llm_payload")
+        missing = [key for key in ("speed_wps", "route") if llm_payload.get(key) is None]
+        if missing:
+            raise RemoteInferenceError(f"Final llm_payload is missing required predictions: {missing}")
 
     def _build_request_id(self, *, route_key: str, frame_id: Any) -> str:
         route_key = re.sub(r"[^a-zA-Z0-9_-]+", "-", route_key).strip("-") or "route"
