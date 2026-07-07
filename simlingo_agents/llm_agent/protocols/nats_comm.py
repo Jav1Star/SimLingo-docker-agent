@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from nats.aio.client import Client as NATS
 from nats.errors import TimeoutError as NatsTimeoutError
-from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy, DiscardPolicy, StorageType, StreamConfig
 from nats.js.errors import NotFoundError
 
 logger = logging.getLogger(__name__)
@@ -72,6 +72,11 @@ class NatsComm:
         )
         self._nc = NATS()
         self._js = None
+        self.stream_storage = os.environ.get("NATS_STREAM_STORAGE", "memory").strip().lower()
+        self.stream_max_msgs = self._int_from_env("NATS_STREAM_MAX_MSGS", 128)
+        self.stream_max_msgs_per_subject = self._int_from_env("NATS_STREAM_MAX_MSGS_PER_SUBJECT", 1)
+        self.stream_max_bytes = self._int_from_env("NATS_STREAM_MAX_BYTES", 512 * 1024 * 1024)
+        self.stream_max_age = self._float_from_env("NATS_STREAM_MAX_AGE_SEC", 300.0)
 
     @staticmethod
     def _servers_from_env() -> List[str]:
@@ -82,6 +87,45 @@ class NatsComm:
     def _stream_subjects_from_env() -> List[str]:
         raw = os.environ.get("NATS_STREAM_SUBJECTS", "workflow.>")
         return [item.strip() for item in raw.split(",") if item.strip()]
+
+    @staticmethod
+    def _int_from_env(name: str, default: int) -> int:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            logger.warning("invalid integer for %s=%r; using default %s", name, raw, default)
+            return default
+
+    @staticmethod
+    def _float_from_env(name: str, default: float) -> float:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return default
+        try:
+            return float(raw)
+        except ValueError:
+            logger.warning("invalid float for %s=%r; using default %s", name, raw, default)
+            return default
+
+    def _storage_type(self) -> StorageType:
+        if self.stream_storage == "file":
+            return StorageType.FILE
+        return StorageType.MEMORY
+
+    def _stream_config(self) -> StreamConfig:
+        return StreamConfig(
+            name=self.stream,
+            subjects=self.stream_subjects,
+            storage=self._storage_type(),
+            discard=DiscardPolicy.OLD,
+            max_msgs=self.stream_max_msgs,
+            max_msgs_per_subject=self.stream_max_msgs_per_subject,
+            max_bytes=self.stream_max_bytes,
+            max_age=self.stream_max_age,
+        )
 
     def _jetstream(self):
         if self.jetstream_domain:
@@ -111,9 +155,26 @@ class NatsComm:
 
     async def _ensure_stream(self) -> None:
         try:
-            await self._js.stream_info(self.stream)
+            info = await self._js.stream_info(self.stream)
+            config = info.config
+            desired = self._stream_config()
+            changed = False
+            for attr in (
+                "subjects",
+                "discard",
+                "max_msgs",
+                "max_msgs_per_subject",
+                "max_bytes",
+                "max_age",
+            ):
+                if getattr(config, attr) != getattr(desired, attr):
+                    setattr(config, attr, getattr(desired, attr))
+                    changed = True
+            if changed:
+                await self._js.update_stream(config=config)
+                logger.info("updated JetStream stream %s limits", self.stream)
         except NotFoundError:
-            await self._js.add_stream(name=self.stream, subjects=self.stream_subjects)
+            await self._js.add_stream(config=self._stream_config())
             logger.info("created JetStream stream %s with subjects=%s", self.stream, self.stream_subjects)
         except Exception as exc:
             logger.warning("failed to ensure JetStream stream %s exists: %s", self.stream, exc)
@@ -190,6 +251,19 @@ class NatsComm:
                 subject,
             )
             return await self._receive_last_via_consumer(subject)
+
+    async def purge_subjects(self, subjects: List[str]) -> Dict[str, bool]:
+        await self.connect()
+        results: Dict[str, bool] = {}
+        for subject in subjects:
+            try:
+                results[subject] = await self._js.purge_stream(self.stream, subject=subject)
+            except NotFoundError:
+                results[subject] = False
+            except Exception as exc:
+                logger.warning("failed to purge stream=%s subject=%s: %s", self.stream, subject, exc)
+                results[subject] = False
+        return results
 
     async def _receive_last_via_consumer(self, subject: str) -> Optional[NatsMessage]:
         consumer_config = ConsumerConfig(

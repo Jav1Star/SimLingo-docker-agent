@@ -119,18 +119,25 @@ class SplitAgentPipelineClient:
         )
         self.http_timeout_sec = float(http_timeout_sec or os.getenv("SIMLINGO_AGENT_HTTP_TIMEOUT_SEC", "180"))
         self.nats_timeout_sec = float(nats_timeout_sec or os.getenv("SIMLINGO_AGENT_NATS_TIMEOUT_SEC", "120"))
-        self.subject_prefix = (subject_prefix or os.getenv("SIMLINGO_MCP_SUBJECT_PREFIX", "workflow.mcp")).rstrip(".")
+        self.subject_prefix = self._compact_subject_prefix(
+            subject_prefix or os.getenv("SIMLINGO_MCP_SUBJECT_PREFIX", "workflow.mcp")
+        )
+        self.subject_session_id = self._compact_subject_token(
+            os.getenv("SIMLINGO_MCP_SESSION_ID", f"session-{uuid.uuid4().hex[:8]}")
+        )
         self.sender_id = sender_id or os.getenv("SIMLINGO_MCP_SENDER_ID", "Bench2DriveMCP")
 
     def infer(self, payload: dict[str, Any]) -> dict[str, Any]:
         return asyncio.run(self._infer_async(payload))
 
     async def _infer_async(self, payload: dict[str, Any]) -> dict[str, Any]:
+        route_key = str(payload.get("route_key", "route"))
         request_id = self._build_request_id(
-            route_key=str(payload.get("route_key", "route")),
+            route_key=route_key,
             frame_id=payload.get("frame_id"),
         )
-        subjects = self._build_subjects(request_id)
+        channel_id = self._build_channel_id(route_key)
+        subjects = self._build_subjects(channel_id)
         stage_durations_ms: dict[str, int] = {}
         nats_cls = self._build_nats_comm()
         nats = nats_cls(
@@ -141,6 +148,8 @@ class SplitAgentPipelineClient:
         )
         started = time.time()
         try:
+            payload = self._attach_pipeline_request_id(payload, request_id)
+            await self._cleanup_request_subjects(nats, subjects)
             await nats.send(subjects["source_input"], encode_structured_numpy(payload))
 
             stage_started = time.time()
@@ -220,7 +229,7 @@ class SplitAgentPipelineClient:
 
             messages = await nats.receive(
                 subject=subjects["final_output"],
-                durable=subjects["final_output_durable"],
+                durable=None,
                 batch=1,
                 timeout_sec=self.nats_timeout_sec,
             )
@@ -231,6 +240,7 @@ class SplitAgentPipelineClient:
             message = messages[0]
             await message.ack()
             decoded = decode_structured_numpy(message.payload)
+            await self._cleanup_request_subjects(nats, subjects)
             decoded.setdefault("pipeline_meta", {})
             decoded["pipeline_meta"].update(
                 {
@@ -247,6 +257,7 @@ class SplitAgentPipelineClient:
             self._validate_final_result(decoded)
             return decoded
         finally:
+            await self._cleanup_request_subjects(nats, subjects)
             await nats.close()
 
     def _post_execute(
@@ -313,6 +324,37 @@ class SplitAgentPipelineClient:
         frame_str = str(frame_id if frame_id is not None else "frame")
         return f"{route_key}-{frame_str}-{uuid.uuid4().hex[:10]}"
 
+    def _build_channel_id(self, route_key: str) -> str:
+        route_token = self._compact_subject_token(route_key)
+        return f"{self.subject_session_id}_{route_token}"
+
+    def _compact_subject_prefix(self, subject_prefix: str) -> str:
+        parts = [
+            re.sub(r"[^a-zA-Z0-9_-]+", "_", part).strip("_")
+            for part in str(subject_prefix).split(".")
+        ]
+        parts = [part for part in parts if part]
+        if not parts:
+            parts = ["workflow", "mcp"]
+        if len(parts) == 1:
+            parts.append("mcp")
+        if len(parts) > 2:
+            parts = [parts[0], "_".join(parts[1:])]
+        return ".".join(parts)
+
+    def _compact_subject_token(self, value: str) -> str:
+        return re.sub(r"[^a-zA-Z0-9_-]+", "_", str(value)).strip("_") or "route"
+
+    def _attach_pipeline_request_id(self, payload: dict[str, Any], request_id: str) -> dict[str, Any]:
+        payload = dict(payload)
+        payload["pipeline_request_id"] = request_id
+        runtime_context = payload.get("runtime_context")
+        if isinstance(runtime_context, dict):
+            runtime_context = dict(runtime_context)
+            runtime_context["pipeline_request_id"] = request_id
+            payload["runtime_context"] = runtime_context
+        return payload
+
     def _build_nats_comm(self):
         try:
             from simlingo_agents.encoder_agent.protocols import NatsComm
@@ -323,6 +365,19 @@ class SplitAgentPipelineClient:
             ) from exc
         return NatsComm
 
+    async def _cleanup_request_subjects(self, nats: Any, subjects: dict[str, str]) -> None:
+        data_subjects = [
+            subject
+            for key, subject in subjects.items()
+            if not key.endswith("_durable") and "durable" not in key
+        ]
+        try:
+            await nats.purge_subjects(data_subjects)
+        except AttributeError:
+            return
+        except Exception:
+            return
+
     def _build_subjects(self, request_id: str) -> dict[str, str]:
         base = f"{self.subject_prefix}.{request_id}"
         return {
@@ -330,11 +385,11 @@ class SplitAgentPipelineClient:
             "source_durable": f"{base.replace('.', '-')}-source-input",
             "encoded_output": f"{base}.scheduler_budget_input",
             "encoded_durable": f"{base.replace('.', '-')}-scheduler-budget-input",
-            "prefix_input": f"{base}.scheduler_budget_output.llm_prefix_input",
+            "prefix_input": f"{base}.llm_prefix_input",
             "prefix_input_durable": f"{base.replace('.', '-')}-scheduler-budget-output-llm-prefix-input",
-            "prefix_output": f"{base}.llm_prefix_output.scheduler_plan_input",
+            "prefix_output": f"{base}.llm_prefix_output",
             "prefix_output_durable": f"{base.replace('.', '-')}-llm-prefix-output-scheduler-plan-input",
-            "final_input": f"{base}.scheduler_plan_output.llm_final_input",
+            "final_input": f"{base}.llm_final_input",
             "final_input_durable": f"{base.replace('.', '-')}-scheduler-plan-output-llm-final-input",
             "final_output": f"{base}.llm_final_output",
             "final_output_durable": f"{base.replace('.', '-')}-llm-final-output",

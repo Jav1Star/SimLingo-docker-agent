@@ -310,6 +310,7 @@ class RemoteSplitLingoAgent(LingoAgent):
             "placeholder_values": prompt_label.placeholder_values,
             "camera_images": camera_images.detach().float().cpu().numpy(),
             "num_patches": num_patches,
+            "expand_image_token": False,
             "runtime_context": runtime_context,
         }
 
