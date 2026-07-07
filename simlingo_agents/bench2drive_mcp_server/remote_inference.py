@@ -229,7 +229,7 @@ class SplitAgentPipelineClient:
 
             messages = await nats.receive(
                 subject=subjects["final_output"],
-                durable=None,
+                durable=subjects["final_output_durable"],
                 batch=1,
                 timeout_sec=self.nats_timeout_sec,
             )

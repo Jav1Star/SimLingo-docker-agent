@@ -51,9 +51,21 @@ async def _receive_data_from_nats(
     nats_in_durable: str = NATS_IN_DURABLE,
 ) -> dict[str, Any]:
     try:
-        message = await _nats_comm.receive_last(subject=nats_in_subject)
-        if message is not None:
-            logger.info("Received latest message on subject '%s'", message.subject)
+        messages = await _nats_comm.receive(
+            subject=nats_in_subject,
+            durable=nats_in_durable,
+            batch=1,
+            timeout_sec=float(os.getenv("NATS_RECEIVE_TIMEOUT_SEC", "5")),
+            ack=False,
+        )
+        if messages:
+            message = messages[0]
+            await message.ack()
+            logger.info(
+                "Received message on subject '%s' with durable '%s'",
+                message.subject,
+                nats_in_durable,
+            )
             return message.payload
         raise HTTPException(
             status_code=504,

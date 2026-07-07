@@ -213,3 +213,5 @@ ds_config.json
 
 # 4. 编辑器配置 (如果你用 VSCode)
 .vscode/Autonomous-Transportation-System/
+
+simlingo_agents/local_split_eval_runs/
