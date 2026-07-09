@@ -25,7 +25,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: simlingo-llm-agent
-          image: simlingo-llm-agent:0.1.4
+          image: simlingo-llm-agent:0.1.5
           imagePullPolicy: IfNotPresent
           terminationMessagePolicy: FallbackToLogsOnError
           ports:
