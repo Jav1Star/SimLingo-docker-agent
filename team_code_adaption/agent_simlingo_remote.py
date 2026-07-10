@@ -226,6 +226,18 @@ class RemoteSplitLingoAgent(LingoAgent):
             raise RuntimeError(f"Remote split-agent inference failed at step {self.step}: {exc}") from exc
 
         llm_payload = remote_result.get("llm_payload", {})
+        self._log_remote_frame_alignment(
+            timestamp=timestamp,
+            remote_payload=remote_payload,
+            remote_result=remote_result,
+            llm_payload=llm_payload,
+        )
+        self._log_scheduler_plan(
+            timestamp=timestamp,
+            remote_payload=remote_payload,
+            remote_result=remote_result,
+            llm_payload=llm_payload,
+        )
         pred_speed_wps_np = llm_payload.get("speed_wps")
         pred_route_np = llm_payload.get("route")
         if pred_speed_wps_np is None or pred_route_np is None:
@@ -267,6 +279,21 @@ class RemoteSplitLingoAgent(LingoAgent):
             self.control = carla.VehicleControl(0.0, 0.0, 1.0)
         else:
             self.control = control
+
+        self._log_remote_control_trace(
+            timestamp=timestamp,
+            remote_payload=remote_payload,
+            remote_result=remote_result,
+            llm_payload=llm_payload,
+            tick_data=tick_data,
+            pred_route=pred_route,
+            pred_speed_wps=pred_speed_wps,
+            pid_steer=steer,
+            pid_throttle=throttle,
+            pid_brake=brake,
+            returned_control=control,
+            stored_control=self.control,
+        )
 
         metric_info = self.get_metric_info()
         metric_info["eval_budget"] = copy.deepcopy(self.eval_budget)
@@ -313,6 +340,233 @@ class RemoteSplitLingoAgent(LingoAgent):
             "expand_image_token": False,
             "runtime_context": runtime_context,
         }
+
+    def _log_remote_frame_alignment(
+        self,
+        *,
+        timestamp: float,
+        remote_payload: dict,
+        remote_result: dict,
+        llm_payload: dict,
+    ) -> None:
+        if self.save_path_metric is None:
+            return
+
+        pipeline_meta = remote_result.get("pipeline_meta", {})
+        runtime_context = llm_payload.get("runtime_context", {})
+        expected_step = int(self.step)
+        payload_frame_id = self._to_int_or_none(remote_payload.get("frame_id"))
+        result_frame_id = self._to_int_or_none(remote_result.get("frame_id"))
+        llm_frame_id = self._to_int_or_none(llm_payload.get("frame_id"))
+        runtime_step = self._to_int_or_none(runtime_context.get("step")) if isinstance(runtime_context, dict) else None
+        meta_request_id = pipeline_meta.get("request_id") if isinstance(pipeline_meta, dict) else None
+        runtime_request_id = (
+            runtime_context.get("pipeline_request_id")
+            if isinstance(runtime_context, dict)
+            else None
+        )
+
+        frame_match = (
+            payload_frame_id == expected_step
+            and result_frame_id == expected_step
+            and llm_frame_id == expected_step
+            and runtime_step == expected_step
+        )
+        request_match = bool(meta_request_id) and meta_request_id == runtime_request_id
+        record = {
+            "step": expected_step,
+            "timestamp": float(timestamp),
+            "payload_frame_id": payload_frame_id,
+            "result_frame_id": result_frame_id,
+            "llm_payload_frame_id": llm_frame_id,
+            "runtime_context_step": runtime_step,
+            "pipeline_meta_request_id": meta_request_id,
+            "runtime_context_pipeline_request_id": runtime_request_id,
+            "frame_match": frame_match,
+            "request_match": request_match,
+            "alignment_ok": frame_match and request_match,
+        }
+
+        try:
+            log_path = Path(self.save_path_metric) / "remote_frame_alignment.jsonl"
+            with open(log_path, "a", encoding="utf-8") as outfile:
+                outfile.write(json.dumps(record, ensure_ascii=True) + "\n")
+        except Exception:
+            return
+
+    def _log_scheduler_plan(
+        self,
+        *,
+        timestamp: float,
+        remote_payload: dict,
+        remote_result: dict,
+        llm_payload: dict,
+    ) -> None:
+        if self.save_path_metric is None:
+            return
+
+        pipeline_meta = remote_result.get("pipeline_meta", {})
+        runtime_context = llm_payload.get("runtime_context", {})
+        execution_plan = llm_payload.get("execution_plan_applied")
+        plan_np = None if execution_plan is None else np.asarray(execution_plan)
+
+        record = {
+            "step": int(self.step),
+            "timestamp": float(timestamp),
+            "payload_frame_id": self._to_int_or_none(remote_payload.get("frame_id")),
+            "result_frame_id": self._to_int_or_none(remote_result.get("frame_id")),
+            "llm_payload_frame_id": self._to_int_or_none(llm_payload.get("frame_id")),
+            "pipeline_meta_request_id": pipeline_meta.get("request_id") if isinstance(pipeline_meta, dict) else None,
+            "runtime_context_pipeline_request_id": (
+                runtime_context.get("pipeline_request_id") if isinstance(runtime_context, dict) else None
+            ),
+            "budget_value": self._to_jsonable(llm_payload.get("budget_value")),
+            "plan_present": plan_np is not None,
+            "plan_shape": None if plan_np is None else list(plan_np.shape),
+        }
+
+        if plan_np is not None:
+            batch_plan = plan_np[0] if plan_np.ndim == 4 and plan_np.shape[0] > 0 else plan_np
+            record["execution_plan"] = self._to_jsonable(plan_np)
+            if batch_plan.ndim >= 2:
+                layer_axes = tuple(range(1, batch_plan.ndim))
+                active = (batch_plan > 0.5).any(axis=layer_axes).astype(np.int64)
+                record["layer_active_mask"] = active.tolist()
+                record["active_layer_count"] = int(active.sum())
+                record["layer_keep_ratio"] = (batch_plan > 0.5).mean(axis=layer_axes).astype(np.float32).tolist()
+
+        try:
+            log_path = Path(self.save_path_metric) / "remote_scheduler_plan.jsonl"
+            with open(log_path, "a", encoding="utf-8") as outfile:
+                outfile.write(json.dumps(record, ensure_ascii=True) + "\n")
+        except Exception:
+            return
+
+    def _log_remote_control_trace(
+        self,
+        *,
+        timestamp: float,
+        remote_payload: dict,
+        remote_result: dict,
+        llm_payload: dict,
+        tick_data: dict,
+        pred_route: torch.Tensor,
+        pred_speed_wps: torch.Tensor,
+        pid_steer,
+        pid_throttle,
+        pid_brake,
+        returned_control: carla.VehicleControl,
+        stored_control: carla.VehicleControl,
+    ) -> None:
+        if self.save_path_metric is None:
+            return
+
+        pipeline_meta = remote_result.get("pipeline_meta", {})
+        runtime_context = llm_payload.get("runtime_context", {})
+        initial_delay_active = bool(self.step < self.config.inital_frames_delay)
+        returned = self._vehicle_control_to_dict(returned_control)
+        stored = self._vehicle_control_to_dict(stored_control)
+        record = {
+            "step": int(self.step),
+            "timestamp": float(timestamp),
+            "payload_frame_id": self._to_int_or_none(remote_payload.get("frame_id")),
+            "result_frame_id": self._to_int_or_none(remote_result.get("frame_id")),
+            "llm_payload_frame_id": self._to_int_or_none(llm_payload.get("frame_id")),
+            "pipeline_meta_request_id": pipeline_meta.get("request_id") if isinstance(pipeline_meta, dict) else None,
+            "runtime_context_pipeline_request_id": (
+                runtime_context.get("pipeline_request_id") if isinstance(runtime_context, dict) else None
+            ),
+            "gt_velocity": self._scalar_or_none(tick_data.get("speed")),
+            "pred_route": self._array_summary(pred_route),
+            "pred_speed_wps": self._array_summary(pred_speed_wps),
+            "pid": {
+                "steer": self._scalar_or_none(pid_steer),
+                "throttle": self._scalar_or_none(pid_throttle),
+                "brake": self._scalar_or_none(pid_brake),
+            },
+            "returned_control": returned,
+            "stored_control": stored,
+            "initial_delay_active": initial_delay_active,
+            "returned_control_matches_stored_control": returned == stored,
+            "control_in_range": (
+                returned is not None
+                and -1.0 <= returned["steer"] <= 1.0
+                and 0.0 <= returned["throttle"] <= 1.0
+                and 0.0 <= returned["brake"] <= 1.0
+            ),
+        }
+
+        try:
+            log_path = Path(self.save_path_metric) / "remote_control_trace.jsonl"
+            with open(log_path, "a", encoding="utf-8") as outfile:
+                outfile.write(json.dumps(record, ensure_ascii=True) + "\n")
+        except Exception:
+            return
+
+    def _vehicle_control_to_dict(self, control):
+        if control is None:
+            return None
+        return {
+            "steer": float(control.steer),
+            "throttle": float(control.throttle),
+            "brake": float(control.brake),
+            "hand_brake": bool(control.hand_brake),
+            "reverse": bool(control.reverse),
+            "manual_gear_shift": bool(control.manual_gear_shift),
+            "gear": int(control.gear),
+        }
+
+    def _array_summary(self, value, max_items: int = 5):
+        if value is None:
+            return {"present": False}
+        if isinstance(value, torch.Tensor):
+            array = value.detach().float().cpu().numpy()
+        else:
+            array = np.asarray(value)
+        finite = np.isfinite(array) if np.issubdtype(array.dtype, np.number) else np.zeros(array.shape, dtype=bool)
+        flat = array.reshape(-1) if array.size else array
+        return {
+            "present": True,
+            "shape": list(array.shape),
+            "finite": bool(finite.all()) if finite.size else True,
+            "nan_count": int(np.isnan(array).sum()) if np.issubdtype(array.dtype, np.number) else None,
+            "inf_count": int(np.isinf(array).sum()) if np.issubdtype(array.dtype, np.number) else None,
+            "min": float(np.nanmin(array)) if array.size and np.issubdtype(array.dtype, np.number) else None,
+            "max": float(np.nanmax(array)) if array.size and np.issubdtype(array.dtype, np.number) else None,
+            "first_values": self._to_jsonable(flat[:max_items]) if array.size else [],
+        }
+
+    def _scalar_or_none(self, value):
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 0:
+                return None
+            return float(value.detach().cpu().reshape(-1)[0].item())
+        if isinstance(value, np.ndarray):
+            if value.size == 0:
+                return None
+            return float(value.reshape(-1)[0])
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _to_int_or_none(self, value):
+        if value is None:
+            return None
+        if isinstance(value, np.ndarray):
+            if value.size != 1:
+                return None
+            value = value.reshape(-1)[0]
+        if isinstance(value, torch.Tensor):
+            if value.numel() != 1:
+                return None
+            value = value.detach().cpu().reshape(-1)[0].item()
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     def _to_jsonable(self, value):
         if isinstance(value, np.ndarray):
