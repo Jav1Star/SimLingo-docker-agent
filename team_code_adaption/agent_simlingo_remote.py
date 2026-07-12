@@ -52,8 +52,7 @@ class RemoteSplitLingoAgent(LingoAgent):
         torch.cuda.empty_cache()
         self.track = autonomous_agent.Track.SENSORS
         if "+" in path_to_conf_file:
-            self.config_path = path_to_conf_file.split("+")[0]
-            self.save_path_root = path_to_conf_file.split("+")[1]
+            self.config_path, self.save_path_root = path_to_conf_file.split("+", 1)
         else:
             self.config_path = path_to_conf_file
             self.save_path_root = route_index
@@ -92,9 +91,8 @@ class RemoteSplitLingoAgent(LingoAgent):
                 self.command_templates = ujson.load(f)
 
         self.route_path = os.environ.get("ROUTES", "")
-        route_type = self.route_path.split("data/benchmarks/")[-1].split("/")[0]
-        route_number = str(pathlib.Path(self.route_path).stem)
-        self.route_key = str(route_index) if route_index is not None else f"{route_type}/{route_number}"
+        self.route_key = self._resolve_route_key(route_index)
+        route_type, route_number = self._resolve_route_path_parts()
 
         self.speed_controller = t_u.PIDController(
             k_p=self.config.speed_kp,
@@ -178,6 +176,7 @@ class RemoteSplitLingoAgent(LingoAgent):
             self.ukf.P = np.diag([0.5, 0.5, 0.000001, 0.000001])
             self.ukf.R = np.diag([0.5, 0.5, 0.000000000000001, 0.000000000000001])
             self.ukf.Q = np.diag([0.0001, 0.0001, 0.001, 0.001])
+
             self.filter_initialized = False
 
         self.state_log = deque(maxlen=max((self.lidar_seq_len * self.data_save_freq), 2))
@@ -206,6 +205,42 @@ class RemoteSplitLingoAgent(LingoAgent):
         if DEBUG:
             self.save_path_img = self.debug_save_path + "/images"
             Path(self.save_path_img).mkdir(parents=True, exist_ok=True)
+
+    def _resolve_route_key(self, route_index=None) -> str:
+        if route_index is not None:
+            return str(route_index)
+
+        if self.save_path_root:
+            return str(self.save_path_root)
+
+        eval_route_id = os.getenv("SIMLINGO_EVAL_ROUTE_ID", "").strip()
+        if eval_route_id:
+            return f"eval_route/{eval_route_id}"
+
+        if str(getattr(self, "route_path", "") or "").strip():
+            route_type, route_number = self._resolve_route_path_parts()
+            if route_type and route_number:
+                return f"{route_type}/{route_number}"
+            if route_number:
+                return route_number
+
+        raise RuntimeError(
+            "Unable to resolve a non-empty route_key. Ensure leaderboard passes a save_name, "
+            "route_index, SIMLINGO_EVAL_ROUTE_ID, or ROUTES."
+        )
+
+    def _resolve_route_path_parts(self) -> tuple[str, str]:
+        route_path = str(getattr(self, "route_path", "") or "").strip()
+        if not route_path:
+            return "unknown_route_type", "unknown_route"
+        route = pathlib.Path(route_path)
+        route_number = route.stem or "unknown_route"
+        normalized = route_path.replace("\\", "/")
+        if "data/benchmarks/" in normalized:
+            route_type = normalized.split("data/benchmarks/")[-1].split("/")[0]
+        else:
+            route_type = route.parent.name or "routes"
+        return route_type, route_number
 
     @torch.no_grad()
     def run_step(self, input_data, timestamp, sensors=None):  # pylint: disable=unused-argument

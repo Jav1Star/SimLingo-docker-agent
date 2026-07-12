@@ -186,6 +186,7 @@ def launch_job(job, gpu_id, world_port, tm_port):
     env["SCENARIO_RUNNER_ROOT"] = f"{repo_root}/Bench2Drive/scenario_runner"
     env["SAVE_PATH"] = job["viz_path"]
     env["LEADERBOARD_ROOT"] = f"{repo_root}/Bench2Drive/leaderboard"
+    env["ROUTES"] = job["route"]
     env["SIMLINGO_EVAL_RESULT_FILE"] = job["result_file"]
     env["SIMLINGO_EVAL_ROUTE_ID"] = str(job["route_id"])
     # 通过环境变量把 mode 与固定 budget 值传给 agent
