@@ -330,6 +330,12 @@ class SchedulerRuntime:
                 budget_tensor = torch.as_tensor(budget_value_np, device=self._device, dtype=torch.float32)
                 execution_plan = assigner.scheduler(prefix_feature_tensor.contiguous(), budget_tensor)
                 assigner._runtime_execution_plan = execution_plan.transpose(0, 1)
+                plan_debug = self._build_plan_debug(
+                    assigner=assigner,
+                    prefix_feature_tensor=prefix_feature_tensor,
+                    budget_tensor=budget_tensor,
+                    execution_plan=execution_plan,
+                )
 
         return {
             "status": "success",
@@ -343,8 +349,118 @@ class SchedulerRuntime:
                 "num_prefix_layers": self._num_prefix_layers,
                 "scheduler_target": self._scheduler_target,
                 "route_keys": route_keys,
+                "llm_prefix_meta": payload.get("meta"),
+                "llm_prefix_feature_stats": payload.get("budget_token_prefix_feature_stats"),
+                "scheduler_budget_meta": payload.get("scheduler_meta"),
+                "scheduler_plan_debug": plan_debug,
             },
         }
+
+    def _build_plan_debug(
+        self,
+        *,
+        assigner: BaseBudgetAssigner,
+        prefix_feature_tensor: torch.Tensor,
+        budget_tensor: torch.Tensor,
+        execution_plan: torch.Tensor,
+        max_values: int = 64,
+    ) -> dict[str, Any]:
+        scheduler = assigner.scheduler
+        debug: dict[str, Any] = {
+            "budget_value": budget_tensor.detach().float().cpu().tolist(),
+            "prefix_feature_stats": self._tensor_stats(prefix_feature_tensor),
+            "execution_plan_shape": list(execution_plan.shape),
+        }
+
+        layer_mask = (execution_plan.detach().float().sum(dim=(2, 3)) > 0).to(dtype=torch.int64)
+        debug["layer_active_mask"] = layer_mask.cpu().tolist()
+        debug["active_layer_count"] = layer_mask.sum(dim=1).cpu().tolist()
+
+        if scheduler is None or not hasattr(scheduler, "mlp_head"):
+            debug["logits_available"] = False
+            return debug
+
+        logits = scheduler.mlp_head(prefix_feature_tensor.contiguous()).detach().float().cpu()
+        debug["logits_available"] = True
+        debug["logits_shape"] = list(logits.shape)
+        debug["logits"] = logits.tolist()
+        debug["logits_stats"] = self._tensor_stats(logits)
+        flat_logits = logits.reshape(-1)
+        debug["logits_first_values"] = flat_logits[:max_values].tolist()
+
+        num_prefix_layers = int(getattr(scheduler, "num_prefix_layers", self._num_prefix_layers or 0))
+        num_hidden_layers = int(getattr(scheduler, "num_hidden_layers", self._num_hidden_layers or logits.size(-1)))
+        sub_layer_count = max(num_hidden_layers - num_prefix_layers, 0)
+        raw_units = torch.floor(budget_tensor.detach().float().cpu() * num_hidden_layers) - num_prefix_layers
+        units = torch.clamp(raw_units, min=0, max=sub_layer_count).to(dtype=torch.long)
+        debug["quantized_budget_units"] = units.tolist()
+        debug["quantized_budget_raw_units"] = raw_units.tolist()
+        debug["num_prefix_layers"] = num_prefix_layers
+        debug["num_hidden_layers"] = num_hidden_layers
+
+        if logits.ndim == 2 and logits.size(1) == sub_layer_count:
+            topk_rows: list[dict[str, Any]] = []
+            for batch_idx in range(logits.size(0)):
+                k = int(units[batch_idx].item())
+                row = logits[batch_idx]
+                if k <= 0:
+                    topk_rows.append(
+                        {
+                            "batch_index": batch_idx,
+                            "k": k,
+                            "sub_layer_indices": [],
+                            "layer_indices": [],
+                            "values": [],
+                        }
+                    )
+                    continue
+                values, indices = torch.topk(row, k=k, largest=True, sorted=True)
+                topk_rows.append(
+                    {
+                        "batch_index": batch_idx,
+                        "k": k,
+                        "sub_layer_indices": indices.tolist(),
+                        "layer_indices": (indices + num_prefix_layers).tolist(),
+                        "values": values.tolist(),
+                    }
+                )
+            debug["topk"] = topk_rows
+        else:
+            debug["topk"] = None
+            debug["topk_note"] = "logits shape does not match SimpleScheduler_L sub-layer layout"
+        return debug
+
+    def _tensor_stats(self, value: torch.Tensor, *, max_items: int = 8) -> dict[str, Any]:
+        tensor = value.detach().float().cpu()
+        finite = torch.isfinite(tensor)
+        flat = tensor.reshape(-1)
+        finite_flat = flat[torch.isfinite(flat)]
+        stats: dict[str, Any] = {
+            "shape": list(tensor.shape),
+            "finite": bool(finite.all().item()) if finite.numel() else True,
+            "nan_count": int(torch.isnan(tensor).sum().item()),
+            "inf_count": int(torch.isinf(tensor).sum().item()),
+            "first_values": flat[:max_items].tolist(),
+        }
+        if finite_flat.numel() == 0:
+            stats.update({"mean": None, "std": None, "min": None, "max": None, "l2_norm": None, "abs_mean": None})
+            return stats
+        stats.update(
+            {
+                "mean": float(finite_flat.mean().item()),
+                "std": float(finite_flat.std(unbiased=False).item()),
+                "min": float(finite_flat.min().item()),
+                "max": float(finite_flat.max().item()),
+                "l2_norm": float(torch.linalg.vector_norm(finite_flat).item()),
+                "abs_mean": float(finite_flat.abs().mean().item()),
+            }
+        )
+        if tensor.ndim >= 2:
+            per_batch = tensor.reshape(tensor.shape[0], -1)
+            stats["per_batch_l2_norm"] = torch.linalg.vector_norm(per_batch, dim=1).tolist()
+            stats["per_batch_mean"] = per_batch.mean(dim=1).tolist()
+            stats["per_batch_std"] = per_batch.std(dim=1, unbiased=False).tolist()
+        return stats
 
     def _validate_budget_value(self, budget_value: np.ndarray, expected_batch: int) -> np.ndarray:
         if budget_value.ndim == 0:

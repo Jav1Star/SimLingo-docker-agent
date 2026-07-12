@@ -25,7 +25,7 @@ ADAPTION_TRAIN = os.getenv("LLM_ADAPTION_TRAIN", "false").strip().lower() in {"1
 LORA_ALPHA = int(os.getenv("LLM_LORA_ALPHA", "64"))
 LORA_R = int(os.getenv("LLM_LORA_R", "32"))
 LORA_DROPOUT = float(os.getenv("LLM_LORA_DROPOUT", "0.1"))
-NUM_PREFIX_LAYERS = int(os.getenv("LLM_NUM_PREFIX_LAYERS", "2"))
+NUM_PREFIX_LAYERS = int(os.getenv("LLM_NUM_PREFIX_LAYERS", "10"))
 SCHEDULER_NUM_PREFIX_LAYERS = int(os.getenv("LLM_SCHEDULER_NUM_PREFIX_LAYERS", "10"))
 LLM_SCHEDULER_TARGET = os.getenv(
     "LLM_SCHEDULER_TARGET",

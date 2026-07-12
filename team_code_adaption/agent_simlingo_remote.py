@@ -421,6 +421,7 @@ class RemoteSplitLingoAgent(LingoAgent):
                 runtime_context.get("pipeline_request_id") if isinstance(runtime_context, dict) else None
             ),
             "budget_value": self._to_jsonable(llm_payload.get("budget_value")),
+            "scheduler_plan_meta": self._to_jsonable(llm_payload.get("scheduler_plan_meta")),
             "plan_present": plan_np is not None,
             "plan_shape": None if plan_np is None else list(plan_np.shape),
         }

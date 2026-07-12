@@ -57,7 +57,7 @@ curl -X POST http://127.0.0.1:9013/a2a/execute \
 ```
 
 触发 llm 的 `prefix` 阶段。
-这一步消费 `encoded_payload + budget_value`，运行前 2 层 prefix，并输出 `budget_token_prefix_feature`：
+这一步消费 `encoded_payload + budget_value`，运行前 10 层 prefix，并输出 `budget_token_prefix_feature`：
 
 ```bash
 curl -X POST http://127.0.0.1:9012/a2a/execute \

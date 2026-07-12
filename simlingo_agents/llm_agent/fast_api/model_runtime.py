@@ -19,7 +19,7 @@ from utils.logger_utils import get_logger
 logger = get_logger(__name__)
 
 
-LLM_PREFIX_NUM_LAYERS = 2
+LLM_PREFIX_NUM_LAYERS = 10
 SCHEDULER_NUM_PREFIX_LAYERS = 10
 
 DRIVING_SPECIAL_TOKENS = [
@@ -90,6 +90,11 @@ class LLMRuntime:
     ) -> None:
         num_prefix_layers = int(num_prefix_layers)
         scheduler_num_prefix_layers = int(scheduler_num_prefix_layers)
+        if num_prefix_layers != scheduler_num_prefix_layers:
+            raise ValueError(
+                "LLM prefix layer count must match scheduler prefix layer count: "
+                f"llm={num_prefix_layers}, scheduler={scheduler_num_prefix_layers}"
+            )
 
         if self.is_loaded and self._model_variant == model_variant:
             return
@@ -440,6 +445,7 @@ class LLMRuntime:
         route_key = encoded_payload.get("route_key")
         frame_id = encoded_payload.get("frame_id")
         runtime_context = encoded_payload.get("runtime_context", {})
+        scheduler_meta = payload.get("scheduler_meta")
 
         if phase == "prefix":
             prefix_hidden_states = outputs.hidden_states[self._num_prefix_layers]
@@ -453,6 +459,8 @@ class LLMRuntime:
                 "encoded_payload": encoded_payload,
                 "budget_value": budget_value_np,
                 "budget_token_prefix_feature": budget_token_prefix_feature.detach().float().cpu().numpy(),
+                "budget_token_prefix_feature_stats": self._tensor_stats(budget_token_prefix_feature),
+                "scheduler_meta": scheduler_meta,
                 "runtime_context": runtime_context,
                 "meta": {
                     "model_variant": self._model_variant,
@@ -491,6 +499,7 @@ class LLMRuntime:
                 "driving_features": driving_features.detach().float().cpu().numpy(),
                 "execution_plan_applied": execution_plan_np,
                 "budget_value": budget_value_np,
+                "scheduler_plan_meta": payload.get("plan_meta"),
                 "runtime_context": runtime_context,
                 "meta": {
                     "model_variant": self._model_variant,
@@ -504,6 +513,38 @@ class LLMRuntime:
                 },
             },
         }
+
+    def _tensor_stats(self, value: torch.Tensor, *, max_items: int = 8) -> dict[str, Any]:
+        tensor = value.detach().float().cpu()
+        finite = torch.isfinite(tensor)
+        flat = tensor.reshape(-1)
+        finite_flat = flat[torch.isfinite(flat)]
+        stats: dict[str, Any] = {
+            "shape": list(tensor.shape),
+            "finite": bool(finite.all().item()) if finite.numel() else True,
+            "nan_count": int(torch.isnan(tensor).sum().item()),
+            "inf_count": int(torch.isinf(tensor).sum().item()),
+            "first_values": flat[:max_items].tolist(),
+        }
+        if finite_flat.numel() == 0:
+            stats.update({"mean": None, "std": None, "min": None, "max": None, "l2_norm": None, "abs_mean": None})
+            return stats
+        stats.update(
+            {
+                "mean": float(finite_flat.mean().item()),
+                "std": float(finite_flat.std(unbiased=False).item()),
+                "min": float(finite_flat.min().item()),
+                "max": float(finite_flat.max().item()),
+                "l2_norm": float(torch.linalg.vector_norm(finite_flat).item()),
+                "abs_mean": float(finite_flat.abs().mean().item()),
+            }
+        )
+        if tensor.ndim >= 2:
+            per_batch = tensor.reshape(tensor.shape[0], -1)
+            stats["per_batch_l2_norm"] = torch.linalg.vector_norm(per_batch, dim=1).tolist()
+            stats["per_batch_mean"] = per_batch.mean(dim=1).tolist()
+            stats["per_batch_std"] = per_batch.std(dim=1, unbiased=False).tolist()
+        return stats
 
     def _validate_budget_value(self, budget_value: np.ndarray, *, batch_size: int) -> np.ndarray:
         if budget_value.ndim == 0:
