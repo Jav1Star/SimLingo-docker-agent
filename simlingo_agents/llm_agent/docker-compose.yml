@@ -37,6 +37,7 @@ services:
       LLM_FINAL_IN_SUBJECT: ${LLM_FINAL_IN_SUBJECT:-workflow.simlingo.scheduler_plan_output.llm_final_input}
       LLM_FINAL_IN_DURABLE: ${LLM_FINAL_IN_DURABLE:-workflow-simlingo-scheduler-plan-output-llm-final-input}
       LLM_FINAL_OUT_SUBJECT: ${LLM_FINAL_OUT_SUBJECT:-workflow.simlingo.llm_final_output}
+      LLM_DECISION_UPDATE_OUT_SUBJECT: ${LLM_DECISION_UPDATE_OUT_SUBJECT:-workflow.simlingo.llm_final_output.scheduler_decision_update_input}
       NATS_STREAM: ${NATS_STREAM:-WORKFLOW}
       NATS_STREAM_SUBJECTS: ${NATS_STREAM_SUBJECTS:-workflow.>}
       NATS_JETSTREAM_DOMAIN: ${NATS_JETSTREAM_DOMAIN:-}

@@ -248,6 +248,8 @@ class SchedulerRuntime:
             return self._run_budget_phase(assigner, payload)
         if phase == "plan":
             return self._run_plan_phase(assigner, payload)
+        if phase == "decision_update":
+            return self._run_decision_update_phase(assigner, payload)
         raise ValueError(f"Unsupported scheduler phase: {phase}")
 
     def _run_budget_phase(self, assigner: BaseBudgetAssigner, payload: dict[str, Any]) -> dict[str, Any]:
@@ -355,6 +357,81 @@ class SchedulerRuntime:
                 "scheduler_plan_debug": plan_debug,
             },
         }
+
+    def _run_decision_update_phase(self, assigner: BaseBudgetAssigner, payload: dict[str, Any]) -> dict[str, Any]:
+        llm_payload = payload.get("llm_payload") if isinstance(payload.get("llm_payload"), dict) else payload
+        if not isinstance(llm_payload, dict):
+            raise ValueError("scheduler decision_update phase requires an 'llm_payload' object")
+
+        speed_wps = llm_payload.get("speed_wps")
+        route = llm_payload.get("route")
+        if speed_wps is None:
+            raise ValueError("llm_payload.speed_wps is required")
+        if route is None:
+            raise ValueError("llm_payload.route is required")
+
+        speed_np = np.asarray(speed_wps, dtype=np.float32)
+        route_np = np.asarray(route, dtype=np.float32)
+        if speed_np.ndim < 3 or speed_np.shape[-1] != 2:
+            raise ValueError(f"llm_payload.speed_wps must have shape [B, N, 2], got {speed_np.shape}")
+        if route_np.ndim < 3 or route_np.shape[-1] != 2:
+            raise ValueError(f"llm_payload.route must have shape [B, N, 2], got {route_np.shape}")
+        batch_size = int(speed_np.shape[0])
+        if route_np.shape[0] != batch_size:
+            raise ValueError("llm_payload.route batch size must match speed_wps batch size")
+
+        route_keys = self._resolve_route_keys(llm_payload, batch_size=batch_size)
+        runtime_context = self._resolve_runtime_context(payload, llm_payload)
+        ego_xy, ego_yaw, timestamp = self._extract_motion_context(runtime_context, batch_size)
+
+        with self._model_lock:
+            with torch.no_grad():
+                speed_tensor = torch.as_tensor(speed_np, device=self._device, dtype=torch.float32)
+                route_tensor = torch.as_tensor(route_np, device=self._device, dtype=torch.float32)
+                driving_input = SimpleNamespace(
+                    ego_xy=ego_xy,
+                    ego_yaw=ego_yaw,
+                    timestamp=timestamp,
+                )
+                metrics_computer = getattr(assigner, "metrics_computer", None)
+                if metrics_computer is None:
+                    decision_shift = {
+                        "speed_wps": {"e_mean": [None] * batch_size, "e_norm": [None] * batch_size},
+                        "route": {"e_mean": [None] * batch_size, "e_norm": [None] * batch_size},
+                        "delta_tau": [None] * batch_size,
+                        "t_lap": [float(assigner.decision_shift_t_lap)] * batch_size,
+                    }
+                else:
+                    decision_shift_raw = metrics_computer.compute_decision_shift_metrics(
+                        driving_input=driving_input,
+                        current_speed_wps=speed_tensor,
+                        current_route=route_tensor,
+                        route_keys=route_keys,
+                    )
+                    decision_shift = metrics_computer.to_python_metrics(decision_shift_raw)
+
+                update_rows = self._apply_decision_shift_to_budget_state(
+                    assigner=assigner,
+                    route_keys=route_keys,
+                    decision_shift=decision_shift,
+                )
+
+        assigner.last_scene_metrics = {
+            **(assigner.last_scene_metrics or {}),
+            "decision_shift": decision_shift,
+        }
+        assigner.last_update_info = update_rows
+        out = {
+            "status": "success",
+            "phase": "decision_update",
+            "route_key": llm_payload.get("route_key"),
+            "frame_id": llm_payload.get("frame_id"),
+            "route_keys": route_keys,
+            "decision_shift": decision_shift,
+            "decision_update": update_rows,
+            "eval_budget": assigner.get_eval_budget(),
+        }
+        return out
 
     def _build_plan_debug(
         self,
@@ -469,6 +546,92 @@ class SchedulerRuntime:
         if budget_value.shape[0] != expected_batch:
             raise ValueError(f"budget_value length ({budget_value.shape[0]}) must match batch size ({expected_batch})")
         return budget_value.astype(np.float32)
+
+    def _resolve_runtime_context(self, payload: dict[str, Any], llm_payload: dict[str, Any]) -> dict[str, Any]:
+        runtime_context = payload.get("runtime_context")
+        if not isinstance(runtime_context, dict):
+            runtime_context = llm_payload.get("runtime_context")
+        if not isinstance(runtime_context, dict):
+            plan_meta = llm_payload.get("scheduler_plan_meta")
+            if isinstance(plan_meta, dict):
+                runtime_context = plan_meta.get("runtime_context")
+        if not isinstance(runtime_context, dict):
+            raise ValueError("decision_update requires runtime_context with ego_xy, ego_yaw, and timestamp")
+        return runtime_context
+
+    def _extract_motion_context(
+        self,
+        runtime_context: dict[str, Any],
+        batch_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        ego_xy = runtime_context.get("ego_xy")
+        ego_yaw = runtime_context.get("ego_yaw")
+        timestamp = runtime_context.get("timestamp")
+        if ego_xy is None or ego_yaw is None or timestamp is None:
+            raise ValueError("runtime_context must contain ego_xy, ego_yaw, and timestamp")
+
+        ego_xy_tensor = torch.as_tensor(np.asarray(ego_xy, dtype=np.float32), device=self._device, dtype=torch.float32)
+        if ego_xy_tensor.ndim == 1:
+            ego_xy_tensor = ego_xy_tensor.unsqueeze(0)
+        if ego_xy_tensor.shape == (1, 2) and batch_size > 1:
+            ego_xy_tensor = ego_xy_tensor.repeat(batch_size, 1)
+        if ego_xy_tensor.shape != (batch_size, 2):
+            raise ValueError(f"runtime_context.ego_xy must have shape [B, 2], got {tuple(ego_xy_tensor.shape)}")
+
+        ego_yaw_tensor = torch.as_tensor(np.asarray(ego_yaw, dtype=np.float32), device=self._device, dtype=torch.float32).reshape(-1)
+        timestamp_tensor = torch.as_tensor(np.asarray(timestamp, dtype=np.float32), device=self._device, dtype=torch.float32).reshape(-1)
+        if ego_yaw_tensor.numel() == 1 and batch_size > 1:
+            ego_yaw_tensor = ego_yaw_tensor.repeat(batch_size)
+        if timestamp_tensor.numel() == 1 and batch_size > 1:
+            timestamp_tensor = timestamp_tensor.repeat(batch_size)
+        if ego_yaw_tensor.numel() != batch_size:
+            raise ValueError(f"runtime_context.ego_yaw must have length {batch_size}, got {ego_yaw_tensor.numel()}")
+        if timestamp_tensor.numel() != batch_size:
+            raise ValueError(f"runtime_context.timestamp must have length {batch_size}, got {timestamp_tensor.numel()}")
+        return ego_xy_tensor, ego_yaw_tensor, timestamp_tensor
+
+    def _apply_decision_shift_to_budget_state(
+        self,
+        *,
+        assigner: BaseBudgetAssigner,
+        route_keys: list[str],
+        decision_shift: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        speed_shift_list = decision_shift.get("speed_wps", {}).get("e_norm", [None] * len(route_keys))
+        route_shift_list = decision_shift.get("route", {}).get("e_norm", [None] * len(route_keys))
+        delta_tau_list = decision_shift.get("delta_tau", [None] * len(route_keys))
+
+        update_rows: list[dict[str, Any]] = []
+        for idx, route_key in enumerate(route_keys):
+            state = assigner.state_by_route.get(route_key)
+            if state is None:
+                state = assigner._get_state(route_key) if hasattr(assigner, "_get_state") else None
+            if state is None:
+                raise RuntimeError(f"failed to initialize scheduler state for route {route_key}")
+
+            speed_curr = speed_shift_list[idx] if idx < len(speed_shift_list) else None
+            route_curr = route_shift_list[idx] if idx < len(route_shift_list) else None
+            if speed_curr is not None and not np.isnan(speed_curr):
+                state["prev_decision_shift_speed"] = float(speed_curr)
+            if route_curr is not None and not np.isnan(route_curr):
+                state["prev_decision_shift_route"] = float(route_curr)
+
+            update_rows.append(
+                {
+                    "route_key": route_key,
+                    "decision_shift_speed": speed_curr,
+                    "decision_shift_route": route_curr,
+                    "delta_tau": delta_tau_list[idx] if idx < len(delta_tau_list) else None,
+                    "used_budget": float(state["used_budget"]),
+                    "phase": str(state["phase"]),
+                    "base_budget": state["base_budget"],
+                    "instant_budget": state["instant_budget"],
+                    "target_budget": state["target_budget"],
+                    "frame_count": int(state["frame_count"]),
+                    "safe_counter": int(state["safe_counter"]),
+                }
+            )
+        return update_rows
 
     def _resolve_route_keys(self, encoded_payload: dict[str, Any], batch_size: int) -> list[str]:
         route_keys = encoded_payload.get("route_keys")

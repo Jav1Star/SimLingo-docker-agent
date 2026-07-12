@@ -55,6 +55,10 @@ LLM_FINAL_IN_DURABLE = os.getenv(
     "workflow-simlingo-scheduler-plan-output-llm-final-input",
 )
 LLM_FINAL_OUT_SUBJECT = os.getenv("LLM_FINAL_OUT_SUBJECT", "workflow.simlingo.llm_final_output")
+LLM_DECISION_UPDATE_OUT_SUBJECT = os.getenv(
+    "LLM_DECISION_UPDATE_OUT_SUBJECT",
+    "workflow.simlingo.llm_final_output.scheduler_decision_update_input",
+)
 
 _nats_comm = NatsComm(servers=[NATS_SERVER_URL])
 
@@ -180,6 +184,7 @@ async def health() -> dict[str, Any]:
         "prefix_out_subject": LLM_PREFIX_OUT_SUBJECT,
         "final_in_subject": LLM_FINAL_IN_SUBJECT,
         "final_out_subject": LLM_FINAL_OUT_SUBJECT,
+        "decision_update_out_subject": LLM_DECISION_UPDATE_OUT_SUBJECT,
     }
 
 
@@ -187,6 +192,7 @@ async def agent_function(
     nats_in_subject: str,
     nats_in_durable: str,
     nats_out_subject: str | None = None,
+    decision_update_out_subject: str | None = None,
 ) -> dict[str, Any]:
     data, received_subject = await _receive_data_from_nats(
         nats_in_subject=nats_in_subject,
@@ -208,6 +214,12 @@ async def agent_function(
 
     outbound_payload = encode_structured_numpy(llm_result)
     await _send_data_to_nats(outbound_payload, nats_out_subject=nats_out_subject)
+    if llm_phase == "final":
+        update_subject = decision_update_out_subject
+        if update_subject is None:
+            update_subject = LLM_DECISION_UPDATE_OUT_SUBJECT
+        if update_subject:
+            await _send_data_to_nats(outbound_payload, nats_out_subject=update_subject)
     return {
         "status": "success",
         "frame_id": llm_result.get("frame_id"),
@@ -232,11 +244,15 @@ async def agent_execute(message: dict[str, Any]) -> dict[str, Any]:
         nats_in_durable = default_in_durable
 
     nats_out_subject = metadata.get("nats_out_subject")
+    decision_update_out_subject = metadata.get("decision_update_out_subject")
+    if decision_update_out_subject is None:
+        decision_update_out_subject = metadata.get("llm_decision_update_out_subject")
 
     result = await agent_function(
         nats_in_subject=nats_in_subject,
         nats_in_durable=nats_in_durable,
         nats_out_subject=nats_out_subject,
+        decision_update_out_subject=decision_update_out_subject,
     )
     task_response = A2ATaskResponse(
         task_id=task_request.task_id,

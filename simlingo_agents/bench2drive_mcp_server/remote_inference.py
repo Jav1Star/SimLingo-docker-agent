@@ -223,9 +223,25 @@ class SplitAgentPipelineClient:
                     "nats_in_subject": subjects["final_input"],
                     "nats_in_durable": subjects["final_input_durable"],
                     "nats_out_subject": subjects["final_output"],
+                    "decision_update_out_subject": subjects["decision_update_input"],
                 },
             )
             stage_durations_ms["llm_final"] = int((time.time() - stage_started) * 1000)
+
+            stage_started = time.time()
+            self._post_execute(
+                self.endpoints.scheduler_url,
+                receiver_id="SimLingoSchedulerAgent",
+                task_id=f"{request_id}-scheduler-decision-update",
+                task_type="decision_update",
+                task_description="Update scheduler decision-shift history",
+                metadata={
+                    "nats_in_subject": subjects["decision_update_input"],
+                    "nats_in_durable": subjects["decision_update_input_durable"],
+                    "nats_out_subject": subjects["decision_update_output"],
+                },
+            )
+            stage_durations_ms["scheduler_decision_update"] = int((time.time() - stage_started) * 1000)
 
             messages = await nats.receive(
                 subject=subjects["final_output"],
@@ -393,4 +409,8 @@ class SplitAgentPipelineClient:
             "final_input_durable": f"{base.replace('.', '-')}-scheduler-plan-output-llm-final-input",
             "final_output": f"{base}.llm_final_output",
             "final_output_durable": f"{base.replace('.', '-')}-llm-final-output",
+            "decision_update_input": f"{base}.scheduler_decision_update_input",
+            "decision_update_input_durable": f"{base.replace('.', '-')}-llm-final-output-scheduler-decision-update-input",
+            "decision_update_output": f"{base}.scheduler_decision_update_output",
+            "decision_update_output_durable": f"{base.replace('.', '-')}-scheduler-decision-update-output",
         }

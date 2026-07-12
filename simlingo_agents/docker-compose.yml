@@ -65,6 +65,7 @@ services:
       LLM_FINAL_IN_SUBJECT: ${LLM_FINAL_IN_SUBJECT:-workflow.simlingo.scheduler_plan_output.llm_final_input}
       LLM_FINAL_IN_DURABLE: ${LLM_FINAL_IN_DURABLE:-workflow-simlingo-scheduler-plan-output-llm-final-input}
       LLM_FINAL_OUT_SUBJECT: ${LLM_FINAL_OUT_SUBJECT:-workflow.simlingo.llm_final_output}
+      LLM_DECISION_UPDATE_OUT_SUBJECT: ${LLM_DECISION_UPDATE_OUT_SUBJECT:-workflow.simlingo.llm_final_output.scheduler_decision_update_input}
       NATS_STREAM: ${NATS_STREAM:-WORKFLOW}
       NATS_STREAM_SUBJECTS: ${NATS_STREAM_SUBJECTS:-workflow.>}
       NATS_JETSTREAM_DOMAIN: ${NATS_JETSTREAM_DOMAIN:-}
@@ -107,6 +108,9 @@ services:
       SCHEDULER_PLAN_IN_SUBJECT: ${SCHEDULER_PLAN_IN_SUBJECT:-workflow.simlingo.llm_prefix_output.scheduler_plan_input}
       SCHEDULER_PLAN_IN_DURABLE: ${SCHEDULER_PLAN_IN_DURABLE:-workflow-simlingo-llm-prefix-output-scheduler-plan-input}
       SCHEDULER_PLAN_OUT_SUBJECT: ${SCHEDULER_PLAN_OUT_SUBJECT:-workflow.simlingo.scheduler_plan_output.llm_final_input}
+      SCHEDULER_DECISION_UPDATE_IN_SUBJECT: ${SCHEDULER_DECISION_UPDATE_IN_SUBJECT:-workflow.simlingo.llm_final_output.scheduler_decision_update_input}
+      SCHEDULER_DECISION_UPDATE_IN_DURABLE: ${SCHEDULER_DECISION_UPDATE_IN_DURABLE:-workflow-simlingo-llm-final-output-scheduler-decision-update-input}
+      SCHEDULER_DECISION_UPDATE_OUT_SUBJECT: ${SCHEDULER_DECISION_UPDATE_OUT_SUBJECT:-workflow.simlingo.scheduler_decision_update_output}
       NATS_STREAM: ${NATS_STREAM:-WORKFLOW}
       NATS_STREAM_SUBJECTS: ${NATS_STREAM_SUBJECTS:-workflow.>}
       NATS_JETSTREAM_DOMAIN: ${NATS_JETSTREAM_DOMAIN:-}

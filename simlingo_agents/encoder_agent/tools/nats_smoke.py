@@ -17,6 +17,10 @@ def _build_minimal_encoder_payload(
     frame_id: str,
     num_patches: int,
     image_size: int,
+    ego_x: float,
+    ego_y: float,
+    ego_yaw: float,
+    timestamp: float,
 ) -> dict[str, Any]:
     camera_images = np.zeros((1, 1, num_patches, 3, image_size, image_size), dtype=np.float32)
     payload = {
@@ -26,9 +30,9 @@ def _build_minimal_encoder_payload(
         "camera_images": camera_images,
         "num_patches": num_patches,
         "runtime_context": {
-            "ego_xy": [0.0, 0.0],
-            "ego_yaw": 0.0,
-            "timestamp": 0.0,
+            "ego_xy": [float(ego_x), float(ego_y)],
+            "ego_yaw": float(ego_yaw),
+            "timestamp": float(timestamp),
         },
     }
     return encode_structured_numpy(payload)
@@ -60,6 +64,10 @@ async def _publish_minimal_input(args: argparse.Namespace) -> None:
         frame_id=args.frame_id,
         num_patches=args.num_patches,
         image_size=args.image_size,
+        ego_x=args.ego_x,
+        ego_y=args.ego_y,
+        ego_yaw=args.ego_yaw,
+        timestamp=args.timestamp,
     )
     ack = await comm.send(args.subject, payload)
     print(json.dumps({"status": "published", "subject": args.subject, "ack": ack}, indent=2, ensure_ascii=False))
@@ -114,6 +122,10 @@ def main() -> None:
     publish_parser.add_argument("--frame-id", default="smoke_frame_0001")
     publish_parser.add_argument("--num-patches", type=int, default=2)
     publish_parser.add_argument("--image-size", type=int, default=448)
+    publish_parser.add_argument("--ego-x", type=float, default=0.0)
+    publish_parser.add_argument("--ego-y", type=float, default=0.0)
+    publish_parser.add_argument("--ego-yaw", type=float, default=0.0)
+    publish_parser.add_argument("--timestamp", type=float, default=0.0)
 
     fetch_parser = subparsers.add_parser("fetch-once")
     fetch_parser.add_argument("--subject", required=True)

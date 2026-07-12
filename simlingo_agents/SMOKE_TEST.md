@@ -37,7 +37,7 @@ sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py publish-
 workflow.previousagent.result
 ```
 
-## 4. 依次触发五个阶段
+## 4. 依次触发六个阶段
 
 触发 encoder：
 
@@ -75,12 +75,35 @@ curl -X POST http://127.0.0.1:9013/a2a/execute \
 ```
 
 触发 llm 的 `final` 阶段。
-这一步消费 `encoded_payload + budget_value + execution_plan`，输出最终驾驶决策：
+这一步消费 `encoded_payload + budget_value + execution_plan`，输出最终驾驶决策，并额外向 scheduler 的决策历史更新 subject 发布同一份结果：
 
 ```bash
 curl -X POST http://127.0.0.1:9012/a2a/execute \
   -H 'Content-Type: application/json' \
   --data @simlingo_agents/smoke_test/llm_final_execute.json
+```
+
+触发 scheduler 的 `decision_update` 阶段。
+这一步消费 `llm_payload.speed_wps + llm_payload.route + runtime_context.ego_xy/ego_yaw/timestamp`，更新下一帧 budget 会使用的历史驾驶决策差异：
+
+```bash
+curl -X POST http://127.0.0.1:9013/a2a/execute \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "sender_id": "SmokeTest",
+    "receiver_id": "SimLingoSchedulerAgent",
+    "message_type": "request",
+    "payload": {
+      "task_id": "smoke-scheduler-decision-update",
+      "task_type": "decision_update",
+      "task_description": "Update scheduler decision history",
+      "metadata": {
+        "nats_in_subject": "workflow.simlingo.llm_final_output.scheduler_decision_update_input",
+        "nats_in_durable": "workflow-simlingo-llm-final-output-scheduler-decision-update-input",
+        "nats_out_subject": "workflow.simlingo.scheduler_decision_update_output"
+      }
+    }
+  }'
 ```
 
 ## 5. 查看每一段 NATS 输出
@@ -130,6 +153,15 @@ sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py fetch-on
   --summary
 ```
 
+查看 scheduler `decision_update` 输出摘要：
+
+```bash
+sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py fetch-once \
+  --subject workflow.simlingo.scheduler_decision_update_output \
+  --durable workflow-simlingo-scheduler-decision-update-output-check \
+  --summary
+```
+
 如果想把结构化 numpy 解码后再看摘要，可以加 `--decode`：
 
 ```bash
@@ -149,6 +181,7 @@ curl -X POST http://127.0.0.1:9013/a2a/execute -H 'Content-Type: application/jso
 curl -X POST http://127.0.0.1:9012/a2a/execute -H 'Content-Type: application/json' --data @simlingo_agents/smoke_test/llm_prefix_execute.json
 curl -X POST http://127.0.0.1:9013/a2a/execute -H 'Content-Type: application/json' --data @simlingo_agents/smoke_test/scheduler_plan_execute.json
 curl -X POST http://127.0.0.1:9012/a2a/execute -H 'Content-Type: application/json' --data @simlingo_agents/smoke_test/llm_final_execute.json
+curl -X POST http://127.0.0.1:9013/a2a/execute -H 'Content-Type: application/json' -d '{"sender_id":"SmokeTest","receiver_id":"SimLingoSchedulerAgent","message_type":"request","payload":{"task_id":"smoke-scheduler-decision-update","task_type":"decision_update","task_description":"Update scheduler decision history","metadata":{"nats_in_subject":"workflow.simlingo.llm_final_output.scheduler_decision_update_input","nats_in_durable":"workflow-simlingo-llm-final-output-scheduler-decision-update-input","nats_out_subject":"workflow.simlingo.scheduler_decision_update_output"}}}'
 sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py fetch-once --subject workflow.simlingo.llm_final_output --durable workflow-simlingo-llm-final-output-check --summary
 ```
 
@@ -171,3 +204,8 @@ sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py fetch-on
   - `llm_payload.route`
   - `llm_payload.driving_features`
   - `llm_payload.execution_plan_applied`
+- `llm_agent` 的 `final` 阶段还会向 `workflow.simlingo.llm_final_output.scheduler_decision_update_input` 发布同一份结果
+- `scheduler_agent` 的 `decision_update` 阶段返回 `status=success`，并向 `workflow.simlingo.scheduler_decision_update_output` 发布：
+  - `decision_shift.speed_wps`
+  - `decision_shift.route`
+  - `decision_update`

@@ -58,6 +58,18 @@ SCHEDULER_PLAN_OUT_SUBJECT = os.getenv(
     "SCHEDULER_PLAN_OUT_SUBJECT",
     "workflow.simlingo.scheduler_plan_output.llm_final_input",
 )
+SCHEDULER_DECISION_UPDATE_IN_SUBJECT = os.getenv(
+    "SCHEDULER_DECISION_UPDATE_IN_SUBJECT",
+    "workflow.simlingo.llm_final_output.scheduler_decision_update_input",
+)
+SCHEDULER_DECISION_UPDATE_IN_DURABLE = os.getenv(
+    "SCHEDULER_DECISION_UPDATE_IN_DURABLE",
+    "workflow-simlingo-llm-final-output-scheduler-decision-update-input",
+)
+SCHEDULER_DECISION_UPDATE_OUT_SUBJECT = os.getenv(
+    "SCHEDULER_DECISION_UPDATE_OUT_SUBJECT",
+    "workflow.simlingo.scheduler_decision_update_output",
+)
 
 _nats_comm = NatsComm(servers=[NATS_SERVER_URL])
 
@@ -95,6 +107,12 @@ app = FastAPI(title="SimLingo Scheduler Agent API", lifespan=lifespan)
 
 
 def _phase_default_routes(scheduler_phase: str) -> tuple[str, str, str]:
+    if scheduler_phase == "decision_update":
+        return (
+            SCHEDULER_DECISION_UPDATE_IN_SUBJECT,
+            SCHEDULER_DECISION_UPDATE_IN_DURABLE,
+            SCHEDULER_DECISION_UPDATE_OUT_SUBJECT,
+        )
     if scheduler_phase == "plan":
         return SCHEDULER_PLAN_IN_SUBJECT, SCHEDULER_PLAN_IN_DURABLE, SCHEDULER_PLAN_OUT_SUBJECT
     return SCHEDULER_BUDGET_IN_SUBJECT, SCHEDULER_BUDGET_IN_DURABLE, SCHEDULER_BUDGET_OUT_SUBJECT
@@ -114,18 +132,22 @@ def _infer_scheduler_phase_from_subject(subject: str) -> str:
         return "budget"
     if subject == SCHEDULER_PLAN_IN_SUBJECT:
         return "plan"
+    if subject == SCHEDULER_DECISION_UPDATE_IN_SUBJECT:
+        return "decision_update"
 
     tokens = _subject_tokens(subject)
     if {"scheduler_budget", "budget_input", "encoded_tokens"} & tokens:
         return "budget"
     if {"scheduler_plan", "plan_input", "llm_prefix_output"} & tokens:
         return "plan"
+    if {"scheduler_decision_update", "decision_update", "llm_final_output"} & tokens:
+        return "decision_update"
 
     raise HTTPException(
         status_code=422,
         detail=(
             "Unable to infer scheduler phase from NATS subject "
-            f"'{subject}'. Include scheduler_budget or scheduler_plan in the subject name."
+            f"'{subject}'. Include scheduler_budget, scheduler_plan, or scheduler_decision_update in the subject name."
         ),
     )
 
@@ -180,6 +202,8 @@ async def health() -> dict[str, Any]:
         "budget_out_subject": SCHEDULER_BUDGET_OUT_SUBJECT,
         "plan_in_subject": SCHEDULER_PLAN_IN_SUBJECT,
         "plan_out_subject": SCHEDULER_PLAN_OUT_SUBJECT,
+        "decision_update_in_subject": SCHEDULER_DECISION_UPDATE_IN_SUBJECT,
+        "decision_update_out_subject": SCHEDULER_DECISION_UPDATE_OUT_SUBJECT,
     }
 
 
