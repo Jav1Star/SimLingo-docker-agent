@@ -157,6 +157,7 @@ def build_eval_config(args, no_server_launch):
         "fixed_budget": fixed_budget,
         "rule_based_cfg": rule_based_cfg,
         "route_ids": route_ids,
+        "export_route_panel": bool(cfg.get("export_route_panel", True)),
     }
     return eval_cfg
 
@@ -532,7 +533,8 @@ def main(args):
             
 
             if not needs_resubmit(job) and return_code == 0: 
-                export_route_budget_layer_panel(job)
+                if job["cfg"].get("export_route_panel", True):
+                    export_route_budget_layer_panel(job)
                 job["status"] = "completed"
                 progress.update(1)
                 continue

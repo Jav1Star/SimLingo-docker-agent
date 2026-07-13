@@ -7,6 +7,7 @@ eval:
   seeds: [66]
   tries: 0
   out_root: ~/simlingo-heuristic/eval_results/latency_compare_10routes
+  export_route_panel: false
   carla_root: ~/data/carla0915
   repo_root: ~/simlingo-heuristic
   agent_file: ~/simlingo-heuristic/team_code_adaption/agent_simlingo.py

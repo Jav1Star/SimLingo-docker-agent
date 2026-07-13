@@ -321,23 +321,21 @@ def summarize_run(res_dir: Path, route_ids: List[str]) -> Dict[str, Any]:
     }
 
 
-def compute_delta(run_a: Dict[str, Any], run_b: Dict[str, Any]) -> Dict[str, Optional[float]]:
-    metrics = [
-        "total_inference_tflops",
-        "overall_avg_tflops_per_step",
-        "overall_avg_forward_latency_ms",
-        "p50_forward_latency_ms",
-        "p90_forward_latency_ms",
-        "max_forward_latency_ms",
-        "mean_score_composed",
-        "mean_duration_system_s",
-        "mean_duration_game_s",
-    ]
-    delta: Dict[str, Optional[float]] = {}
-    for key in metrics:
-        a_val = safe_float(run_a.get(key))
-        b_val = safe_float(run_b.get(key))
-        delta[key] = None if a_val is None or b_val is None else (b_val - a_val)
+def compute_delta(run_a: Dict[str, Any], run_b: Dict[str, Any]) -> Dict[str, Dict[str, Optional[float]]]:
+    metrics = {
+        "avg_tflops_per_step": "overall_avg_tflops_per_step",
+        "avg_forward_latency_ms": "overall_avg_forward_latency_ms",
+        "mean_score_composed": "mean_score_composed",
+    }
+    delta: Dict[str, Dict[str, Optional[float]]] = {}
+    for out_key, run_key in metrics.items():
+        a_val = safe_float(run_a.get(run_key))
+        b_val = safe_float(run_b.get(run_key))
+        delta[out_key] = {
+            "a": a_val,
+            "b": b_val,
+            "delta": None if a_val is None or b_val is None else (b_val - a_val),
+        }
     return delta
 
 
