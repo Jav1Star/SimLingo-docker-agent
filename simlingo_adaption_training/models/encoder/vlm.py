@@ -20,7 +20,10 @@ class VLMEncoderModel(nn.Module):
         self.token_size = self.embed_dim
 
         if 'internvl2' in self.variant.lower():
-            self.image_encoder = LingoInternVLModel(self.variant, *cfg)
+            self.image_encoder = LingoInternVLModel(
+                self.variant,
+                token_prune=getattr(self, "token_prune", None),
+            )
         else:
             raise ValueError(f"Unknown variant {self.variant}")
         

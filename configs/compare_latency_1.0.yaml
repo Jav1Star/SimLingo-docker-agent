@@ -3,7 +3,7 @@ eval:
   checkpoint: ~/simlingo-heuristic/models/simlingoModels/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin
   benchmark: bench2drive
   route_path: ~/simlingo-heuristic/leaderboard/data/bench2drive_split
-  route_ids: ["000", "001", "002", "003", "004", "005", "006", "007", "008", "009"]
+  route_ids: ["011", "008", "009"]
   seeds: [66]
   tries: 0
   out_root: ~/simlingo-heuristic/eval_results/latency_compare_10routes
@@ -52,4 +52,7 @@ budget:
         q90: 0.7412269711
       route_shift:
         q10: 0.1959435195
-        q90: 0.7455124855
+        q90: 0.7455124855、
+
+token_prune:
+  prune_ratio: 0.0

@@ -213,3 +213,6 @@ ds_config.json
 
 # 4. 编辑器配置 (如果你用 VSCode)
 .vscode/Autonomous-Transportation-System/
+
+# 5. 忽略 tests 目录及其内容
+tests/

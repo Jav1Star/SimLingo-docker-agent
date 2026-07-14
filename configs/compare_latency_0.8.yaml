@@ -19,7 +19,7 @@ eval:
 
 budget:
   mode: fixed # random # fixed # rule_based
-  fixed_budget: 0.7
+  fixed_budget: 0.8
   rule_based:
     k_warmup: 5
     eta: 0.03
@@ -55,4 +55,4 @@ budget:
         q90: 0.7455124855
 
 token_prune:
-  prune_ratio: 0.1
+  prune_ratio: 0.0

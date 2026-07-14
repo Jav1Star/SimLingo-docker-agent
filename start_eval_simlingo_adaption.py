@@ -112,10 +112,37 @@ def parse_budget_settings(data):
     return mode, fixed_budget, rule_based_cfg
 
 
+def parse_token_prune_settings(data):
+    eval_cfg = data.get("eval", data)
+    token_prune_cfg = data.get("token_prune", eval_cfg.get("token_prune", {})) or {}
+    if not token_prune_cfg:
+        return None
+    if not isinstance(token_prune_cfg, dict):
+        raise ValueError("token_prune must be provided as dict when configured")
+
+    prune_ratio = token_prune_cfg.get("prune_ratio", None)
+    if prune_ratio is None:
+        return None
+
+    prune_ratio = float(prune_ratio)
+    if not (0.0 <= prune_ratio <= 1.0):
+        raise ValueError(f"token_prune.prune_ratio must be in [0, 1], got {prune_ratio}")
+    return prune_ratio
+
+
+def fixed_budget_dir_name(fixed_budget: float, token_prune_ratio=None) -> str:
+    # 固定预算目录名统一在这里拼，避免启动与汇总脚本口径不一致。
+    dir_name = f"bud_{float(fixed_budget):.3f}"
+    if token_prune_ratio is not None:
+        dir_name += f"_prune_ratio_{float(token_prune_ratio):.3f}"
+    return dir_name
+
+
 def build_eval_config(args, no_server_launch):
     eval_yaml = load_eval_yaml(args.eval_config)
     cfg = eval_yaml.get("eval", eval_yaml)
     budget_mode, fixed_budget, rule_based_cfg = parse_budget_settings(eval_yaml)
+    token_prune_ratio = parse_token_prune_settings(eval_yaml)
     config_route_ids = cfg.get("route_ids", eval_yaml.get("route_ids"))
     route_ids = parse_route_id_list(args.route_id) or parse_route_id_list(config_route_ids)
 
@@ -156,6 +183,7 @@ def build_eval_config(args, no_server_launch):
         "budget_mode": budget_mode,
         "fixed_budget": fixed_budget,
         "rule_based_cfg": rule_based_cfg,
+        "token_prune_ratio": token_prune_ratio,
         "route_ids": route_ids,
         "export_route_panel": bool(cfg.get("export_route_panel", True)),
     }
@@ -193,6 +221,9 @@ def launch_job(job, gpu_id, world_port, tm_port):
     env["SIMLINGO_EVAL_BUDGET_MODE"] = str(job["budget_mode"])
     env["SIMLINGO_EVAL_FIXED_BUDGET"] = str(job["fixed_budget"])
     env["SIMLINGO_EVAL_RULE_BASED_CFG_JSON"] = json.dumps(job["rule_based_cfg"], ensure_ascii=False)
+    token_prune_ratio = cfg.get("token_prune_ratio", None)
+    if token_prune_ratio is not None:
+        env["SIMLINGO_EVAL_TOKEN_PRUNE_RATIO"] = str(token_prune_ratio)
     
     command = [
         sys.executable,
@@ -447,7 +478,11 @@ def main(args):
             # 输出目录按 mode 分层；fixed 模式再细分到 bud_xxx
             base_dir = os.path.join(cfg["out_root"], cfg["agent"], cfg["benchmark"], seed, cfg["budget_mode"])
             if cfg["budget_mode"] == "fixed":
-                base_dir = os.path.join(base_dir, f"bud_{cfg['fixed_budget']:.3f}")
+                # token prune 打开时，把 prune_ratio 记录进结果目录名，方便后续直接区分 run。
+                base_dir = os.path.join(
+                    base_dir,
+                    fixed_budget_dir_name(cfg["fixed_budget"], cfg.get("token_prune_ratio")),
+                )
             os.makedirs(os.path.join(base_dir, "run"), exist_ok=True)
             os.makedirs(os.path.join(base_dir, "res"), exist_ok=True)
             os.makedirs(os.path.join(base_dir, "out"), exist_ok=True)
@@ -594,6 +629,7 @@ def main(args):
             print(
                 f"Started job {job['route_id']} on GPU {gpu_id} "
                 f"with mode={job['budget_mode']} fixed_budget={job['fixed_budget']} "
+                f"token_prune_ratio={job['cfg'].get('token_prune_ratio')} "
                 f"(tries left after launch: {job['tries_remaining']})."
             )
             job_started = True

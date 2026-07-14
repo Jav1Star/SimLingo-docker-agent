@@ -5,10 +5,18 @@ import time
 from hydra.core.config_store import ConfigStore
 
 @dataclass
+class TokenPruneConfig:
+    mode: str = "off"
+    prune_ratio: float = 0.0
+    min_keep: int = 1
+
+
+@dataclass
 class VLMEncoderConfig:
     variant: str = 'OpenGVLab/InternVL2-1B'
     embed_dim: int = 512
     freeze: bool = False
+    token_prune: TokenPruneConfig = field(default_factory=TokenPruneConfig)
     _target_: str = "simlingo_adaption_training.models.encoder.vlm.VLMEncoderModel"
 
 

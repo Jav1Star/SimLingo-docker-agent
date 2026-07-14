@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Summarize fixed-budget TFLOPs / latency comparisons across routes."""
+"""Summarize TFLOPs / latency comparisons across routes from two result directories."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import math
+import os
+import re
 from pathlib import Path
 from statistics import mean
 from typing import Any, Dict, List, Optional
-
-import yaml
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -28,32 +28,20 @@ def resolve_path(value: str) -> Path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Summarize route-level TFLOPs and CUDA-event latency for two fixed-budget eval runs.",
+        description="Summarize route-level TFLOPs and CUDA-event latency for two eval result directories.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument(
-        "--config-a",
-        type=str,
-        required=True,
-        help="Eval YAML for the first fixed-budget run.",
-    )
-    parser.add_argument(
-        "--config-b",
-        type=str,
-        required=True,
-        help="Eval YAML for the second fixed-budget run.",
     )
     parser.add_argument(
         "--res-dir-a",
         type=str,
-        default="",
-        help="Optional explicit result directory override for config-a.",
+        required=True,
+        help="First result directory. Accepts either the run directory or its res/ subdirectory.",
     )
     parser.add_argument(
         "--res-dir-b",
         type=str,
-        default="",
-        help="Optional explicit result directory override for config-b.",
+        required=True,
+        help="Second result directory. Accepts either the run directory or its res/ subdirectory.",
     )
     parser.add_argument(
         "--route-ids",
@@ -62,72 +50,56 @@ def parse_args() -> argparse.Namespace:
         help="Optional route ids to summarize. If omitted, use the intersection of completed result files.",
     )
     parser.add_argument(
-        "--seed",
-        type=str,
-        default="",
-        help="Optional seed override. Default uses the first seed from config-a/config-b and requires them to match.",
-    )
-    parser.add_argument(
         "--output",
         type=str,
         default="",
-        help="Optional summary JSON output path. Default writes under config-a out_root.",
+        help="Optional summary JSON output path. Default writes under the common parent of the two run directories.",
     )
     return parser.parse_args()
 
 
-def load_yaml(path: Path) -> Dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        payload = yaml.safe_load(handle) or {}
-    if not isinstance(payload, dict):
-        raise ValueError(f"Config must be a mapping: {path}")
-    return payload
+def normalize_result_dir(path: Path) -> Path:
+    # 允许用户直接传 run 根目录，脚本内部统一落到真正的 res 目录。
+    if path.is_dir() and (path / "res").is_dir():
+        return path / "res"
+    return path
 
 
-def normalize_eval_cfg(payload: Dict[str, Any]) -> Dict[str, Any]:
-    eval_cfg = payload.get("eval", payload)
-    if not isinstance(eval_cfg, dict):
-        raise ValueError("Config 'eval' section must be a mapping")
-    budget_cfg = payload.get("budget", eval_cfg.get("budget", {})) or {}
-    if not isinstance(budget_cfg, dict):
-        raise ValueError("Config 'budget' section must be a mapping")
+def resolve_res_dir(value: str) -> Path:
+    return normalize_result_dir(resolve_path(value))
 
-    seeds = eval_cfg.get("seeds", [])
-    if not isinstance(seeds, list) or not seeds:
-        raise ValueError("Config must contain a non-empty eval.seeds list")
 
-    fixed_budget = float(budget_cfg.get("fixed_budget", 1.0))
-    return {
-        "agent": str(eval_cfg["agent"]),
-        "benchmark": str(eval_cfg["benchmark"]),
-        "out_root": resolve_path(str(eval_cfg["out_root"])),
-        "seed": str(seeds[0]),
-        "fixed_budget": fixed_budget,
-        "config_path": str(payload.get("__config_path__", "")),
+def infer_run_meta(res_dir: Path) -> Dict[str, Any]:
+    run_dir = res_dir.parent if res_dir.name == "res" else res_dir
+    budget_mode = run_dir.parent.name if run_dir.parent else None
+    budget_label = run_dir.name
+
+    meta: Dict[str, Any] = {
+        "res_dir": str(res_dir),
+        "run_dir": str(run_dir),
+        "run_name": run_dir.name,
+        "budget_mode": budget_mode,
+        "budget_label": budget_label,
     }
 
-
-def budget_dir_name(fixed_budget: float) -> str:
-    return f"bud_{fixed_budget:.3f}"
-
-
-def build_res_dir(cfg: Dict[str, Any], seed_override: Optional[str]) -> Path:
-    seed = str(seed_override) if seed_override else str(cfg["seed"])
-    return (
-        Path(cfg["out_root"])
-        / cfg["agent"]
-        / cfg["benchmark"]
-        / seed
-        / "fixed"
-        / budget_dir_name(float(cfg["fixed_budget"]))
-        / "res"
+    match = re.match(
+        r"^bud_(?P<fixed_budget>\d+(?:\.\d+)?)(?:_prune_ratio_(?P<prune_ratio>\d+(?:\.\d+)?))?$",
+        budget_label,
     )
+    if match:
+        meta["fixed_budget"] = float(match.group("fixed_budget"))
+        prune_ratio = match.group("prune_ratio")
+        meta["token_prune_ratio"] = None if prune_ratio is None else float(prune_ratio)
 
+    if budget_mode in {"fixed", "random", "rule_based", "smart_assigner"}:
+        seed_dir = run_dir.parent.parent
+        benchmark_dir = seed_dir.parent if seed_dir else None
+        agent_dir = benchmark_dir.parent if benchmark_dir else None
+        meta["seed"] = seed_dir.name if seed_dir else None
+        meta["benchmark"] = benchmark_dir.name if benchmark_dir else None
+        meta["agent"] = agent_dir.name if agent_dir else None
 
-def resolve_res_dir(override: str, cfg: Dict[str, Any], seed_override: Optional[str]) -> Path:
-    if override:
-        return resolve_path(override)
-    return build_res_dir(cfg, seed_override=seed_override)
+    return meta
 
 
 def normalize_route_ids(route_ids: Optional[List[str]]) -> Optional[List[str]]:
@@ -339,46 +311,23 @@ def compute_delta(run_a: Dict[str, Any], run_b: Dict[str, Any]) -> Dict[str, Dic
     return delta
 
 
-def build_default_output_path(cfg_a: Dict[str, Any], seed: str, route_ids: List[str]) -> Path:
-    base_out = Path(cfg_a["out_root"])
-    return base_out / f"budget_latency_compare_seed{seed}_routes{len(route_ids)}.json"
+def build_default_output_path(res_dir_a: Path, res_dir_b: Path, route_ids: List[str]) -> Path:
+    run_dir_a = res_dir_a.parent if res_dir_a.name == "res" else res_dir_a
+    run_dir_b = res_dir_b.parent if res_dir_b.name == "res" else res_dir_b
+    common_parent = Path(os.path.commonpath([str(run_dir_a.parent), str(run_dir_b.parent)]))
+    file_name = f"budget_latency_compare_{run_dir_a.name}_vs_{run_dir_b.name}_routes{len(route_ids)}.json"
+    return common_parent / file_name
 
 
 def main() -> None:
     args = parse_args()
 
-    config_a_path = resolve_path(args.config_a)
-    config_b_path = resolve_path(args.config_b)
-    payload_a = load_yaml(config_a_path)
-    payload_a["__config_path__"] = str(config_a_path)
-    payload_b = load_yaml(config_b_path)
-    payload_b["__config_path__"] = str(config_b_path)
-    cfg_a = normalize_eval_cfg(payload_a)
-    cfg_b = normalize_eval_cfg(payload_b)
-
-    if cfg_a["agent"] != cfg_b["agent"] or cfg_a["benchmark"] != cfg_b["benchmark"]:
-        raise ValueError("Both configs must target the same agent and benchmark")
-    if (
-        not args.res_dir_a
-        and not args.res_dir_b
-        and math.isclose(float(cfg_a["fixed_budget"]), float(cfg_b["fixed_budget"]), rel_tol=0.0, abs_tol=1e-9)
-    ):
-        raise ValueError(
-            "The two configs resolve to the same fixed_budget. "
-            "Please fix the YAMLs or pass --res-dir-a/--res-dir-b explicitly."
-        )
-
-    seed_override = args.seed.strip() if isinstance(args.seed, str) else ""
-    if not seed_override and str(cfg_a["seed"]) != str(cfg_b["seed"]):
-        raise ValueError("Configs use different default seeds. Pass --seed explicitly.")
-    seed = seed_override or str(cfg_a["seed"])
-
-    res_dir_a = resolve_res_dir(args.res_dir_a, cfg_a, seed_override=seed)
-    res_dir_b = resolve_res_dir(args.res_dir_b, cfg_b, seed_override=seed)
+    res_dir_a = resolve_res_dir(args.res_dir_a)
+    res_dir_b = resolve_res_dir(args.res_dir_b)
     if not res_dir_a.exists():
-        raise FileNotFoundError(f"Result directory not found for config-a: {res_dir_a}")
+        raise FileNotFoundError(f"Result directory not found for run-a: {res_dir_a}")
     if not res_dir_b.exists():
-        raise FileNotFoundError(f"Result directory not found for config-b: {res_dir_b}")
+        raise FileNotFoundError(f"Result directory not found for run-b: {res_dir_b}")
 
     route_ids = normalize_route_ids(args.route_ids)
     if route_ids is None:
@@ -388,21 +337,14 @@ def main() -> None:
 
     summary_a = summarize_run(res_dir_a, route_ids)
     summary_b = summarize_run(res_dir_b, route_ids)
-    output_path = resolve_path(args.output) if args.output else build_default_output_path(cfg_a, seed, route_ids)
+    meta_a = infer_run_meta(res_dir_a)
+    meta_b = infer_run_meta(res_dir_b)
+    output_path = resolve_path(args.output) if args.output else build_default_output_path(res_dir_a, res_dir_b, route_ids)
 
     summary_payload = {
-        "seed": seed,
         "route_ids": route_ids,
-        "config_a": {
-            "path": str(config_a_path),
-            "fixed_budget": float(cfg_a["fixed_budget"]),
-            "res_dir": str(res_dir_a),
-        },
-        "config_b": {
-            "path": str(config_b_path),
-            "fixed_budget": float(cfg_b["fixed_budget"]),
-            "res_dir": str(res_dir_b),
-        },
+        "run_a_meta": meta_a,
+        "run_b_meta": meta_b,
         "run_a": summary_a,
         "run_b": summary_b,
         "delta_b_minus_a": compute_delta(summary_a, summary_b),
@@ -411,10 +353,9 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print(f"[budget-latency-compare] seed={seed}")
     print(f"[budget-latency-compare] route_count={len(route_ids)}")
-    print(f"[budget-latency-compare] config_a budget={cfg_a['fixed_budget']:.3f} res={res_dir_a}")
-    print(f"[budget-latency-compare] config_b budget={cfg_b['fixed_budget']:.3f} res={res_dir_b}")
+    print(f"[budget-latency-compare] run_a {meta_a.get('budget_label', res_dir_a.name)} res={res_dir_a}")
+    print(f"[budget-latency-compare] run_b {meta_b.get('budget_label', res_dir_b.name)} res={res_dir_b}")
     print(f"[budget-latency-compare] output={output_path}")
 
 

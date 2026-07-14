@@ -14,7 +14,6 @@ from torch import Tensor, nn
 from torch.optim import AdamW
 from hydra.utils import get_original_cwd
 
-from .adaptors.adaptors import replace_placeholder_tokens
 from simlingo_adaption_training.models.adaptors.adaptors import DrivingAdaptor, LanguageAdaptor, WaypointInputAdaptor, BudgetAdaptor,AdaptorList
 from simlingo_adaption_training.models.budget_assigner import BaseBudgetAssigner, build_budget_assigner
 from simlingo_adaption_training.models.utils import summarise_losses
@@ -216,11 +215,10 @@ class DrivingModel(pl.LightningModule):
         driving_input: DrivingInput,
         adaptor_dict: Dict,
     ) -> Tensor:
-        adaptor_dict = replace_placeholder_tokens(
+        adaptor_dict = self.vision_model.image_encoder.replace_placeholder_tokens(
             adaptor_dict=adaptor_dict,
             pixel_values=driving_input.camera_images,
             placeholder_values=driving_input.prompt_inference.placeholder_values,
-            image_encoder=self.vision_model.image_encoder,
             wp_encoder=self.wp_encoder,
         )
         position_ids = None

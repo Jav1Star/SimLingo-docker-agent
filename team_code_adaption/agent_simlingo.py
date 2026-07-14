@@ -185,6 +185,8 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             cfg = OmegaConf.load(file)
         self.cfg = cfg
         self.cfg.model.vision_model.use_global_img = cfg.data_module.use_global_img
+        # 评测时允许从 eval 配置直接覆盖视觉 token prune 比例，避免手改 checkpoint 目录下的 hydra 配置。
+        self._apply_eval_token_prune_override(self.cfg)
     
         processor = AutoProcessor.from_pretrained(cfg.model.vision_model.variant, trust_remote_code=True)
         if 'tokenizer' in processor.__dict__:
@@ -997,6 +999,49 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         except Exception:
             value = 1.0
         return float(np.clip(value, 0.0, 1.0))
+
+    def _load_eval_token_prune_ratio(self):
+        value = os.getenv("SIMLINGO_EVAL_TOKEN_PRUNE_RATIO", "").strip()
+        if not value:
+            return None
+        try:
+            value = float(value)
+        except Exception as exc:
+            raise ValueError(f"SIMLINGO_EVAL_TOKEN_PRUNE_RATIO must be a float in [0, 1], got {value}") from exc
+        if not (0.0 <= value <= 1.0):
+            raise ValueError(f"SIMLINGO_EVAL_TOKEN_PRUNE_RATIO must be in [0, 1], got {value}")
+        return value
+
+    def _apply_eval_token_prune_override(self, cfg):
+        """关键调用点：eval yaml 中给了 prune_ratio 时，这里统一覆盖运行时模型配置。"""
+        prune_ratio = self._load_eval_token_prune_ratio()
+        if prune_ratio is None:
+            return
+
+        vision_cfg = cfg.model.vision_model
+        token_prune_cfg = getattr(vision_cfg, "token_prune", None)
+        if token_prune_cfg is None:
+            vision_cfg.token_prune = OmegaConf.create(
+                {
+                    "mode": "prune2drive",
+                    "prune_ratio": prune_ratio,
+                    "min_keep": 1,
+                }
+            )
+        else:
+            mode = str(getattr(token_prune_cfg, "mode", "off")).strip().lower()
+            if mode == "off":
+                token_prune_cfg.mode = "prune2drive"
+            if getattr(token_prune_cfg, "min_keep", None) is None:
+                token_prune_cfg.min_keep = 1
+            token_prune_cfg.prune_ratio = prune_ratio
+
+        print(
+            f"[eval-config] override token_prune: mode={vision_cfg.token_prune.mode} "
+            f"prune_ratio={vision_cfg.token_prune.prune_ratio} "
+            f"min_keep={vision_cfg.token_prune.min_keep}",
+            flush=True,
+        )
 
     def _profile_model_forward(self, model_input):
         if not self.record_tflops:
