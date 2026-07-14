@@ -25,7 +25,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: simlingo-llm-agent
-          image: simlingo-llm-agent:0.1.5
+          image: simlingo-llm-agent:0.2.0
           imagePullPolicy: IfNotPresent
           terminationMessagePolicy: FallbackToLogsOnError
           ports:
@@ -83,6 +83,8 @@ spec:
               value: workflow-simlingo-scheduler-plan-output-llm-final-input
             - name: LLM_FINAL_OUT_SUBJECT
               value: workflow.simlingo.llm_final_output
+            - name: LLM_DECISION_UPDATE_OUT_SUBJECT
+              value: workflow.simlingo.llm_final_output.scheduler_decision_update_input
             - name: NATS_STREAM
               value: WORKFLOW
             - name: NATS_STREAM_SUBJECTS

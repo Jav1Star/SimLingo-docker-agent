@@ -3,6 +3,8 @@ Bench2Drive agent that keeps the original SimLingo preprocessing/control path,
 but delegates model inference to the split encoder/scheduler/llm docker agents.
 """
 
+from __future__ import annotations
+
 import copy
 import json
 import os
@@ -353,14 +355,18 @@ class RemoteSplitLingoAgent(LingoAgent):
             raise RuntimeError(f"camera_images must have shape [B,T,NP,C,H,W], got {tuple(camera_images.shape)}")
         num_patches = int(camera_images.shape[2])
 
+        ego_xy = np.asarray(tick_data.get("gps"), dtype=np.float32).tolist() if tick_data.get("gps") is not None else None
+        ego_yaw = float(tick_data.get("compass")) if tick_data.get("compass") is not None else None
         runtime_context = {
             "timestamp": float(timestamp),
             "step": int(self.step),
             "route_key": self.route_key,
             "prompt": getattr(self, "prompt", ""),
             "prompt_tp": getattr(self, "prompt_tp", ""),
-            "gps": np.asarray(tick_data.get("gps"), dtype=np.float32).tolist() if tick_data.get("gps") is not None else None,
-            "compass": float(tick_data.get("compass")) if tick_data.get("compass") is not None else None,
+            "ego_xy": ego_xy,
+            "ego_yaw": ego_yaw,
+            "gps": ego_xy,
+            "compass": ego_yaw,
             "speed_mps": float(tick_data["speed"][0].item()) if hasattr(tick_data.get("speed"), "__getitem__") else None,
         }
 
