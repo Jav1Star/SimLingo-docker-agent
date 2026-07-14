@@ -343,33 +343,7 @@ class AdaptorList(nn.Module):
             inputs_mask_list.append(adaptor_input_dict["inputs_mask"])
             input_dict.update({key + "_" + k: v for k, v in adaptor_input_dict.items()}) # all
 
-        # Track original (pre-permutation) indices for each adaptor block.
-        offset = 0
-        for key, inputs in zip(self.adaptors.keys(), inputs_list):
-            input_dict[f"{key}_orig_indices"] = torch.arange(
-                offset,
-                offset + inputs.size(1),
-                device=inputs.device,
-                dtype=torch.long,
-            )
-            offset += inputs.size(1)
-
-        inputs = torch.cat(inputs_list, dim=1)
-        inputs_mask = torch.cat(inputs_mask_list, dim=1)
-        split_sizes = torch.as_tensor([x.size(1) for x in inputs_list])
-        arange = torch.arange(inputs.size(0), device=inputs.device)[:, None]
-
-        # Apply random permutation of modalities during training
-        rand_perm = torch.arange(inputs.size(1), device=inputs.device).expand(inputs.size(0), -1)
-        # Apply permutation to move invalid tokens to end of sequence
-        valid_perm = inputs_mask[arange, rand_perm].byte().argsort(dim=-1, descending=True, stable=True)
-        perm = rand_perm.gather(1, valid_perm)
-
-        input_dict["inputs"] = inputs[arange, perm]
-        input_dict["inputs_mask"] = inputs_mask[arange, perm]
-        input_dict["perm"] = perm
-        input_dict["split_sizes"] = split_sizes
-        return input_dict
+        return rebuild_packed_adaptor_inputs(input_dict, list(self.adaptors.keys()))
 
     def compute_loss(
         self, features: Tensor, logits: Tensor, input_dict: Dict[str, Tensor], example: DrivingExample
@@ -417,3 +391,40 @@ def _gather_from_dict(d: Dict[str, Tensor], prefix: str):
         if k.startswith(prefix):
             out[k[len(prefix) :]] = v
     return out
+
+
+def rebuild_packed_adaptor_inputs(input_dict: Dict[str, Tensor], adaptor_order: List[str]) -> Dict[str, Tensor]:
+    """关键调用点：language 段长度变化后，在这里统一重建 inputs/perm/split_sizes。"""
+    inputs_list: List[Tensor] = []
+    inputs_mask_list: List[Tensor] = []
+
+    for key in adaptor_order:
+        inputs = input_dict[f"{key}_inputs"]
+        inputs_mask = input_dict[f"{key}_inputs_mask"]
+        inputs_list.append(inputs)
+        inputs_mask_list.append(inputs_mask)
+
+    offset = 0
+    for key, inputs in zip(adaptor_order, inputs_list):
+        input_dict[f"{key}_orig_indices"] = torch.arange(
+            offset,
+            offset + inputs.size(1),
+            device=inputs.device,
+            dtype=torch.long,
+        )
+        offset += inputs.size(1)
+
+    inputs = torch.cat(inputs_list, dim=1)
+    inputs_mask = torch.cat(inputs_mask_list, dim=1)
+    split_sizes = torch.as_tensor([x.size(1) for x in inputs_list])
+    arange = torch.arange(inputs.size(0), device=inputs.device)[:, None]
+
+    rand_perm = torch.arange(inputs.size(1), device=inputs.device).expand(inputs.size(0), -1)
+    valid_perm = inputs_mask[arange, rand_perm].byte().argsort(dim=-1, descending=True, stable=True)
+    perm = rand_perm.gather(1, valid_perm)
+
+    input_dict["inputs"] = inputs[arange, perm]
+    input_dict["inputs_mask"] = inputs_mask[arange, perm]
+    input_dict["perm"] = perm
+    input_dict["split_sizes"] = split_sizes
+    return input_dict

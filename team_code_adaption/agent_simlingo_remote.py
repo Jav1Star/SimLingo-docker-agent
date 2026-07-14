@@ -131,7 +131,9 @@ class RemoteSplitLingoAgent(LingoAgent):
         if self.config.eval_route_as == -1:
             self.config.eval_route_as = getattr(self.cfg.model, "route_as", "target_point_command")
 
-        processor = AutoProcessor.from_pretrained(cfg.model.vision_model.variant, trust_remote_code=True)
+        # 远程推理版也统一复用本地 InternVL 目录，避免 tokenizer/processor 初始化时访问 Hugging Face。
+        self.vision_model_source = self._resolve_vision_model_source(cfg.model.vision_model.variant)
+        processor = AutoProcessor.from_pretrained(self.vision_model_source, trust_remote_code=True)
         self.tokenizer = processor.tokenizer if "tokenizer" in processor.__dict__ else processor
         self.tokenizer.add_special_tokens(
             {

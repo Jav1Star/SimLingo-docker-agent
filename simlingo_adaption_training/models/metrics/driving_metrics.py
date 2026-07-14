@@ -104,10 +104,8 @@ class DrivingMetricsComputer:
 
         sample_keep_mask = keep_mask[batch_idx]
         if sample_keep_mask.numel() != visual_positions.numel():
-            raise ValueError(
-                "visual token count mismatch between metrics positions and keep mask: "
-                f"{visual_positions.numel()} vs {sample_keep_mask.numel()}"
-            )
+            # language 段已经被压缩过时，当前位置本身就是保留下来的视觉 token。
+            return visual_positions
         return visual_positions[sample_keep_mask.to(device=visual_positions.device, dtype=torch.bool)]
 
     def _transform_prev_waypoints_to_curr_frame(self, prev_waypoints: Tensor, delta_xy_prev_frame: Tensor, delta_yaw: Tensor):

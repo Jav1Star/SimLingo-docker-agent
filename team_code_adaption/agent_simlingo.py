@@ -26,7 +26,6 @@ import torch
 import ujson
 from filterpy.kalman import MerweScaledSigmaPoints
 from filterpy.kalman import UnscentedKalmanFilter as UKF
-from hydra.utils import get_original_cwd, to_absolute_path
 from leaderboard.autoagents import autonomous_agent
 from omegaconf import OmegaConf
 from PIL import Image, ImageDraw, ImageFont
@@ -76,6 +75,38 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
     """
         Main class that runs the agents with the run_step function
         """
+
+    def _resolve_vision_model_source(self, variant):
+        """关键调用点：评测阶段统一只走本地 InternVL 目录，彻底避开 processor/config 的联网请求。"""
+        if 'internvl' not in variant.lower():
+            return variant
+
+        repo_name = variant.split('/')[-1]
+        workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        local_model_path = os.path.join(workspace_root, "models", repo_name)
+        required_files = (
+            "config.json",
+            "tokenizer_config.json",
+            "preprocessor_config.json",
+            "vocab.json",
+            "merges.txt",
+            "conversation.py",
+        )
+        weight_files = (
+            "model.safetensors",
+            "pytorch_model.bin",
+            "model.safetensors.index.json",
+            "pytorch_model.bin.index.json",
+        )
+
+        missing = [name for name in required_files if not os.path.exists(os.path.join(local_model_path, name))]
+        has_weights = any(os.path.exists(os.path.join(local_model_path, name)) for name in weight_files)
+        if missing or not has_weights:
+            missing_desc = missing + ([] if has_weights else ["model weights"])
+            raise FileNotFoundError(
+                f"Local InternVL model is incomplete at {local_model_path}: missing {', '.join(missing_desc)}"
+            )
+        return local_model_path
 
     def setup(self, path_to_conf_file, route_index=None):
         """Sets up the agent. route_index is for logging purposes"""
@@ -187,8 +218,10 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.cfg.model.vision_model.use_global_img = cfg.data_module.use_global_img
         # 评测时允许从 eval 配置直接覆盖视觉 token prune 比例，避免手改 checkpoint 目录下的 hydra 配置。
         self._apply_eval_token_prune_override(self.cfg)
-    
-        processor = AutoProcessor.from_pretrained(cfg.model.vision_model.variant, trust_remote_code=True)
+
+        # 关键调用点：processor 和后续 config/chat template 全部复用同一条本地模型路径。
+        self.vision_model_source = self._resolve_vision_model_source(cfg.model.vision_model.variant)
+        processor = AutoProcessor.from_pretrained(self.vision_model_source, trust_remote_code=True)
         if 'tokenizer' in processor.__dict__:
                 self.tokenizer = processor.tokenizer
         else:
@@ -196,7 +229,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.tokenizer.add_special_tokens({'additional_special_tokens': ['<WAYPOINTS>','<WAYPOINTS_DIFF>', '<ORG_WAYPOINTS_DIFF>', '<ORG_WAYPOINTS>', '<WAYPOINT_LAST>', '<ROUTE>', '<ROUTE_DIFF>', '<TARGET_POINT>']})
         self.tokenizer.padding_side = "left"
         # llm_tokenizer = AutoTokenizer.from_pretrained(cfg.model.language_model.variant)
-        cache_dir = f"pretrained/{(cfg.model.vision_model.variant.split('/')[1])}"
+        cache_dir = self.vision_model_source
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.bfloat16)
         
@@ -639,41 +672,11 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                         questions.append(conv[i]['content'][0]['text'])
                         conv[i]['content'] = conv[i]['content'][0]['text']
                         
-        # Logic to check for local model or download to models/ folder
-        repo_id = self.cfg.model.vision_model.variant
-        repo_name = repo_id.split('/')[-1]
-        
-        # 获取工作区根目录 (team_code_adaption/agent_simlingo.py -> 上两级 -> simlingo-adaption)
-        workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        local_model_path = os.path.join(workspace_root, "models", repo_name)
-
-        # 检查本地路径是否存在
-        if os.path.exists(local_model_path):
-             print(f"Found local model at {local_model_path}, using it.", flush=True)
-             cache_dir = local_model_path
-        else:
-             print(f"Local model not found at {local_model_path}. Downloading to {local_model_path}...", flush=True)
-             try:
-                 # 尝试从 HuggingFace 自动下载模型到本地 models/ 目录
-                 from huggingface_hub import snapshot_download
-                 # snapshot_download 会将整个仓库下载到 local_dir
-                 snapshot_download(repo_id=repo_id, local_dir=local_model_path)
-                 cache_dir = local_model_path
-             except Exception as e:
-                 print(f"Failed to download model to local dir: {e}. Fallback to default cache.", flush=True)
-                 # 如果下载失败（比如网络问题或未安装huggingface_hub），则回退到默认的 pretrained/ 目录缓存策略
-                 cache_dir = f"pretrained/{(self.cfg.model.vision_model.variant.split('/')[1])}"
-
-        # 获取 cache_dir 的绝对路径，可以从工作区目录获取，而不是当前工作目录
-        # 这里确保即使 cache_dir 是相对路径也能正确解析
-        cache_dir = to_absolute_path(cache_dir)
-        model_path = f"{cache_dir}/conversation.py"
-        
-        # 这里实际上是一个双重检查：即便前面找到了 local_model_path，也可能不包含 conversation.py
-        # 如果文件确实不存在，则再尝试下载一次 (如果是 fallback 路径，这里会下载到 fallback 路径)
+        cache_dir = self.vision_model_source
+        print(f"Found local model at {cache_dir}, using it.", flush=True)
+        model_path = os.path.join(cache_dir, "conversation.py")
         if not os.path.exists(model_path):
-                from huggingface_hub import snapshot_download
-                snapshot_download(repo_id=self.cfg.model.vision_model.variant, local_dir=cache_dir)
+                raise FileNotFoundError(f"conversation.py not found in local InternVL model dir: {cache_dir}")
         
         #import from file from model_path
         spec = importlib.util.spec_from_file_location('get_conv_template', model_path)
@@ -682,7 +685,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         spec.loader.exec_module(conv_module)
         
         if not hasattr(self, 'tmp_config'):
-                self.tmp_config = AutoConfig.from_pretrained(self.cfg.model.vision_model.variant, trust_remote_code=True)
+                self.tmp_config = AutoConfig.from_pretrained(cache_dir, trust_remote_code=True)
                 image_size = self.tmp_config.force_image_size or self.tmp_config.vision_config.image_size
                 patch_size = self.tmp_config.vision_config.patch_size
                 
@@ -958,9 +961,11 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self._write_tflops_summary()
         if hasattr(self, "model") and hasattr(self.model, "decision_shift_state"):
             self.model.decision_shift_state = {}
-        del self.model
-        del self.config
-        if hasattr(self.cfg.data_module, 'encoder') and self.cfg.data_module.encoder == 'llavanext':
+        if hasattr(self, "model"):
+            del self.model
+        if hasattr(self, "config"):
+            del self.config
+        if hasattr(self, "cfg") and hasattr(self.cfg, "data_module") and hasattr(self.cfg.data_module, 'encoder') and self.cfg.data_module.encoder == 'llavanext' and hasattr(self, "processor"):
             del self.processor
 
     def _apply_eval_budget_config_to_model(self):

@@ -55,4 +55,4 @@ budget:
         q90: 0.7455124855
 
 token_prune:
-  prune_ratio: 0.1
+  prune_ratio: 0.2

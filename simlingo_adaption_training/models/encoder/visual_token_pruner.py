@@ -7,7 +7,7 @@ from torch import nn
 
 
 class VisualTokenPruner(nn.Module):
-    """按固定配置对视觉 token 打分并生成 keep mask。"""
+    """按固定配置对视觉 token 打分并返回真实保留结果。"""
 
     def __init__(
         self,
@@ -27,8 +27,8 @@ class VisualTokenPruner(nn.Module):
         image_features: torch.Tensor,
         mode: Optional[str] = None,
         prune_ratio: Optional[float] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """返回 masked features、keep mask 和分数。"""
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """返回保留后的特征、keep mask、keep indices 和分数。"""
         if image_features.dim() != 3:
             raise ValueError(f"image_features should be [B, N, D], got {image_features.shape}")
 
@@ -51,24 +51,32 @@ class VisualTokenPruner(nn.Module):
                 device=image_features.device,
                 dtype=torch.bool,
             )
+            keep_indices = torch.arange(
+                num_tokens,
+                device=image_features.device,
+                dtype=torch.long,
+            ).unsqueeze(0).expand(batch_size, -1)
             scores = torch.zeros(
                 batch_size,
                 num_tokens,
                 device=image_features.device,
                 dtype=image_features.dtype,
             )
-            return image_features, keep_mask, scores
+            return image_features, keep_mask, keep_indices, scores
 
         if mode == "random":
-            keep_mask, scores = self._random_select(image_features, keep_num)
+            scores = self._random_score(image_features)
         elif mode == "prune2drive":
-            keep_mask, scores = self._prune2drive_select(image_features, keep_num)
+            scores = self._prune2drive_score(image_features)
         else:
             raise ValueError(f"Unsupported visual token prune mode: {mode}")
 
-        masked_features = image_features.clone()
-        masked_features[~keep_mask] = 0.0
-        return masked_features, keep_mask, scores
+        keep_mask, keep_indices = self._select_keep_tokens(scores, keep_num)
+        kept_features = image_features.gather(
+            1,
+            keep_indices.unsqueeze(-1).expand(-1, -1, image_features.size(-1)),
+        )
+        return kept_features, keep_mask, keep_indices, scores
 
     @staticmethod
     def _validate_mode(mode: str) -> None:
@@ -91,69 +99,36 @@ class VisualTokenPruner(nn.Module):
         return min(num_tokens, keep_num)
 
     @staticmethod
-    def _random_select(
-        image_features: torch.Tensor,
-        keep_num: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _random_score(image_features: torch.Tensor) -> torch.Tensor:
         batch_size, num_tokens, _ = image_features.shape
-        scores = torch.rand(
+        return torch.rand(
             batch_size,
             num_tokens,
             device=image_features.device,
             dtype=image_features.dtype,
         )
+
+    @staticmethod
+    def _select_keep_tokens(
+        scores: torch.Tensor,
+        keep_num: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        batch_size, num_tokens = scores.shape
         topk_idx = torch.topk(scores, k=min(keep_num, num_tokens), dim=1).indices
+        keep_indices = topk_idx.sort(dim=1).values
         keep_mask = torch.zeros(
             batch_size,
             num_tokens,
-            device=image_features.device,
+            device=scores.device,
             dtype=torch.bool,
         )
-        keep_mask.scatter_(1, topk_idx, True)
-        return keep_mask, scores
+        keep_mask.scatter_(1, keep_indices, True)
+        return keep_mask, keep_indices
 
     @staticmethod
-    def _prune2drive_select(
-        image_features: torch.Tensor,
-        keep_num: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        batch_size, num_tokens, _ = image_features.shape
-        keep_masks = []
-        all_scores = []
-
-        for batch_idx in range(batch_size):
-            feats = image_features[batch_idx]
-            if keep_num >= num_tokens:
-                keep_masks.append(torch.ones(num_tokens, device=feats.device, dtype=torch.bool))
-                all_scores.append(torch.zeros(num_tokens, device=feats.device, dtype=feats.dtype))
-                continue
-
-            normalized = F.normalize(feats, p=2, dim=-1, eps=1e-6)
-            cosine_sim = torch.matmul(normalized, normalized.t())
-            distance_matrix = 1.0 - cosine_sim
-            distance_matrix.fill_diagonal_(float("inf"))
-
-            selected_mask = torch.zeros(num_tokens, device=feats.device, dtype=torch.bool)
-            selected_indices = torch.empty(keep_num, device=feats.device, dtype=torch.long)
-            scores = torch.zeros(num_tokens, device=feats.device, dtype=feats.dtype)
-
-            for i in range(keep_num):
-                if i == 0:
-                    current_scores = distance_matrix.min(dim=1).values
-                    current_scores[selected_mask] = float("-inf")
-                else:
-                    selected_distances = distance_matrix[selected_mask, :]
-                    current_scores = selected_distances.min(dim=0).values
-                    current_scores[selected_mask] = float("-inf")
-
-                next_idx = torch.argmax(current_scores)
-                selected_indices[i] = next_idx
-                selected_mask[next_idx] = True
-                scores = current_scores
-
-            keep_mask = torch.zeros(num_tokens, device=feats.device, dtype=torch.bool)
-            keep_mask[selected_indices] = True
-            keep_masks.append(keep_mask)
-            all_scores.append(scores)
-
-        return torch.stack(keep_masks, dim=0), torch.stack(all_scores, dim=0)
+    def _prune2drive_score(image_features: torch.Tensor) -> torch.Tensor:
+        """关键调用点：在线推理改用 O(BND) 打分，避免原始 N^2 选点吞掉延迟。"""
+        normalized = F.normalize(image_features, p=2, dim=-1, eps=1e-6)
+        global_anchor = F.normalize(normalized.mean(dim=1, keepdim=True), p=2, dim=-1, eps=1e-6)
+        cosine_to_anchor = (normalized * global_anchor).sum(dim=-1)
+        return 1.0 - cosine_to_anchor

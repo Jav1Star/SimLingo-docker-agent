@@ -4,6 +4,7 @@ import torch
 from torch import nn
 from transformers import AutoModel
 
+from simlingo_adaption_training.models.adaptors.adaptors import rebuild_packed_adaptor_inputs
 from simlingo_adaption_training.models.encoder.visual_token_pruner import VisualTokenPruner
 
 
@@ -100,10 +101,11 @@ class LingoInternVLModel(nn.Module):
                         inputs_embeds_work[batch_idx, start:end] = wp_embed.to(dtype=inputs_embeds_work.dtype)
 
         visual_keep_mask = None
+        visual_keep_indices = None
         visual_scores = None
 
         if pixel_values is not None and input_ids.shape[1] != 1 and pixel_values.size(0) > 0:
-            _, num_embed, embed_dim = inputs_embeds_work.shape
+            _, _, embed_dim = inputs_embeds_work.shape
             batch_size, time_steps, num_patches, channels, height, width = pixel_values.shape
             if time_steps != 1:
                 raise ValueError("Only one frame is supported for now")
@@ -115,81 +117,93 @@ class LingoInternVLModel(nn.Module):
             vit_embeds = image_features.reshape(batch_size, -1, embed_dim)
 
             if self.visual_token_pruner is not None:
-                vit_embeds, visual_keep_mask, visual_scores = self.visual_token_pruner(vit_embeds)
+                vit_embeds, visual_keep_mask, visual_keep_indices, visual_scores = self.visual_token_pruner(vit_embeds)
                 adaptor_dict["visual_token_keep_mask"] = visual_keep_mask
+                adaptor_dict["visual_token_keep_indices"] = visual_keep_indices
                 adaptor_dict["visual_token_scores"] = visual_scores
 
-            vit_embeds = vit_embeds.reshape(-1, embed_dim).to(
-                device=inputs_embeds_work.device,
-                dtype=inputs_embeds_work.dtype,
+            if visual_keep_indices is None:
+                visual_keep_indices = torch.arange(
+                    vit_embeds.size(1),
+                    device=vit_embeds.device,
+                    dtype=torch.long,
+                ).unsqueeze(0).expand(batch_size, -1)
+
+            (
+                inputs_embeds_work,
+                adaptor_dict["language__ids"],
+                adaptor_dict["language_inputs_mask"],
+                compact_language_ids_mask,
+            ) = self._replace_and_compact_visual_tokens(
+                language_inputs=inputs_embeds_work,
+                input_ids=input_ids,
+                language_mask=adaptor_dict["language_inputs_mask"],
+                language_ids_mask=adaptor_dict.get("language__ids_mask"),
+                vit_embeds=vit_embeds.to(
+                    device=inputs_embeds_work.device,
+                    dtype=inputs_embeds_work.dtype,
+                ),
+                visual_keep_indices=visual_keep_indices,
             )
-            inputs_embeds_work = inputs_embeds_work.reshape(batch_size * num_embed, embed_dim)
-            flat_input_ids = input_ids.reshape(batch_size * num_embed)
-            selected = flat_input_ids == self.img_context_token_id
-            num_visual_tokens = int(selected.sum().item())
-
-            if vit_embeds.size(0) < num_visual_tokens:
-                raise RuntimeError(
-                    f"Not enough vision tokens for <IMG_CONTEXT>: required={num_visual_tokens}, got={vit_embeds.size(0)}"
-                )
-            if vit_embeds.size(0) > num_visual_tokens:
-                print(
-                    f"warning: vision token count mismatch, required={num_visual_tokens}, got={vit_embeds.size(0)}; truncating."
-                )
-
-            with torch.autocast(device_type=inputs_embeds_work.device.type, enabled=False):
-                inputs_embeds_work[selected] = vit_embeds[:num_visual_tokens]
-
-            inputs_embeds_work = inputs_embeds_work.reshape(batch_size, num_embed, embed_dim)
-
-            if visual_keep_mask is not None:
-                adaptor_dict["language_inputs_mask"] = self._apply_visual_keep_mask(
-                    adaptor_dict["language_inputs_mask"],
-                    input_ids,
-                    visual_keep_mask,
-                )
+            if compact_language_ids_mask is not None:
+                adaptor_dict["language__ids_mask"] = compact_language_ids_mask
 
         adaptor_dict["language_inputs"] = inputs_embeds_work.to(dtype=inputs_embeds_dtype)
-        self._sync_language_to_adaptor_inputs(adaptor_dict)
+        adaptor_order = [key for key in ("language", "driving", "budget") if f"{key}_inputs" in adaptor_dict]
+        rebuild_packed_adaptor_inputs(adaptor_dict, adaptor_order)
         return adaptor_dict
 
-    def _apply_visual_keep_mask(
+    def _replace_and_compact_visual_tokens(
         self,
-        language_mask: torch.Tensor,
+        language_inputs: torch.Tensor,
         input_ids: torch.Tensor,
-        visual_keep_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        """关键调用点：视觉 token 保留结果必须同步到 attention mask。"""
-        updated_mask = language_mask.clone()
+        language_mask: torch.Tensor,
+        language_ids_mask: Optional[torch.Tensor],
+        vit_embeds: torch.Tensor,
+        visual_keep_indices: torch.Tensor,
+    ):
+        """关键调用点：真正减少 LLM 序列长度必须在这里同步压缩 language 段。"""
+        compact_inputs = []
+        compact_ids = []
+        compact_masks = []
+        compact_ids_masks = [] if language_ids_mask is not None else None
+
         for batch_idx in range(input_ids.size(0)):
             visual_positions = torch.nonzero(
                 input_ids[batch_idx] == self.img_context_token_id,
                 as_tuple=False,
             ).squeeze(-1)
-            if visual_positions.numel() != visual_keep_mask.size(1):
+            if visual_positions.numel() < visual_keep_indices.size(1):
                 raise ValueError(
-                    "visual token count mismatch between placeholder positions and keep mask: "
-                    f"{visual_positions.numel()} vs {visual_keep_mask.size(1)}"
+                    "visual token count mismatch between placeholder positions and keep indices: "
+                    f"{visual_positions.numel()} vs {visual_keep_indices.size(1)}"
                 )
-            updated_mask[batch_idx, visual_positions] = visual_keep_mask[batch_idx].to(
-                device=updated_mask.device,
-                dtype=updated_mask.dtype,
+
+            kept_positions = visual_positions[visual_keep_indices[batch_idx]]
+            updated_inputs = language_inputs[batch_idx].clone()
+            updated_inputs[kept_positions] = vit_embeds[batch_idx]
+
+            keep_token_mask = torch.ones(
+                input_ids.size(1),
+                device=input_ids.device,
+                dtype=torch.bool,
             )
-        return updated_mask
+            keep_token_mask[visual_positions] = False
+            keep_token_mask[kept_positions] = True
 
-    def _sync_language_to_adaptor_inputs(self, adaptor_dict: Dict[str, torch.Tensor]) -> None:
-        """按 perm 精确回写 language 段，避免旧的起始偏移写法继续漂移。"""
-        batch_size = adaptor_dict["inputs"].size(0)
-        inv_perm = adaptor_dict["perm"].argsort(-1)
-        language_orig_indices = adaptor_dict["language_orig_indices"].to(
-            device=inv_perm.device,
-            dtype=torch.long,
-        )
-        language_positions = inv_perm[:, language_orig_indices]
-        batch_indices = torch.arange(batch_size, device=language_positions.device)[:, None]
+            compact_inputs.append(updated_inputs[keep_token_mask])
+            compact_ids.append(input_ids[batch_idx][keep_token_mask])
+            compact_masks.append(language_mask[batch_idx][keep_token_mask])
+            if compact_ids_masks is not None:
+                compact_ids_masks.append(language_ids_mask[batch_idx][keep_token_mask])
 
-        adaptor_dict["inputs"][batch_indices, language_positions] = adaptor_dict["language_inputs"]
-        adaptor_dict["inputs_mask"][batch_indices, language_positions] = adaptor_dict["language_inputs_mask"].to(
-            device=adaptor_dict["inputs_mask"].device,
-            dtype=adaptor_dict["inputs_mask"].dtype,
+        compact_language_ids_mask = None
+        if compact_ids_masks is not None:
+            compact_language_ids_mask = torch.stack(compact_ids_masks, dim=0)
+
+        return (
+            torch.stack(compact_inputs, dim=0),
+            torch.stack(compact_ids, dim=0),
+            torch.stack(compact_masks, dim=0),
+            compact_language_ids_mask,
         )
