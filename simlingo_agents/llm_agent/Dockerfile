@@ -46,7 +46,7 @@ COPY simlingo_adaption_training /app/simlingo_adaption_training
 COPY simlingo_agents/llm_agent /app
 RUN mkdir -p /app/models /app/checkpoints/simlingo_llm
 COPY --from=simlingo_models InternVL2-1B /app/models/InternVL2-1B
-COPY --from=simlingo_models 2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin /app/checkpoints/simlingo_llm/pytorch_model.bin
+COPY --from=simlingo_models simlingoModels/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin /app/checkpoints/simlingo_llm/pytorch_model.bin
 
 ENV PYTHONPATH=/app \
     LLM_MODEL_VARIANT=/app/models/InternVL2-1B \

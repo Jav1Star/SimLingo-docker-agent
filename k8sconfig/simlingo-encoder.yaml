@@ -45,6 +45,12 @@ spec:
             # 输出编码特征
             - name: NATS_OUT_SUBJECT
               value: workflow.simlingo.encoded_tokens
+            - name: ENCODER_TOKEN_PRUNE_MODE
+              value: origin
+            - name: ENCODER_TOKEN_PRUNE_RATIO
+              value: "0.0"
+            - name: ENCODER_TOKEN_PRUNE_MIN_KEEP
+              value: "1"
             - name: NATS_STREAM
               value: WORKFLOW
             - name: NATS_STREAM_SUBJECTS

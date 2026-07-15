@@ -6,6 +6,9 @@ import json
 import shutil
 import argparse
 import yaml
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import deque
 from tqdm.autonotebook import tqdm
 
@@ -112,10 +115,87 @@ def parse_budget_settings(data):
     return mode, fixed_budget, rule_based_cfg
 
 
+def parse_token_prune_settings(data):
+    eval_cfg = data.get("eval", data)
+    token_prune_cfg = data.get("token_prune", eval_cfg.get("token_prune", {})) or {}
+    if not token_prune_cfg:
+        return None
+    if not isinstance(token_prune_cfg, dict):
+        raise ValueError("token_prune must be provided as dict when configured")
+
+    prune_ratio = token_prune_cfg.get("prune_ratio", None)
+    if prune_ratio is None:
+        return None
+
+    prune_ratio = float(prune_ratio)
+    if not (0.0 <= prune_ratio <= 1.0):
+        raise ValueError(f"token_prune.prune_ratio must be in [0, 1], got {prune_ratio}")
+    return prune_ratio
+
+
+def fixed_budget_dir_name(fixed_budget: float, token_prune_ratio=None) -> str:
+    # 固定预算目录名统一在这里拼，避免启动与汇总脚本口径不一致。
+    dir_name = f"bud_{float(fixed_budget):.3f}"
+    if token_prune_ratio is not None:
+        dir_name += f"_prune_ratio_{float(token_prune_ratio):.3f}"
+    return dir_name
+
+
+def scheduler_budget_policy_url(execute_url: str) -> str:
+    parsed = urllib.parse.urlparse(execute_url)
+    path = parsed.path
+    if path.endswith("/a2a/execute"):
+        path = path[: -len("/a2a/execute")] + "/runtime/budget-policy"
+    else:
+        path = "/runtime/budget-policy"
+    return urllib.parse.urlunparse(parsed._replace(path=path, query="", fragment=""))
+
+
+def configure_remote_scheduler_budget_policy(job, env) -> None:
+    cfg = job["cfg"]
+    if cfg.get("agent") != "simlingo_remote_split":
+        return
+
+    scheduler_execute_url = env.get("SIMLINGO_SCHEDULER_AGENT_URL", "http://127.0.0.1:9013/a2a/execute")
+    policy_url = scheduler_budget_policy_url(scheduler_execute_url)
+    payload = {
+        "mode": job["budget_mode"],
+        "fixed_budget": float(job["fixed_budget"]),
+        "rule_based_cfg": job["rule_based_cfg"],
+    }
+    # split scheduler 是常驻服务，route 启动前先同步一次全局预算策略。
+    request = urllib.request.Request(
+        policy_url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=float(os.getenv("SIMLINGO_SCHEDULER_POLICY_TIMEOUT_SEC", "30"))) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Scheduler budget policy update failed: HTTP {exc.code} {error_body}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Scheduler budget policy update failed: {policy_url}: {exc}") from exc
+
+    try:
+        result = json.loads(body) if body else {}
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Scheduler budget policy update returned non-JSON response: {body}") from exc
+    if result.get("status") != "success":
+        raise RuntimeError(f"Scheduler budget policy update returned unexpected response: {result}")
+    print(
+        f"[scheduler] budget policy synced for route {job['route_id']}: "
+        f"mode={job['budget_mode']} fixed_budget={job['fixed_budget']}"
+    )
+
+
 def build_eval_config(args, no_server_launch):
     eval_yaml = load_eval_yaml(args.eval_config)
     cfg = eval_yaml.get("eval", eval_yaml)
     budget_mode, fixed_budget, rule_based_cfg = parse_budget_settings(eval_yaml)
+    token_prune_ratio = parse_token_prune_settings(eval_yaml)
     config_route_ids = cfg.get("route_ids", eval_yaml.get("route_ids"))
     route_ids = parse_route_id_list(args.route_id) or parse_route_id_list(config_route_ids)
 
@@ -156,6 +236,7 @@ def build_eval_config(args, no_server_launch):
         "budget_mode": budget_mode,
         "fixed_budget": fixed_budget,
         "rule_based_cfg": rule_based_cfg,
+        "token_prune_ratio": token_prune_ratio,
         "route_ids": route_ids,
     }
     return eval_cfg
@@ -193,6 +274,9 @@ def launch_job(job, gpu_id, world_port, tm_port):
     env["SIMLINGO_EVAL_BUDGET_MODE"] = str(job["budget_mode"])
     env["SIMLINGO_EVAL_FIXED_BUDGET"] = str(job["fixed_budget"])
     env["SIMLINGO_EVAL_RULE_BASED_CFG_JSON"] = json.dumps(job["rule_based_cfg"], ensure_ascii=False)
+    token_prune_ratio = cfg.get("token_prune_ratio", None)
+    if token_prune_ratio is not None:
+        env["SIMLINGO_EVAL_TOKEN_PRUNE_RATIO"] = str(token_prune_ratio)
     
     command = [
         sys.executable,
@@ -214,6 +298,8 @@ def launch_job(job, gpu_id, world_port, tm_port):
 
     if cfg.get("no_server_launch"):
         command.append("--no-server-launch")
+
+    configure_remote_scheduler_budget_policy(job, env)
 
     stdout = open(job["log_file"], "w", encoding="utf-8")
     stderr = open(job["err_file"], "w", encoding="utf-8")
@@ -447,7 +533,7 @@ def main(args):
             # 输出目录按 mode 分层；fixed 模式再细分到 bud_xxx
             base_dir = os.path.join(cfg["out_root"], cfg["agent"], cfg["benchmark"], seed, cfg["budget_mode"])
             if cfg["budget_mode"] == "fixed":
-                base_dir = os.path.join(base_dir, f"bud_{cfg['fixed_budget']:.3f}")
+                base_dir = os.path.join(base_dir, fixed_budget_dir_name(cfg["fixed_budget"], cfg.get("token_prune_ratio")))
             os.makedirs(os.path.join(base_dir, "run"), exist_ok=True)
             os.makedirs(os.path.join(base_dir, "res"), exist_ok=True)
             os.makedirs(os.path.join(base_dir, "out"), exist_ok=True)
@@ -593,6 +679,7 @@ def main(args):
             print(
                 f"Started job {job['route_id']} on GPU {gpu_id} "
                 f"with mode={job['budget_mode']} fixed_budget={job['fixed_budget']} "
+                f"token_prune_ratio={job['cfg'].get('token_prune_ratio')} "
                 f"(tries left after launch: {job['tries_remaining']})."
             )
             job_started = True

@@ -150,6 +150,7 @@ class RemoteSplitLingoAgent(LingoAgent):
         self.tokenizer.padding_side = "left"
 
         self.remote_pipeline = SplitAgentPipelineClient()
+        self.token_prune_cfg = self._load_eval_token_prune_cfg()
 
         self.iter = self.config_path.split("epoch=")[-1].split("/")[0]
         self.session = self.config_path.split("/")[-4]
@@ -344,6 +345,22 @@ class RemoteSplitLingoAgent(LingoAgent):
     def destroy(self, results=None):  # pylint: disable=unused-argument
         del self.config
 
+    def _load_eval_token_prune_cfg(self):
+        value = os.getenv("SIMLINGO_EVAL_TOKEN_PRUNE_RATIO", "").strip()
+        if not value:
+            return None
+        try:
+            prune_ratio = float(value)
+        except Exception as exc:
+            raise ValueError(f"SIMLINGO_EVAL_TOKEN_PRUNE_RATIO must be a float in [0, 1], got {value}") from exc
+        if not (0.0 <= prune_ratio <= 1.0):
+            raise ValueError(f"SIMLINGO_EVAL_TOKEN_PRUNE_RATIO must be in [0, 1], got {value}")
+        return {
+            "mode": "prune2drive",
+            "prune_ratio": prune_ratio,
+            "min_keep": 1,
+        }
+
     def _build_remote_payload(self, *, timestamp: float, tick_data: dict) -> dict:
         prompt_label = self.DrivingInput.get("prompt_inference") or self.DrivingInput.get("prompt")
         if prompt_label is None:
@@ -370,7 +387,7 @@ class RemoteSplitLingoAgent(LingoAgent):
             "speed_mps": float(tick_data["speed"][0].item()) if hasattr(tick_data.get("speed"), "__getitem__") else None,
         }
 
-        return {
+        payload = {
             "route_key": self.route_key,
             "route_keys": [self.route_key],
             "frame_id": int(self.step),
@@ -381,6 +398,10 @@ class RemoteSplitLingoAgent(LingoAgent):
             "expand_image_token": False,
             "runtime_context": runtime_context,
         }
+        if self.token_prune_cfg is not None:
+            # 关键调用点：split encoder 按帧接收 prune 配置，避免不同实验需要重启 agent。
+            payload["token_prune"] = self.token_prune_cfg
+        return payload
 
     def _log_remote_frame_alignment(
         self,

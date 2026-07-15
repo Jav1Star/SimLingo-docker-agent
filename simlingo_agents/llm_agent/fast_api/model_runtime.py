@@ -379,6 +379,11 @@ class LLMRuntime:
         visual_embeds_np = np.asarray(visual_embeds)
         budget_value_np = np.asarray(budget_value, dtype=np.float32)
         execution_plan_np = None if execution_plan is None else np.asarray(execution_plan)
+        visual_keep_mask_np = (
+            None
+            if encoded_payload.get("visual_token_keep_mask") is None
+            else np.asarray(encoded_payload.get("visual_token_keep_mask"), dtype=np.bool_)
+        )
 
         if input_ids_np.ndim != 2:
             raise ValueError(f"input_ids must have shape [B, S], got {input_ids_np.shape}")
@@ -407,6 +412,11 @@ class LLMRuntime:
                     language_inputs=language_inputs,
                     input_ids=input_ids_tensor,
                     visual_embeds=visual_embeds_np,
+                )
+                attention_mask_tensor = self._apply_visual_token_keep_mask(
+                    attention_mask=attention_mask_tensor,
+                    input_ids=input_ids_tensor,
+                    visual_keep_mask=visual_keep_mask_np,
                 )
 
                 budget_inputs = budget_encoder.budget_encoding(budget_value_tensor).to(device=self._device, dtype=language_inputs.dtype)
@@ -461,6 +471,8 @@ class LLMRuntime:
                 "budget_token_prefix_feature": budget_token_prefix_feature.detach().float().cpu().numpy(),
                 "budget_token_prefix_feature_stats": self._tensor_stats(budget_token_prefix_feature),
                 "scheduler_meta": scheduler_meta,
+                "visual_token_prune": encoded_payload.get("visual_token_prune"),
+                "visual_token_keep_ratio": encoded_payload.get("visual_token_keep_ratio"),
                 "runtime_context": runtime_context,
                 "meta": {
                     "model_variant": self._model_variant,
@@ -500,6 +512,8 @@ class LLMRuntime:
                 "execution_plan_applied": execution_plan_np,
                 "budget_value": budget_value_np,
                 "scheduler_plan_meta": payload.get("plan_meta"),
+                "visual_token_prune": encoded_payload.get("visual_token_prune"),
+                "visual_token_keep_ratio": encoded_payload.get("visual_token_keep_ratio"),
                 "runtime_context": runtime_context,
                 "meta": {
                     "model_variant": self._model_variant,
@@ -615,6 +629,43 @@ class LLMRuntime:
             )
         flat_inputs[selected] = vit_embeds[:num_required]
         return flat_inputs.reshape_as(language_inputs)
+
+    def _apply_visual_token_keep_mask(
+        self,
+        *,
+        attention_mask: torch.Tensor,
+        input_ids: torch.Tensor,
+        visual_keep_mask: np.ndarray | None,
+    ) -> torch.Tensor:
+        if visual_keep_mask is None:
+            return attention_mask
+        if self._img_context_token_id is None:
+            raise RuntimeError("IMG_CONTEXT token id has not been initialized")
+
+        keep_mask = torch.as_tensor(visual_keep_mask, device=attention_mask.device, dtype=torch.bool)
+        if keep_mask.ndim == 1:
+            keep_mask = keep_mask.unsqueeze(0)
+        if keep_mask.ndim != 2 or keep_mask.shape[0] != input_ids.shape[0]:
+            raise ValueError(
+                f"visual_token_keep_mask must have shape [B, N], got {tuple(keep_mask.shape)} for batch {input_ids.shape[0]}"
+            )
+
+        visual_positions = input_ids == self._img_context_token_id
+        required_per_batch = visual_positions.sum(dim=1)
+        available_per_batch = torch.full_like(required_per_batch, keep_mask.shape[1])
+        if torch.any(available_per_batch < required_per_batch):
+            raise ValueError(
+                "Not enough visual_token_keep_mask values for <IMG_CONTEXT>: "
+                f"required={required_per_batch.detach().cpu().tolist()} got={keep_mask.shape[1]}"
+            )
+
+        updated_mask = attention_mask.clone()
+        for batch_idx in range(input_ids.shape[0]):
+            positions = visual_positions[batch_idx]
+            count = int(required_per_batch[batch_idx].item())
+            # 关键调用点：与 visual_embeds 的平铺顺序保持一致，只覆盖真实视觉 token 位置。
+            updated_mask[batch_idx, positions] = keep_mask[batch_idx, :count]
+        return updated_mask
 
     def _replace_waypoint_tokens(
         self,

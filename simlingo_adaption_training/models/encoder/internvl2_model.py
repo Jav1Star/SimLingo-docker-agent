@@ -3,6 +3,8 @@ from torch import nn
 from typing import List, Optional
 from transformers import AutoModel
 
+from simlingo_adaption_training.models.encoder.visual_token_pruner import VisualTokenPruner
+
 
 
 class LingoInternVLModel(nn.Module):
@@ -15,6 +17,12 @@ class LingoInternVLModel(nn.Module):
             self.num_embeddings = self.model.language_model.vocab_size
         self.use_global_img = None
         self.processor = None
+        # 视觉 token prune 默认开启为轻量比例，eval 可通过外部配置覆盖。
+        self.visual_token_pruner = VisualTokenPruner(
+            mode="prune2drive",
+            prune_ratio=0.1,
+            min_keep=1,
+        )
         
 
         
@@ -80,6 +88,8 @@ class LingoInternVLModel(nn.Module):
             # 1. Extract the input embeddings
             inputs_embeds = adaptor_dict['language_inputs']
             input_ids = adaptor_dict['language__ids']
+            inputs_embeds_dtype = inputs_embeds.dtype
+            inputs_embeds_work = inputs_embeds.to(dtype=torch.float32)
             
             # 2a replace placeholder (Waypoint 逻辑保持不变)
             smallest_added_id = image_encoder.tokenizer.additional_special_tokens_ids[0]
@@ -104,10 +114,13 @@ class LingoInternVLModel(nn.Module):
 
                 first_occurrences_filtered = [first_occurrences[i] for i in special_token_pos[:, 0]]
 
-                for i, (pos, first_occurrence) in enumerate(zip(special_token_pos, first_occurrences_filtered)):
-                    start = first_occurrence[pos[1]]
-                    end = start + coords_length_org[i]
-                    inputs_embeds[pos[0], start:end] = wp_embeds[i]
+                with torch.autocast(device_type=inputs_embeds_work.device.type, enabled=False):
+                    for i, (pos, first_occurrence) in enumerate(zip(special_token_pos, first_occurrences_filtered)):
+                        start = first_occurrence[pos[1]]
+                        end = start + coords_length_org[i]
+                        inputs_embeds_work[pos[0], start:end] = wp_embeds[i].to(dtype=inputs_embeds_work.dtype)
+
+            inputs_embeds = inputs_embeds_work.to(dtype=inputs_embeds_dtype)
 
             # 2. Merge text and images (修改核心：显式拼接 Budget Token)
             if pixel_values is not None and input_ids.shape[1] != 1 and pixel_values.size(0) > 0:
@@ -157,10 +170,20 @@ class LingoInternVLModel(nn.Module):
                 input_ids = input_ids.reshape(BS, N_embed)
                 # 图像
                 vit_embeds = vit_embeds.reshape(BS, -1, C_embed)
+
+                visual_keep_mask = None
+                visual_scores = None
+                if hasattr(image_encoder, "visual_token_pruner") and image_encoder.visual_token_pruner is not None:
+                    # 关键调用点：embedding 置零和 attention mask 必须同步，否则被剪 token 仍会参与注意力。
+                    vit_embeds, visual_keep_mask, visual_scores = image_encoder.visual_token_pruner(vit_embeds)
+                    adaptor_dict["visual_token_keep_mask"] = visual_keep_mask
+                    adaptor_dict["visual_token_scores"] = visual_scores
                 
                 # 获取原始 Mask (关键！)
                 # 优先用 language_inputs_mask，因为它通常是最准确的 attention mask
                 old_mask = adaptor_dict.get('language_inputs_mask', adaptor_dict.get('inputs_mask'))
+                if old_mask is None:
+                    old_mask = torch.ones(input_ids.shape, dtype=torch.long, device=input_ids.device)
                 
                 new_inputs_embeds_list = []
                 new_labels_list = []
@@ -193,8 +216,10 @@ class LingoInternVLModel(nn.Module):
                         # === [修正点] Mask 切分与重构 ===
                         if old_mask is not None:
                             prefix_mask = old_mask[b, :start_idx]
-                            # Vision 部分 Mask 全为 1
-                            vision_mask = torch.ones((vit_embeds[b].shape[0],), dtype=old_mask.dtype, device=old_mask.device)
+                            if visual_keep_mask is not None:
+                                vision_mask = visual_keep_mask[b].to(dtype=old_mask.dtype, device=old_mask.device)
+                            else:
+                                vision_mask = torch.ones((vit_embeds[b].shape[0],), dtype=old_mask.dtype, device=old_mask.device)
                             suffix_mask = old_mask[b, end_idx:]
                             parts_mask = [prefix_mask, vision_mask, suffix_mask]
                         else:

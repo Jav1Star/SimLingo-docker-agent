@@ -11,6 +11,7 @@ from transformers import AutoConfig, AutoProcessor
 
 from simlingo_adaption_training.models.adaptors.adaptors import WaypointInputAdaptor
 from simlingo_adaption_training.models.encoder.internvl2_model import LingoInternVLModel
+from simlingo_adaption_training.models.encoder.visual_token_pruner import VisualTokenPruner
 from utils.logger_utils import get_logger
 
 
@@ -44,6 +45,7 @@ class EncoderRuntime:
         self._model_lock = threading.Lock()
         self._num_image_token: Optional[int] = None
         self._hidden_size: Optional[int] = None
+        self._token_prune_cfg: dict[str, Any] | None = None
 
     @property
     def device(self) -> str:
@@ -59,7 +61,14 @@ class EncoderRuntime:
             raise RuntimeError("encoder has not been loaded yet")
         return self._num_image_token
 
-    def load_model(self, model_variant: str, checkpoint_path: Optional[str] = None) -> None:
+    def load_model(
+        self,
+        model_variant: str,
+        checkpoint_path: Optional[str] = None,
+        token_prune_mode: str = "origin",
+        token_prune_ratio: float = 0.0,
+        token_prune_min_keep: int = 1,
+    ) -> None:
         if self.is_loaded and self._model_variant == model_variant:
             return
         with self._state_lock:
@@ -76,6 +85,11 @@ class EncoderRuntime:
             image_encoder = LingoInternVLModel(model_variant)
             image_encoder.processor = processor
             image_encoder.model.language_model = None
+            image_encoder.visual_token_pruner = VisualTokenPruner(
+                mode=token_prune_mode,
+                prune_ratio=float(token_prune_ratio),
+                min_keep=int(token_prune_min_keep),
+            )
             image_encoder.model.to(device=self._device, dtype=self._dtype)
             image_encoder.model.eval()
 
@@ -103,7 +117,17 @@ class EncoderRuntime:
             self._wp_encoder = wp_encoder
             self._num_image_token = num_image_token
             self._hidden_size = hidden_size
-            logger.info("Encoder loaded: hidden_size=%s num_image_token=%s", hidden_size, num_image_token)
+            self._token_prune_cfg = {
+                "mode": token_prune_mode,
+                "prune_ratio": float(token_prune_ratio),
+                "min_keep": int(token_prune_min_keep),
+            }
+            logger.info(
+                "Encoder loaded: hidden_size=%s num_image_token=%s token_prune=%s",
+                hidden_size,
+                num_image_token,
+                self._token_prune_cfg,
+            )
 
     def _ensure_padding_token(self, tokenizer: Any) -> None:
         if getattr(tokenizer, "pad_token_id", None) is not None:
@@ -211,13 +235,15 @@ class EncoderRuntime:
             "visual_token_positions": visual_positions,
         }
 
-    def encode_visual(self, camera_images: np.ndarray) -> np.ndarray:
+    def encode_visual(self, camera_images: np.ndarray, token_prune: Any = None) -> dict[str, Any]:
         _, image_encoder, _ = self._require_loaded()
         pixel_values = torch.as_tensor(camera_images, device=self._device)
         if not torch.is_floating_point(pixel_values):
             pixel_values = pixel_values.float()
         pixel_values = pixel_values.to(dtype=self._dtype)
 
+        batch_size = 1
+        num_patches = 1
         if pixel_values.ndim == 6:
             batch_size, time_steps, num_patches, channels, height, width = pixel_values.shape
             if time_steps != 1:
@@ -225,11 +251,49 @@ class EncoderRuntime:
             pixel_values = pixel_values.reshape(batch_size * num_patches, channels, height, width)
         elif pixel_values.ndim != 4:
             raise ValueError("camera_images must have shape [B,T,NP,C,H,W] or [B*NP,C,H,W]")
+        else:
+            num_patches = int(pixel_values.shape[0])
 
         with self._model_lock:
             with torch.no_grad():
                 visual_embeds = image_encoder.model.extract_feature(pixel_values)
-        return visual_embeds.detach().float().cpu().numpy()
+                token_prune_cfg = self._resolve_token_prune_cfg(token_prune)
+                visual_embeds, keep_mask, scores = image_encoder.visual_token_pruner(
+                    visual_embeds,
+                    mode=token_prune_cfg["mode"],
+                    prune_ratio=token_prune_cfg["prune_ratio"],
+                )
+
+        keep_mask = keep_mask.reshape(batch_size, num_patches * keep_mask.shape[-1])
+        scores = scores.reshape(batch_size, num_patches * scores.shape[-1])
+        keep_ratio = keep_mask.float().mean(dim=1)
+        return {
+            "visual_embeds": visual_embeds.detach().float().cpu().numpy(),
+            "visual_token_keep_mask": keep_mask.detach().cpu().numpy().astype(np.bool_),
+            "visual_token_scores": scores.detach().float().cpu().numpy(),
+            "visual_token_prune": token_prune_cfg,
+            "visual_token_keep_ratio": keep_ratio.detach().float().cpu().numpy(),
+        }
+
+    def _resolve_token_prune_cfg(self, token_prune: Any) -> dict[str, Any]:
+        base_cfg = dict(self._token_prune_cfg or {"mode": "origin", "prune_ratio": 0.0, "min_keep": 1})
+        if token_prune is not None and not isinstance(token_prune, dict):
+            raise ValueError("token_prune must be a mapping when provided")
+
+        cfg = {**base_cfg, **(token_prune or {})}
+        cfg["mode"] = str(cfg.get("mode", "origin")).strip().lower()
+        cfg["prune_ratio"] = float(cfg.get("prune_ratio", 0.0))
+        cfg["min_keep"] = int(cfg.get("min_keep", 1))
+        if cfg["mode"] == "off":
+            cfg["mode"] = "origin"
+        if cfg["mode"] not in {"origin", "random", "prune2drive"}:
+            raise ValueError(f"Unsupported token_prune.mode: {cfg['mode']}")
+        if not (0.0 <= cfg["prune_ratio"] <= 1.0):
+            raise ValueError(f"token_prune.prune_ratio must be in [0, 1], got {cfg['prune_ratio']}")
+        image_encoder = self._image_encoder
+        if image_encoder is not None and image_encoder.visual_token_pruner is not None:
+            image_encoder.visual_token_pruner.min_keep = cfg["min_keep"]
+        return cfg
 
     def encode_waypoints(self, placeholder_values: Any) -> dict[str, Any]:
         _, _, wp_encoder = self._require_loaded()
@@ -308,8 +372,13 @@ class EncoderRuntime:
             }
 
         visual_embeds = None
+        visual_meta: dict[str, Any] = {}
         if payload.get("camera_images") is not None:
-            visual_embeds = self.encode_visual(np.asarray(payload["camera_images"]))
+            visual_meta = self.encode_visual(
+                np.asarray(payload["camera_images"]),
+                token_prune=payload.get("token_prune"),
+            )
+            visual_embeds = visual_meta["visual_embeds"]
 
         waypoint_embeds = self.encode_waypoints(payload.get("placeholder_values"))
 
@@ -319,6 +388,10 @@ class EncoderRuntime:
             "frame_id": payload.get("frame_id"),
             "tokenized": tokenized,
             "visual_embeds": visual_embeds,
+            "visual_token_keep_mask": visual_meta.get("visual_token_keep_mask"),
+            "visual_token_scores": visual_meta.get("visual_token_scores"),
+            "visual_token_prune": visual_meta.get("visual_token_prune"),
+            "visual_token_keep_ratio": visual_meta.get("visual_token_keep_ratio"),
             "waypoint_embeds": waypoint_embeds,
             "runtime_context": payload.get("runtime_context", {}),
             "meta": {

@@ -204,6 +204,33 @@ async def health() -> dict[str, Any]:
         "plan_out_subject": SCHEDULER_PLAN_OUT_SUBJECT,
         "decision_update_in_subject": SCHEDULER_DECISION_UPDATE_IN_SUBJECT,
         "decision_update_out_subject": SCHEDULER_DECISION_UPDATE_OUT_SUBJECT,
+        "budget_policy": scheduler_runtime.policy_info() if scheduler_runtime.is_loaded else None,
+    }
+
+
+@app.post("/runtime/budget-policy")
+async def update_budget_policy(payload: dict[str, Any]) -> dict[str, Any]:
+    mode = str(payload.get("mode", "")).strip().lower()
+    fixed_budget = payload.get("fixed_budget", 1.0)
+    rule_based_cfg = payload.get("rule_based_cfg", payload.get("rule_based"))
+
+    try:
+        policy = await asyncio.to_thread(
+            scheduler_runtime.configure_policy,
+            mode=mode,
+            fixed_budget=float(fixed_budget),
+            rule_based_cfg=rule_based_cfg,
+        )
+    except ValueError as exc:
+        logger.warning("Scheduler budget policy validation failed: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Scheduler budget policy update failed")
+        raise HTTPException(status_code=500, detail=f"Scheduler budget policy update failed: {exc}") from exc
+
+    return {
+        "status": "success",
+        "budget_policy": policy,
     }
 
 

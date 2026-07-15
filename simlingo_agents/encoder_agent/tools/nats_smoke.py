@@ -21,6 +21,9 @@ def _build_minimal_encoder_payload(
     ego_y: float,
     ego_yaw: float,
     timestamp: float,
+    token_prune_ratio: float | None,
+    token_prune_mode: str,
+    token_prune_min_keep: int,
 ) -> dict[str, Any]:
     camera_images = np.zeros((1, 1, num_patches, 3, image_size, image_size), dtype=np.float32)
     payload = {
@@ -35,7 +38,16 @@ def _build_minimal_encoder_payload(
             "timestamp": float(timestamp),
         },
     }
-    return encode_structured_numpy(payload)
+    if token_prune_ratio is not None:
+        if not 0.0 <= token_prune_ratio <= 1.0:
+            raise ValueError(f"--token-prune-ratio must be in [0, 1], got {token_prune_ratio}")
+        # 关键调用点：模拟 remote agent 每帧传入的 token prune 覆盖配置。
+        payload["token_prune"] = {
+            "mode": token_prune_mode,
+            "prune_ratio": float(token_prune_ratio),
+            "min_keep": int(token_prune_min_keep),
+        }
+    return payload
 
 
 def _summarize_arrays(payload: Any) -> Any:
@@ -68,9 +80,23 @@ async def _publish_minimal_input(args: argparse.Namespace) -> None:
         ego_y=args.ego_y,
         ego_yaw=args.ego_yaw,
         timestamp=args.timestamp,
+        token_prune_ratio=args.token_prune_ratio,
+        token_prune_mode=args.token_prune_mode,
+        token_prune_min_keep=args.token_prune_min_keep,
     )
-    ack = await comm.send(args.subject, payload)
-    print(json.dumps({"status": "published", "subject": args.subject, "ack": ack}, indent=2, ensure_ascii=False))
+    ack = await comm.send(args.subject, encode_structured_numpy(payload))
+    print(
+        json.dumps(
+            {
+                "status": "published",
+                "subject": args.subject,
+                "ack": ack,
+                "payload_summary": _summarize_arrays(payload),
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
     await comm.close()
 
 
@@ -126,6 +152,14 @@ def main() -> None:
     publish_parser.add_argument("--ego-y", type=float, default=0.0)
     publish_parser.add_argument("--ego-yaw", type=float, default=0.0)
     publish_parser.add_argument("--timestamp", type=float, default=0.0)
+    publish_parser.add_argument(
+        "--token-prune-ratio",
+        type=float,
+        default=None,
+        help="Optional visual token prune ratio. Omit to use encoder container defaults.",
+    )
+    publish_parser.add_argument("--token-prune-mode", default="prune2drive", choices=["origin", "random", "prune2drive", "off"])
+    publish_parser.add_argument("--token-prune-min-keep", type=int, default=1)
 
     fetch_parser = subparsers.add_parser("fetch-once")
     fetch_parser.add_argument("--subject", required=True)

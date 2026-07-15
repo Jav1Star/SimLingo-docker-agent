@@ -9,13 +9,16 @@ services:
         BASE_IMAGE: ${BASE_IMAGE:-nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
         PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-https://download.pytorch.org/whl/cu128}
-    image: simlingo-encoder-agent:0.1.5
+    image: simlingo-encoder-agent:0.2.1
     container_name: simlingo-encoder-agent
     ports:
       - "9011:9011"
     environment:
       ENCODER_MODEL_VARIANT: ${ENCODER_MODEL_VARIANT:-/app/models/InternVL2-1B}
       ENCODER_CHECKPOINT_PATH: ${ENCODER_CHECKPOINT_PATH:-/app/checkpoints/simlingo_encoder/pytorch_model.bin}
+      ENCODER_TOKEN_PRUNE_MODE: ${ENCODER_TOKEN_PRUNE_MODE:-origin}
+      ENCODER_TOKEN_PRUNE_RATIO: ${ENCODER_TOKEN_PRUNE_RATIO:-0.1}
+      ENCODER_TOKEN_PRUNE_MIN_KEEP: ${ENCODER_TOKEN_PRUNE_MIN_KEEP:-1}
       NATS_SERVER_URL: ${NATS_SERVER_URL:-nats://host.docker.internal:4222}
       NATS_IN_SUBJECT: ${ENCODER_NATS_IN_SUBJECT:-workflow.previousagent.result}
       NATS_IN_DURABLE: ${ENCODER_NATS_IN_DURABLE:-workflow-previousagent-result}

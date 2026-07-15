@@ -37,6 +37,31 @@ sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py publish-
 workflow.previousagent.result
 ```
 
+如果要模拟评测链路里 `agent_simlingo_remote.py` 按帧下发的 token prune 配置，可以在发布输入时加：
+
+```bash
+sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py publish-minimal-input \
+  --token-prune-ratio 0.1
+```
+
+这会在 encoder 输入 payload 中加入：
+
+```json
+{
+  "token_prune": {
+    "mode": "prune2drive",
+    "prune_ratio": 0.1,
+    "min_keep": 1
+  }
+}
+```
+
+可选参数说明：
+
+- `--token-prune-ratio`: 剪掉的视觉 token 比例；不传则不写入 `token_prune`，使用 encoder 容器启动时的默认配置。
+- `--token-prune-mode`: 默认 `prune2drive`，也可设为 `origin`、`random` 或 `off`。
+- `--token-prune-min-keep`: 每组视觉 token 至少保留数量，默认 `1`。
+
 ## 4. 依次触发六个阶段
 
 触发 encoder：
@@ -114,8 +139,16 @@ curl -X POST http://127.0.0.1:9013/a2a/execute \
 sudo docker exec simlingo-encoder-agent python /app/tools/nats_smoke.py fetch-once \
   --subject workflow.simlingo.scheduler_budget_input \
   --durable workflow-simlingo-scheduler-budget-input-check \
+  --decode \
   --summary
 ```
+
+开启 token prune 后，encoder 输出的 `encoded_payload` 中应包含：
+
+- `visual_token_keep_mask`: `[B, N]`，`true` 表示保留该视觉 token。
+- `visual_token_scores`: `[B, N]`，剪枝策略产生的 token 分数。
+- `visual_token_prune`: 实际应用的剪枝配置。
+- `visual_token_keep_ratio`: 每个 batch 的实际保留比例，约等于 `1 - prune_ratio`。
 
 查看 scheduler `budget` 输出，也就是 llm `prefix` 输入摘要：
 

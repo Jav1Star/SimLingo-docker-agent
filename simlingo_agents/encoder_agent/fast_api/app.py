@@ -17,6 +17,9 @@ logger = get_logger(__name__)
 
 MODEL_VARIANT = os.getenv("ENCODER_MODEL_VARIANT", "/app/models/InternVL2-1B")
 CHECKPOINT_PATH = os.getenv("ENCODER_CHECKPOINT_PATH", "").strip() or None
+TOKEN_PRUNE_MODE = os.getenv("ENCODER_TOKEN_PRUNE_MODE", "origin")
+TOKEN_PRUNE_RATIO = float(os.getenv("ENCODER_TOKEN_PRUNE_RATIO", "0.0"))
+TOKEN_PRUNE_MIN_KEEP = int(os.getenv("ENCODER_TOKEN_PRUNE_MIN_KEEP", "1"))
 NATS_SERVER_URL = os.getenv("NATS_SERVER_URL", "nats://host.docker.internal:4222")
 NATS_IN_SUBJECT = os.getenv("NATS_IN_SUBJECT", "workflow.previousagent.result")
 NATS_IN_DURABLE = os.getenv("NATS_IN_DURABLE", "workflow-previousagent-result")
@@ -32,6 +35,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             encoder_runtime.load_model,
             MODEL_VARIANT,
             checkpoint_path=CHECKPOINT_PATH,
+            token_prune_mode=TOKEN_PRUNE_MODE,
+            token_prune_ratio=TOKEN_PRUNE_RATIO,
+            token_prune_min_keep=TOKEN_PRUNE_MIN_KEEP,
         )
         logger.info("Encoder model loaded successfully during startup")
     except Exception as exc:
@@ -93,6 +99,11 @@ async def health() -> dict[str, Any]:
         "nats_server_url": NATS_SERVER_URL,
         "nats_in_subject": NATS_IN_SUBJECT,
         "nats_out_subject": NATS_OUT_SUBJECT,
+        "token_prune": {
+            "mode": TOKEN_PRUNE_MODE,
+            "prune_ratio": TOKEN_PRUNE_RATIO,
+            "min_keep": TOKEN_PRUNE_MIN_KEEP,
+        },
     }
 
 

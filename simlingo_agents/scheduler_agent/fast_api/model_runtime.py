@@ -161,6 +161,42 @@ class SchedulerRuntime:
             raise ValueError("SCHEDULER_RULE_BASED_CFG_JSON must decode to a JSON object")
         return loaded
 
+    def configure_policy(
+        self,
+        *,
+        mode: str,
+        fixed_budget: float,
+        rule_based_cfg: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        mode = str(mode).strip().lower()
+        if mode not in {"fixed", "rule_based"}:
+            raise ValueError(f"Scheduler runtime budget mode must be fixed/rule_based, got {mode}")
+        if mode == "rule_based" and not rule_based_cfg:
+            raise ValueError("rule_based mode requires non-empty rule_based_cfg")
+        if mode == "fixed" and not (0.0 <= float(fixed_budget) <= 1.0):
+            raise ValueError(f"fixed_budget must be in [0, 1] for fixed mode, got {fixed_budget}")
+
+        with self._state_lock:
+            assigner = self._require_loaded()
+            # route 启动前切换全局策略，同时清空上一条 route 的历史状态。
+            assigner.set_policy(
+                mode=mode,
+                fixed_budget=float(fixed_budget),
+                rule_based_cfg=copy.deepcopy(rule_based_cfg) if mode == "rule_based" else None,
+                reset_state=True,
+            )
+            logger.info("Scheduler budget policy updated: mode=%s fixed_budget=%s", mode, fixed_budget)
+            return self.policy_info()
+
+    def policy_info(self) -> dict[str, Any]:
+        assigner = self._require_loaded()
+        return {
+            "mode": assigner.mode,
+            "fixed_budget": float(assigner.fixed_budget),
+            "rule_based": copy.deepcopy(getattr(assigner, "rule_based_cfg", None)),
+            "eval_budget": assigner.get_eval_budget(),
+        }
+
     def _load_scheduler_weights(
         self,
         *,
