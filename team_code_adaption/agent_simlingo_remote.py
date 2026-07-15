@@ -205,6 +205,25 @@ class RemoteSplitLingoAgent(LingoAgent):
         Path(self.debug_save_path).mkdir(parents=True, exist_ok=True)
         self.save_path_metric = self.debug_save_path + "/metric"
         Path(self.save_path_metric).mkdir(parents=True, exist_ok=True)
+        self._route_inference_first_start_perf = None
+        self._route_inference_first_start_wall = None
+        self._route_inference_last_end_perf = None
+        self._route_inference_last_end_wall = None
+        self._route_inference_accumulated_sec = 0.0
+        self._route_inference_frame_count = 0
+        self._route_inference_success_count = 0
+        self._route_inference_failed_count = 0
+        self._route_inference_timing = {
+            "route_key": self.route_key,
+            "route_path": self.route_path,
+            "save_path_metric": self.save_path_metric,
+            "started": False,
+            "finalized": False,
+            "frame_count": 0,
+            "successful_frame_count": 0,
+            "failed_frame_count": 0,
+            "accumulated_remote_inference_sec": 0.0,
+        }
         if DEBUG:
             self.save_path_img = self.debug_save_path + "/images"
             Path(self.save_path_img).mkdir(parents=True, exist_ok=True)
@@ -258,10 +277,34 @@ class RemoteSplitLingoAgent(LingoAgent):
 
         tick_data = self.tick(input_data)
         remote_payload = self._build_remote_payload(timestamp=timestamp, tick_data=tick_data)
+        inference_started_perf = time.perf_counter()
+        inference_started_wall = time.time()
+        self._begin_route_inference_frame(
+            timestamp=timestamp,
+            remote_payload=remote_payload,
+            started_perf=inference_started_perf,
+            started_wall=inference_started_wall,
+        )
         try:
             remote_result = self.remote_pipeline.infer(remote_payload)
         except RemoteInferenceError as exc:
+            self._finish_route_inference_frame(
+                timestamp=timestamp,
+                remote_payload=remote_payload,
+                started_perf=inference_started_perf,
+                started_wall=inference_started_wall,
+                status="failed",
+                error=str(exc),
+            )
             raise RuntimeError(f"Remote split-agent inference failed at step {self.step}: {exc}") from exc
+        self._finish_route_inference_frame(
+            timestamp=timestamp,
+            remote_payload=remote_payload,
+            started_perf=inference_started_perf,
+            started_wall=inference_started_wall,
+            status="success",
+            remote_result=remote_result,
+        )
 
         llm_payload = remote_result.get("llm_payload", {})
         self._log_remote_frame_alignment(
@@ -343,6 +386,7 @@ class RemoteSplitLingoAgent(LingoAgent):
         return control
 
     def destroy(self, results=None):  # pylint: disable=unused-argument
+        self._finalize_route_inference_timing(results=results)
         del self.config
 
     def _load_eval_token_prune_cfg(self):
@@ -402,6 +446,139 @@ class RemoteSplitLingoAgent(LingoAgent):
             # 关键调用点：split encoder 按帧接收 prune 配置，避免不同实验需要重启 agent。
             payload["token_prune"] = self.token_prune_cfg
         return payload
+
+    def _begin_route_inference_frame(
+        self,
+        *,
+        timestamp: float,
+        remote_payload: dict,
+        started_perf: float,
+        started_wall: float,
+    ) -> None:
+        if self._route_inference_first_start_perf is None:
+            self._route_inference_first_start_perf = float(started_perf)
+            self._route_inference_first_start_wall = float(started_wall)
+            self._route_inference_timing.update(
+                {
+                    "started": True,
+                    "finalized": False,
+                    "first_frame_id": self._to_int_or_none(remote_payload.get("frame_id")),
+                    "first_timestamp": float(timestamp),
+                    "first_frame_started_at_unix": float(started_wall),
+                    "first_frame_started_at": self._format_unix_ts(started_wall),
+                }
+            )
+
+        self._route_inference_timing.update(
+            {
+                "current_frame_id": self._to_int_or_none(remote_payload.get("frame_id")),
+                "current_timestamp": float(timestamp),
+                "current_frame_started_at_unix": float(started_wall),
+                "current_frame_started_at": self._format_unix_ts(started_wall),
+                "last_status": "running",
+            }
+        )
+        self._write_route_inference_timing()
+
+    def _finish_route_inference_frame(
+        self,
+        *,
+        timestamp: float,
+        remote_payload: dict,
+        started_perf: float,
+        started_wall: float,
+        status: str,
+        remote_result: dict | None = None,
+        error: str | None = None,
+    ) -> None:
+        ended_perf = time.perf_counter()
+        ended_wall = time.time()
+        frame_duration_sec = max(0.0, float(ended_perf - started_perf))
+        self._route_inference_last_end_perf = float(ended_perf)
+        self._route_inference_last_end_wall = float(ended_wall)
+        self._route_inference_accumulated_sec += frame_duration_sec
+        self._route_inference_frame_count += 1
+        if status == "success":
+            self._route_inference_success_count += 1
+        else:
+            self._route_inference_failed_count += 1
+
+        pipeline_meta = remote_result.get("pipeline_meta", {}) if isinstance(remote_result, dict) else {}
+        stage_durations_ms = pipeline_meta.get("stage_durations_ms") if isinstance(pipeline_meta, dict) else None
+        pipeline_total_ms = pipeline_meta.get("total_duration_ms") if isinstance(pipeline_meta, dict) else None
+        route_elapsed_sec = None
+        if self._route_inference_first_start_perf is not None:
+            route_elapsed_sec = max(0.0, float(ended_perf - self._route_inference_first_start_perf))
+
+        timing_update = {
+            "finalized": False,
+            "frame_count": int(self._route_inference_frame_count),
+            "successful_frame_count": int(self._route_inference_success_count),
+            "failed_frame_count": int(self._route_inference_failed_count),
+            "last_status": status,
+            "last_frame_id": self._to_int_or_none(remote_payload.get("frame_id")),
+            "last_timestamp": float(timestamp),
+            "last_frame_started_at_unix": float(started_wall),
+            "last_frame_started_at": self._format_unix_ts(started_wall),
+            "last_frame_completed_at_unix": float(ended_wall),
+            "last_frame_completed_at": self._format_unix_ts(ended_wall),
+            "last_frame_remote_inference_sec": frame_duration_sec,
+            "accumulated_remote_inference_sec": float(self._route_inference_accumulated_sec),
+            "avg_remote_inference_sec": (
+                float(self._route_inference_accumulated_sec / self._route_inference_frame_count)
+                if self._route_inference_frame_count
+                else None
+            ),
+            "route_elapsed_from_first_frame_start_sec": route_elapsed_sec,
+            "last_pipeline_total_duration_ms": pipeline_total_ms,
+            "last_pipeline_stage_durations_ms": self._to_jsonable(stage_durations_ms),
+        }
+        if error:
+            timing_update["last_error"] = error
+        elif "last_error" in self._route_inference_timing:
+            timing_update["last_error"] = None
+
+        self._route_inference_timing.update(timing_update)
+        self._write_route_inference_timing()
+
+    def _finalize_route_inference_timing(self, *, results=None) -> None:
+        if not hasattr(self, "_route_inference_timing"):
+            return
+
+        finalized_wall = time.time()
+        finalized_perf = time.perf_counter()
+        route_elapsed_sec = self._route_inference_timing.get("route_elapsed_from_first_frame_start_sec")
+        if self._route_inference_first_start_perf is not None:
+            end_perf = self._route_inference_last_end_perf or finalized_perf
+            route_elapsed_sec = max(0.0, float(end_perf - self._route_inference_first_start_perf))
+
+        self._route_inference_timing.update(
+            {
+                "finalized": True,
+                "finalized_at_unix": float(finalized_wall),
+                "finalized_at": self._format_unix_ts(finalized_wall),
+                "route_elapsed_from_first_frame_start_sec": route_elapsed_sec,
+            }
+        )
+        if results is not None:
+            self._route_inference_timing["leaderboard_results_repr"] = repr(results)
+        self._write_route_inference_timing()
+
+    def _write_route_inference_timing(self) -> None:
+        save_path_metric = getattr(self, "save_path_metric", None)
+        if save_path_metric is None:
+            return
+        try:
+            log_path = Path(save_path_metric) / "route_inference_timing.json"
+            with open(log_path, "w", encoding="utf-8") as outfile:
+                json.dump(self._route_inference_timing, outfile, indent=2, ensure_ascii=True)
+        except Exception:
+            return
+
+    def _format_unix_ts(self, ts: float) -> str:
+        whole = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(float(ts)))
+        millis = int((float(ts) % 1.0) * 1000)
+        return f"{whole}.{millis:03d}"
 
     def _log_remote_frame_alignment(
         self,
@@ -484,6 +661,9 @@ class RemoteSplitLingoAgent(LingoAgent):
             ),
             "budget_value": self._to_jsonable(llm_payload.get("budget_value")),
             "scheduler_plan_meta": self._to_jsonable(llm_payload.get("scheduler_plan_meta")),
+            "visual_token_prune": self._to_jsonable(llm_payload.get("visual_token_prune")),
+            "visual_token_keep_ratio": self._to_jsonable(llm_payload.get("visual_token_keep_ratio")),
+            "visual_token_prune_summary": self._visual_token_prune_summary(llm_payload),
             "plan_present": plan_np is not None,
             "plan_shape": None if plan_np is None else list(plan_np.shape),
         }
@@ -542,6 +722,9 @@ class RemoteSplitLingoAgent(LingoAgent):
             "gt_velocity": self._scalar_or_none(tick_data.get("speed")),
             "pred_route": self._array_summary(pred_route),
             "pred_speed_wps": self._array_summary(pred_speed_wps),
+            "visual_token_prune": self._to_jsonable(llm_payload.get("visual_token_prune")),
+            "visual_token_keep_ratio": self._to_jsonable(llm_payload.get("visual_token_keep_ratio")),
+            "visual_token_prune_summary": self._visual_token_prune_summary(llm_payload),
             "pid": {
                 "steer": self._scalar_or_none(pid_steer),
                 "throttle": self._scalar_or_none(pid_throttle),
@@ -598,6 +781,23 @@ class RemoteSplitLingoAgent(LingoAgent):
             "max": float(np.nanmax(array)) if array.size and np.issubdtype(array.dtype, np.number) else None,
             "first_values": self._to_jsonable(flat[:max_items]) if array.size else [],
         }
+
+    def _visual_token_prune_summary(self, llm_payload: dict):
+        prune_cfg = llm_payload.get("visual_token_prune")
+        keep_ratio = llm_payload.get("visual_token_keep_ratio")
+        if prune_cfg is None and keep_ratio is None:
+            return {"present": False}
+
+        summary = {
+            "present": True,
+            "config": self._to_jsonable(prune_cfg),
+            "keep_ratio": self._array_summary(keep_ratio),
+        }
+        if isinstance(prune_cfg, dict):
+            summary["mode"] = prune_cfg.get("mode")
+            summary["prune_ratio"] = self._scalar_or_none(prune_cfg.get("prune_ratio"))
+            summary["min_keep"] = self._to_int_or_none(prune_cfg.get("min_keep"))
+        return summary
 
     def _scalar_or_none(self, value):
         if value is None:
