@@ -1,6 +1,6 @@
 eval:
   agent: simlingo
-  checkpoint: ~/simlingo-heuristic/models/simlingoModels/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin
+  checkpoint: /data/gaoshuo/models/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin
   benchmark: bench2drive
   route_path: ~/simlingo-heuristic/leaderboard/data/bench2drive_split
   route_ids: ["000", "001", "002", "003", "004", "005", "006", "007", "008", "009"]

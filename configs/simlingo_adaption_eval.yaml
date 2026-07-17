@@ -1,6 +1,6 @@
 eval:
   agent: simlingo
-  checkpoint: /data/gaoshuo/SimLingo-docker-agent/models/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin
+  checkpoint: /data/gaoshuo/models/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin
   benchmark: bench2drive
   route_path: /data/gaoshuo/SimLingo-docker-agent/leaderboard/data/bench2drive_split
   seeds: [66]
@@ -15,10 +15,10 @@ eval:
   scene_frame_stride: 1
   scene_frame_format: png
   token_prune:
-    prune_ratio: 0.0
+    prune_ratio: 0.1
 
 budget:
-  mode: fixed # random # fixed # rule_based
+  mode: rule_based # random # fixed # rule_based
   fixed_budget: 1.0
   rule_based:
     k_warmup: 5

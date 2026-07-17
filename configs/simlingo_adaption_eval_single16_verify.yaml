@@ -1,6 +1,6 @@
 eval:
   agent: simlingo
-  checkpoint: ~/simlingo-heuristic/models/simlingoModels/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin
+  checkpoint: /data/gaoshuo/models/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin
   benchmark: bench2drive
   route_path: /tmp/bench2drive_split_single16
   seeds:

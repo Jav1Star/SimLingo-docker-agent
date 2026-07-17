@@ -18,7 +18,8 @@ import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parent
-DEFAULT_MODEL_RUN_DIR = REPO_ROOT / "models" / "2026_01_29_21_59_03_adaption_train_seed_9876"
+DEFAULT_MODELS_ROOT = Path("/data/gaoshuo/models")
+DEFAULT_MODEL_RUN_DIR = DEFAULT_MODELS_ROOT / "2026_01_29_21_59_03_adaption_train_seed_9876"
 DEFAULT_CHECKPOINT = DEFAULT_MODEL_RUN_DIR / "checkpoints" / "epoch=002.ckpt" / "pytorch_model.bin"
 DEFAULT_ROUTE_PATH = REPO_ROOT / "leaderboard" / "data" / "bench2drive_split"
 DEFAULT_OUT_ROOT = REPO_ROOT / "eval_results" / "split_agents_local"
