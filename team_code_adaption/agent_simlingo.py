@@ -66,10 +66,9 @@ torch.backends.cudnn.allow_tf32 = True
 def get_entry_point():
     return 'LingoAgent'
 
-
-DEBUG = False # saves images during evaluation
 HD_VIZ = False
 USE_UKF = True
+SCENE_FRAME_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 class LingoAgent(autonomous_agent.AutonomousAgent):
     """
@@ -311,7 +310,18 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.save_path_metric = self.debug_save_path + '/metric'
         Path(self.save_path_metric).mkdir(parents=True, exist_ok=True)
 
-        if DEBUG:
+        # 场景帧保存由评测 YAML 控制，避免为了可视化反复改 agent 源码。
+        self.save_scene_frames = os.environ.get("SIMLINGO_EVAL_SAVE_SCENE_FRAMES", "0") == "1"
+        self.scene_frame_stride = int(os.environ.get("SIMLINGO_EVAL_SCENE_FRAME_STRIDE", "5"))
+        self.scene_frame_format = os.environ.get("SIMLINGO_EVAL_SCENE_FRAME_FORMAT", "png").lower()
+
+        if self.save_scene_frames:
+            if self.scene_frame_stride <= 0:
+                raise ValueError("SIMLINGO_EVAL_SCENE_FRAME_STRIDE must be > 0")
+            if self.scene_frame_format not in ("png", "jpg", "jpeg"):
+                raise ValueError("SIMLINGO_EVAL_SCENE_FRAME_FORMAT must be one of: png, jpg, jpeg")
+            if not os.path.exists(SCENE_FRAME_FONT_PATH):
+                raise FileNotFoundError(f"Scene frame font not found: {SCENE_FRAME_FONT_PATH}")
             self.save_path_img = self.debug_save_path + '/images'
             Path(self.save_path_img).mkdir(parents=True, exist_ok=True)
           
@@ -784,7 +794,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         # prepare velocity input
         gt_velocity = tick_data['speed']
 
-        if DEBUG and self.step%5 == 0:
+        if self.save_scene_frames and self.step % self.scene_frame_stride == 0:
             tvec = None
             rvec = None
 
@@ -843,7 +853,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                     line_width = 100
                     y_dist = 30
                     y_start = H + 20
-                font = ImageFont.truetype("arial.ttf", font_size)
+                font = ImageFont.truetype(SCENE_FRAME_FONT_PATH, font_size)
                 import textwrap
                 lines = textwrap.wrap(f"Prompt: {self.prompt}", width=line_width)
                 for idx, line in enumerate(lines):
@@ -851,12 +861,16 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                 
                 y_start = H + 20 + y_dist*(idx+1)
 
-                lines = textwrap.wrap(f"Answer: {language[0]}", width=line_width)
+                # 可视化不能假设每一帧都有语言输出，空输出也应正常保存帧。
+                answer_text = " ".join(str(item) for item in language) if isinstance(language, list) else str(language)
+                lines = textwrap.wrap(f"Answer: {answer_text}", width=line_width)
                 for idx, line in enumerate(lines):
                         draw.text((10, y_start + y_dist*(idx)), line, font=font, fill=(255, 255, 255, 255))
 
             # save
-            image.save(f"{self.save_path_img}/{self.step}.png")
+            if self.scene_frame_format in ("jpg", "jpeg") and image.mode == "RGBA":
+                image = image.convert("RGB")
+            image.save(f"{self.save_path_img}/{self.step}.{self.scene_frame_format}")
             
         steer, throttle, brake = self.control_pid(pred_route, gt_velocity, pred_speed_wps)
 

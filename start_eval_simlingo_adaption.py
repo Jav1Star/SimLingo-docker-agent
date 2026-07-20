@@ -164,6 +164,14 @@ def build_eval_config(args, no_server_launch):
     if args.seed is not None:
         seeds = [args.seed]
 
+    save_scene_frames = bool(cfg.get("save_scene_frames", False))
+    scene_frame_stride = int(cfg.get("scene_frame_stride", 5))
+    scene_frame_format = str(cfg.get("scene_frame_format", "png")).lower()
+    if save_scene_frames and scene_frame_stride <= 0:
+        raise ValueError("scene_frame_stride must be > 0 when save_scene_frames is true")
+    if save_scene_frames and scene_frame_format not in ("png", "jpg", "jpeg"):
+        raise ValueError("scene_frame_format must be one of: png, jpg, jpeg")
+
     eval_cfg = {
         "agent": cfg["agent"],
         "checkpoint": expand_path(cfg["checkpoint"]),
@@ -186,6 +194,9 @@ def build_eval_config(args, no_server_launch):
         "token_prune_ratio": token_prune_ratio,
         "route_ids": route_ids,
         "export_route_panel": bool(cfg.get("export_route_panel", True)),
+        "save_scene_frames": save_scene_frames,
+        "scene_frame_stride": scene_frame_stride,
+        "scene_frame_format": scene_frame_format,
     }
     return eval_cfg
 
@@ -224,6 +235,10 @@ def launch_job(job, gpu_id, world_port, tm_port):
     token_prune_ratio = cfg.get("token_prune_ratio", None)
     if token_prune_ratio is not None:
         env["SIMLINGO_EVAL_TOKEN_PRUNE_RATIO"] = str(token_prune_ratio)
+    # 评测配置直接控制场景帧保存，避免改 agent 代码才能开关可视化。
+    env["SIMLINGO_EVAL_SAVE_SCENE_FRAMES"] = "1" if cfg["save_scene_frames"] else "0"
+    env["SIMLINGO_EVAL_SCENE_FRAME_STRIDE"] = str(cfg["scene_frame_stride"])
+    env["SIMLINGO_EVAL_SCENE_FRAME_FORMAT"] = cfg["scene_frame_format"]
     
     command = [
         sys.executable,
@@ -511,7 +526,9 @@ def main(args):
                         if "_checkpoint" in res_data and "global_record" in res_data["_checkpoint"]:
                             status = res_data["_checkpoint"]["global_record"].get("status", "Failed")
                         if status == "Completed":
-                            if tflops_recording_enabled() and not os.path.exists(tflops_file):
+                            if cfg["save_scene_frames"]:
+                                print(f"[queue] route {route_id} mode {cfg['budget_mode']} status is Completed but save_scene_frames is true -> queue")
+                            elif tflops_recording_enabled() and not os.path.exists(tflops_file):
                                 print(f"[queue] route {route_id} mode {cfg['budget_mode']} status is Completed but TFLOPs file is missing -> queue")
                             else:
                                 should_skip = True
