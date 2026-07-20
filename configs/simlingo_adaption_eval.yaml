@@ -3,7 +3,7 @@ eval:
   checkpoint: /data/gaoshuo/models/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin
   benchmark: bench2drive
   route_path: /data/gaoshuo/SimLingo-docker-agent/leaderboard/data/bench2drive_split
-  seeds: [66]
+  seeds: [3]
   tries: 0
   out_root: /data/gaoshuo/SimLingo-docker-agent/eval_results/split_agents_local
   carla_root: /data/gaoshuo/data/carla0915
@@ -11,8 +11,9 @@ eval:
   agent_file: /data/gaoshuo/SimLingo-docker-agent/team_code_adaption/agent_simlingo_remote.py
   team_code: team_code_adaption
   agent_config: not_used
-  save_scene_frames: false
-  scene_frame_stride: 1
+  save_scene_frames: true
+  save_scene_raw_frames: false
+  scene_frame_stride: 5
   scene_frame_format: png
   token_prune:
     prune_ratio: 0.1

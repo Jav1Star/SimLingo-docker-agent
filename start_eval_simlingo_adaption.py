@@ -217,6 +217,15 @@ def build_eval_config(args, no_server_launch):
     if args.seed is not None:
         seeds = [args.seed]
 
+    scene_frame_stride = int(cfg.get("scene_frame_stride", 1))
+    if scene_frame_stride < 1:
+        raise ValueError(f"eval.scene_frame_stride must be >= 1, got {scene_frame_stride}")
+    scene_frame_format = str(cfg.get("scene_frame_format", "png")).strip().lower().lstrip(".")
+    if scene_frame_format not in {"png", "jpg", "jpeg"}:
+        raise ValueError(
+            f"eval.scene_frame_format must be png/jpg/jpeg, got {scene_frame_format}"
+        )
+
     eval_cfg = {
         "agent": cfg["agent"],
         "checkpoint": expand_path(cfg["checkpoint"]),
@@ -238,6 +247,10 @@ def build_eval_config(args, no_server_launch):
         "rule_based_cfg": rule_based_cfg,
         "token_prune_ratio": token_prune_ratio,
         "route_ids": route_ids,
+        "save_scene_frames": bool(cfg.get("save_scene_frames", False)),
+        "save_scene_raw_frames": bool(cfg.get("save_scene_raw_frames", False)),
+        "scene_frame_stride": scene_frame_stride,
+        "scene_frame_format": scene_frame_format,
     }
     return eval_cfg
 
@@ -274,6 +287,10 @@ def launch_job(job, gpu_id, world_port, tm_port):
     env["SIMLINGO_EVAL_BUDGET_MODE"] = str(job["budget_mode"])
     env["SIMLINGO_EVAL_FIXED_BUDGET"] = str(job["fixed_budget"])
     env["SIMLINGO_EVAL_RULE_BASED_CFG_JSON"] = json.dumps(job["rule_based_cfg"], ensure_ascii=False)
+    env["SIMLINGO_SAVE_SCENE_FRAMES"] = "1" if cfg["save_scene_frames"] else "0"
+    env["SIMLINGO_SAVE_SCENE_RAW_FRAMES"] = "1" if cfg["save_scene_raw_frames"] else "0"
+    env["SIMLINGO_SCENE_FRAME_STRIDE"] = str(cfg["scene_frame_stride"])
+    env["SIMLINGO_SCENE_FRAME_FORMAT"] = cfg["scene_frame_format"]
     token_prune_ratio = cfg.get("token_prune_ratio", None)
     if token_prune_ratio is not None:
         env["SIMLINGO_EVAL_TOKEN_PRUNE_RATIO"] = str(token_prune_ratio)

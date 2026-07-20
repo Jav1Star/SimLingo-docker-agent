@@ -41,6 +41,7 @@ from team_code_adaption.agent_simlingo import (
 )
 from team_code_adaption.config_simlingo import GlobalConfig
 from team_code_adaption.nav_planner import LateralPIDController
+from team_code_adaption.scene_visualizer import save_scene_visualization
 
 
 def get_entry_point():
@@ -205,6 +206,16 @@ class RemoteSplitLingoAgent(LingoAgent):
         Path(self.debug_save_path).mkdir(parents=True, exist_ok=True)
         self.save_path_metric = self.debug_save_path + "/metric"
         Path(self.save_path_metric).mkdir(parents=True, exist_ok=True)
+        self.save_scene_frames = self._env_flag("SIMLINGO_SAVE_SCENE_FRAMES", False)
+        self.save_scene_raw_frames = self._env_flag("SIMLINGO_SAVE_SCENE_RAW_FRAMES", False)
+        self.scene_frame_stride = self._load_scene_frame_stride()
+        self.scene_frame_format = self._load_scene_frame_format()
+        self.scene_frames_dir = Path(self.debug_save_path) / "scene_frames"
+        self._scene_frame_warning_emitted = False
+        if self.save_scene_frames:
+            (self.scene_frames_dir / "annotated").mkdir(parents=True, exist_ok=True)
+            if self.save_scene_raw_frames:
+                (self.scene_frames_dir / "raw").mkdir(parents=True, exist_ok=True)
         self._route_inference_first_start_perf = None
         self._route_inference_first_start_wall = None
         self._route_inference_last_end_perf = None
@@ -375,6 +386,15 @@ class RemoteSplitLingoAgent(LingoAgent):
             returned_control=control,
             stored_control=self.control,
         )
+        self._save_scene_frame(
+            timestamp=timestamp,
+            tick_data=tick_data,
+            remote_result=remote_result,
+            llm_payload=llm_payload,
+            pred_route=pred_route,
+            pred_speed_wps=pred_speed_wps,
+            control=control,
+        )
 
         metric_info = self.get_metric_info()
         metric_info["eval_budget"] = copy.deepcopy(self.eval_budget)
@@ -404,6 +424,77 @@ class RemoteSplitLingoAgent(LingoAgent):
             "prune_ratio": prune_ratio,
             "min_keep": 1,
         }
+
+    @staticmethod
+    def _env_flag(name: str, default: bool) -> bool:
+        value = os.getenv(name)
+        if value is None:
+            return default
+        return value.strip().lower() not in {"0", "false", "no", "off", ""}
+
+    @staticmethod
+    def _load_scene_frame_stride() -> int:
+        value = int(os.getenv("SIMLINGO_SCENE_FRAME_STRIDE", "1"))
+        if value < 1:
+            raise ValueError(f"SIMLINGO_SCENE_FRAME_STRIDE must be >= 1, got {value}")
+        return value
+
+    @staticmethod
+    def _load_scene_frame_format() -> str:
+        value = os.getenv("SIMLINGO_SCENE_FRAME_FORMAT", "png").strip().lower().lstrip(".")
+        if value not in {"png", "jpg", "jpeg"}:
+            raise ValueError(f"SIMLINGO_SCENE_FRAME_FORMAT must be png/jpg/jpeg, got {value}")
+        return value
+
+    def _save_scene_frame(
+        self,
+        *,
+        timestamp: float,
+        tick_data: dict,
+        remote_result: dict,
+        llm_payload: dict,
+        pred_route: torch.Tensor,
+        pred_speed_wps: torch.Tensor,
+        control: carla.VehicleControl,
+    ) -> None:
+        if not self.save_scene_frames or self.step % self.scene_frame_stride != 0:
+            return
+        camera = getattr(self, "camera_for_viz", None)
+        if camera is None:
+            return
+
+        filename = f"{self.step:06d}.{self.scene_frame_format}"
+        annotated_path = self.scene_frames_dir / "annotated" / filename
+        raw_path = self.scene_frames_dir / "raw" / filename if self.save_scene_raw_frames else None
+        pipeline_meta = remote_result.get("pipeline_meta", {})
+        metadata = {
+            "route_key": self.route_key,
+            "frame_id": int(self.step),
+            "timestamp": round(float(timestamp), 3),
+            "speed_mps": round(self._scalar_or_none(tick_data.get("speed")), 3),
+            "budget_mode": self.eval_budget_mode,
+            "budget_value": self._to_jsonable(llm_payload.get("budget_value")),
+            "visual_token_keep_ratio": self._to_jsonable(llm_payload.get("visual_token_keep_ratio")),
+            "steer": round(float(control.steer), 4),
+            "throttle": round(float(control.throttle), 4),
+            "brake": round(float(control.brake), 4),
+            "stage_durations_ms": pipeline_meta.get("stage_durations_ms", {}),
+            "prompt": getattr(self, "prompt", ""),
+        }
+        try:
+            save_scene_visualization(
+                camera_bgr=camera,
+                annotated_path=annotated_path,
+                raw_path=raw_path,
+                target_points=getattr(self, "target_points", None),
+                pred_route=pred_route.detach().float().cpu().numpy(),
+                pred_speed_wps=pred_speed_wps.detach().float().cpu().numpy(),
+                metadata=metadata,
+            )
+        except Exception as exc:  # Visualization must never abort an evaluation route.
+            if not self._scene_frame_warning_emitted:
+                print(f"[scene-viz] failed to save frame {self.step}: {exc}", flush=True)
+                self._scene_frame_warning_emitted = True
 
     def _build_remote_payload(self, *, timestamp: float, tick_data: dict) -> dict:
         prompt_label = self.DrivingInput.get("prompt_inference") or self.DrivingInput.get("prompt")
