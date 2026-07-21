@@ -407,6 +407,16 @@ class RemoteSplitLingoAgent(LingoAgent):
 
     def destroy(self, results=None):  # pylint: disable=unused-argument
         self._finalize_route_inference_timing(results=results)
+        try:
+            cleanup_result = self.remote_pipeline.cleanup_route(self.route_key)
+            print(
+                "[remote-pipeline] route NATS cleanup completed: "
+                f"route_key={self.route_key} "
+                f"deleted_consumers={sum(cleanup_result['deleted_consumers'].values())} "
+                f"purged_subjects={sum(cleanup_result['purged_subjects'].values())}"
+            )
+        except Exception as exc:  # Cleanup must not hide the route evaluation result.
+            print(f"[remote-pipeline] route NATS cleanup failed for {self.route_key}: {exc}")
         del self.config
 
     def _load_eval_token_prune_cfg(self):

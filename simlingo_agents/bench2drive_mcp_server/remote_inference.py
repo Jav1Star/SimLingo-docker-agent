@@ -149,7 +149,6 @@ class SplitAgentPipelineClient:
         started = time.time()
         try:
             payload = self._attach_pipeline_request_id(payload, request_id)
-            await self._cleanup_request_subjects(nats, subjects)
             await nats.send(subjects["source_input"], encode_structured_numpy(payload))
 
             stage_started = time.time()
@@ -256,7 +255,6 @@ class SplitAgentPipelineClient:
             message = messages[0]
             await message.ack()
             decoded = decode_structured_numpy(message.payload)
-            await self._cleanup_request_subjects(nats, subjects)
             decoded.setdefault("pipeline_meta", {})
             decoded["pipeline_meta"].update(
                 {
@@ -273,7 +271,36 @@ class SplitAgentPipelineClient:
             self._validate_final_result(decoded)
             return decoded
         finally:
-            await self._cleanup_request_subjects(nats, subjects)
+            await nats.close()
+
+    def cleanup_route(self, route_key: str) -> dict[str, Any]:
+        """Delete the JetStream resources owned by one completed route."""
+        return asyncio.run(self._cleanup_route_async(route_key))
+
+    async def _cleanup_route_async(self, route_key: str) -> dict[str, Any]:
+        subjects = self._build_subjects(self._build_channel_id(route_key))
+        data_subjects = [
+            subject
+            for key, subject in subjects.items()
+            if not key.endswith("_durable") and "durable" not in key
+        ]
+        durable_consumers = [
+            consumer
+            for key, consumer in subjects.items()
+            if key.endswith("_durable") or "durable" in key
+        ]
+        nats_cls = self._build_nats_comm()
+        nats = nats_cls(
+            servers=[self.nats_server_url],
+            stream=self.nats_stream,
+            stream_subjects=self.nats_stream_subjects,
+            jetstream_domain=self.nats_jetstream_domain,
+        )
+        try:
+            deleted = await nats.delete_consumers(durable_consumers)
+            purged = await nats.purge_subjects(data_subjects)
+            return {"deleted_consumers": deleted, "purged_subjects": purged}
+        finally:
             await nats.close()
 
     def _post_execute(
@@ -380,19 +407,6 @@ class SplitAgentPipelineClient:
                 "before running the remote Bench2Drive agent."
             ) from exc
         return NatsComm
-
-    async def _cleanup_request_subjects(self, nats: Any, subjects: dict[str, str]) -> None:
-        data_subjects = [
-            subject
-            for key, subject in subjects.items()
-            if not key.endswith("_durable") and "durable" not in key
-        ]
-        try:
-            await nats.purge_subjects(data_subjects)
-        except AttributeError:
-            return
-        except Exception:
-            return
 
     def _build_subjects(self, request_id: str) -> dict[str, str]:
         base = f"{self.subject_prefix}.{request_id}"

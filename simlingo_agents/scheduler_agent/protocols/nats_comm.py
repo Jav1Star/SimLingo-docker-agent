@@ -7,10 +7,29 @@ from typing import Any, Callable, Dict, List, Optional
 
 from nats.aio.client import Client as NATS
 from nats.errors import TimeoutError as NatsTimeoutError
-from nats.js.api import DiscardPolicy, StorageType, StreamConfig
+from nats.js.api import ConsumerConfig, DiscardPolicy, StorageType, StreamConfig
 from nats.js.errors import NotFoundError
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _SubscriptionLease:
+    subscription: Any
+    remaining: int
+    released: bool = False
+
+    async def release(self) -> None:
+        if self.released:
+            return
+        self.remaining -= 1
+        if self.remaining > 0:
+            return
+        self.released = True
+        try:
+            await self.subscription.unsubscribe()
+        except Exception as exc:
+            logger.warning("failed to unsubscribe JetStream pull subscription: %s", exc)
 
 
 @dataclass
@@ -22,19 +41,31 @@ class NatsMessage:
     stream_seq: Optional[int] = None
     consumer_seq: Optional[int] = None
     _raw: Any = field(default=None, repr=False)
+    _subscription_lease: Optional[_SubscriptionLease] = field(default=None, repr=False)
+
+    async def _release_subscription(self) -> None:
+        if self._subscription_lease is not None:
+            await self._subscription_lease.release()
+            self._subscription_lease = None
 
     async def ack(self) -> None:
         if self._raw is None:
             raise RuntimeError("message does not have a JetStream ack handle")
-        await self._raw.ack()
+        try:
+            await self._raw.ack()
+        finally:
+            await self._release_subscription()
 
     async def nak(self, delay: Optional[float] = None) -> None:
         if self._raw is None:
             raise RuntimeError("message does not have a JetStream ack handle")
-        if delay is None:
-            await self._raw.nak()
-        else:
-            await self._raw.nak(delay=delay)
+        try:
+            if delay is None:
+                await self._raw.nak()
+            else:
+                await self._raw.nak(delay=delay)
+        finally:
+            await self._release_subscription()
 
     async def in_progress(self) -> None:
         if self._raw is None:
@@ -44,7 +75,10 @@ class NatsMessage:
     async def term(self) -> None:
         if self._raw is None:
             raise RuntimeError("message does not have a JetStream ack handle")
-        await self._raw.term()
+        try:
+            await self._raw.term()
+        finally:
+            await self._release_subscription()
 
 
 class NatsComm:
@@ -77,6 +111,9 @@ class NatsComm:
         self.stream_max_msgs_per_subject = self._int_from_env("NATS_STREAM_MAX_MSGS_PER_SUBJECT", 1)
         self.stream_max_bytes = self._int_from_env("NATS_STREAM_MAX_BYTES", 512 * 1024 * 1024)
         self.stream_max_age = self._float_from_env("NATS_STREAM_MAX_AGE_SEC", 300.0)
+        self.consumer_inactive_threshold = self._float_from_env(
+            "NATS_CONSUMER_INACTIVE_THRESHOLD_SEC", 300.0
+        )
 
     @staticmethod
     def _servers_from_env() -> List[str]:
@@ -198,32 +235,64 @@ class NatsComm:
         ack: bool = False,
     ) -> List[NatsMessage]:
         await self.connect()
-        sub = await self._js.pull_subscribe(subject, durable=durable)
+        consumer_config = ConsumerConfig(inactive_threshold=self.consumer_inactive_threshold)
+        sub = await self._js.pull_subscribe(
+            subject,
+            durable=durable,
+            stream=self.stream,
+            config=consumer_config,
+        )
 
         try:
             raw_messages = await sub.fetch(batch, timeout=timeout_sec)
         except NatsTimeoutError:
+            await sub.unsubscribe()
             return []
+        except Exception:
+            await sub.unsubscribe()
+            raise
 
         messages: List[NatsMessage] = []
-        for raw in raw_messages:
-            data = json.loads(raw.data.decode())
-            metadata = raw.metadata
-            messages.append(
-                NatsMessage(
-                    subject=raw.subject,
-                    payload=data,
-                    stream=metadata.stream,
-                    consumer=metadata.consumer,
-                    stream_seq=metadata.sequence.stream,
-                    consumer_seq=metadata.sequence.consumer,
-                    _raw=raw,
+        lease = _SubscriptionLease(subscription=sub, remaining=len(raw_messages))
+        try:
+            for raw in raw_messages:
+                data = json.loads(raw.data.decode())
+                metadata = raw.metadata
+                messages.append(
+                    NatsMessage(
+                        subject=raw.subject,
+                        payload=data,
+                        stream=metadata.stream,
+                        consumer=metadata.consumer,
+                        stream_seq=metadata.sequence.stream,
+                        consumer_seq=metadata.sequence.consumer,
+                        _raw=raw,
+                        _subscription_lease=None if ack else lease,
+                    )
                 )
-            )
-            if ack:
-                await raw.ack()
+                if ack:
+                    await raw.ack()
+        except Exception:
+            await sub.unsubscribe()
+            raise
+
+        if ack or not raw_messages:
+            await sub.unsubscribe()
 
         return messages
+
+    async def delete_consumers(self, consumers: List[str]) -> Dict[str, bool]:
+        await self.connect()
+        results: Dict[str, bool] = {}
+        for consumer in dict.fromkeys(consumers):
+            try:
+                results[consumer] = await self._js.delete_consumer(self.stream, consumer)
+            except NotFoundError:
+                results[consumer] = False
+            except Exception as exc:
+                logger.warning("failed to delete stream=%s consumer=%s: %s", self.stream, consumer, exc)
+                results[consumer] = False
+        return results
     
     async def purge_subjects(self, subjects: List[str]) -> Dict[str, bool]:
         await self.connect()
