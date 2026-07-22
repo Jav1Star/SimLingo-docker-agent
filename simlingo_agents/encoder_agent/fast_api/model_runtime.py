@@ -173,13 +173,14 @@ class EncoderRuntime:
         }
         if image_state:
             missing, unexpected = image_encoder.model.load_state_dict(image_state, strict=False)
+            self._require_exact_load("image encoder", missing, unexpected)
             logger.info(
-                "Loaded image encoder partial weights: missing=%d unexpected=%d",
+                "Loaded image encoder weights exactly: missing=%d unexpected=%d skipped=0",
                 len(missing),
                 len(unexpected),
             )
         else:
-            logger.warning("No image encoder weights found with prefix %s", image_prefix)
+            raise RuntimeError(f"No image encoder weights found with prefix {image_prefix}")
 
         wp_prefix = "wp_encoder."
         wp_state = {
@@ -189,13 +190,25 @@ class EncoderRuntime:
         }
         if wp_state:
             missing, unexpected = wp_encoder.load_state_dict(wp_state, strict=False)
+            self._require_exact_load("waypoint encoder", missing, unexpected)
             logger.info(
-                "Loaded waypoint encoder partial weights: missing=%d unexpected=%d",
+                "Loaded waypoint encoder weights exactly: missing=%d unexpected=%d skipped=0",
                 len(missing),
                 len(unexpected),
             )
         else:
-            logger.warning("No waypoint encoder weights found with prefix %s", wp_prefix)
+            raise RuntimeError(f"No waypoint encoder weights found with prefix {wp_prefix}")
+
+    @staticmethod
+    def _require_exact_load(module_name: str, missing: Any, unexpected: Any) -> None:
+        missing_keys = list(missing)
+        unexpected_keys = list(unexpected)
+        if missing_keys or unexpected_keys:
+            raise RuntimeError(
+                f"Strict checkpoint validation failed for {module_name}: "
+                f"missing={len(missing_keys)} unexpected={len(unexpected_keys)} skipped=0; "
+                f"missing_keys={missing_keys[:10]}; unexpected_keys={unexpected_keys[:10]}"
+            )
 
     def _require_loaded(self) -> tuple[Any, LingoInternVLModel, WaypointInputAdaptor]:
         if self._tokenizer is None or self._image_encoder is None or self._wp_encoder is None:

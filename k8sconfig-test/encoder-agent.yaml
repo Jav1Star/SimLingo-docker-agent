@@ -25,7 +25,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: simlingo-encoder-agent
-          image: simlingo-encoder-agent:0.2.2
+          image: simlingo-encoder-agent:0.2.3
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 9011

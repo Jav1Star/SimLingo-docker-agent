@@ -222,8 +222,7 @@ class SchedulerRuntime:
                     break
 
         if not scheduler_state:
-            logger.warning("No scheduler weights found with prefixes %s", prefixes)
-            return
+            raise RuntimeError(f"No scheduler weights found with prefixes {prefixes}")
 
         scheduler_state = self._filter_compatible_state_dict(
             scheduler_state,
@@ -231,12 +230,12 @@ class SchedulerRuntime:
             module_name="scheduler",
         )
         if not scheduler_state:
-            logger.warning("No compatible scheduler weights found with prefixes %s", prefixes)
-            return
+            raise RuntimeError(f"No compatible scheduler weights found with prefixes {prefixes}")
 
         missing, unexpected = scheduler_module.load_state_dict(scheduler_state, strict=False)
+        self._require_exact_load("scheduler", missing, unexpected)
         logger.info(
-            "Loaded scheduler partial weights: missing=%d unexpected=%d",
+            "Loaded scheduler weights exactly: missing=%d unexpected=%d skipped=0",
             len(missing),
             len(unexpected),
         )
@@ -262,15 +261,23 @@ class SchedulerRuntime:
             compatible[key] = value
 
         if skipped:
-            preview = "; ".join(skipped[:5])
-            logger.warning(
-                "Skipped %d incompatible %s weights while forcing num_prefix_layers=%d: %s",
-                len(skipped),
-                module_name,
-                int(getattr(module, "num_prefix_layers", SCHEDULER_NUM_PREFIX_LAYERS)),
-                preview,
+            raise RuntimeError(
+                f"Strict checkpoint validation failed for {module_name}: "
+                f"missing=0 unexpected=0 skipped={len(skipped)}; skipped_keys={skipped[:10]}; "
+                f"num_prefix_layers={int(getattr(module, 'num_prefix_layers', SCHEDULER_NUM_PREFIX_LAYERS))}"
             )
         return compatible
+
+    @staticmethod
+    def _require_exact_load(module_name: str, missing: Any, unexpected: Any) -> None:
+        missing_keys = list(missing)
+        unexpected_keys = list(unexpected)
+        if missing_keys or unexpected_keys:
+            raise RuntimeError(
+                f"Strict checkpoint validation failed for {module_name}: "
+                f"missing={len(missing_keys)} unexpected={len(unexpected_keys)} skipped=0; "
+                f"missing_keys={missing_keys[:10]}; unexpected_keys={unexpected_keys[:10]}"
+            )
 
     def _require_loaded(self) -> BaseBudgetAssigner:
         if self._assigner is None or self._assigner.scheduler is None:

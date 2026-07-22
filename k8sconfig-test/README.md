@@ -5,9 +5,9 @@ namespace. Bench2Drive MCP and the NATS broker are intentionally excluded.
 
 ## Manifests
 
-- `encoder-agent.yaml`: `simlingo-encoder-agent:0.1.1`
-- `scheduler-agent.yaml`: `simlingo-scheduler-agent:0.1.2`
-- `llm-agent.yaml`: `simlingo-llm-agent:0.1.1`
+- `encoder-agent.yaml`: `simlingo-encoder-agent:0.2.3`
+- `scheduler-agent.yaml`: `simlingo-scheduler-agent:0.2.3`
+- `llm-agent.yaml`: `simlingo-llm-agent:0.2.3`
 
 Each agent requests and limits one GPU:
 

@@ -5,7 +5,7 @@ eval:
   route_path: /data/gaoshuo/SimLingo-docker-agent/leaderboard/data/bench2drive_split
   seeds: [3]
   tries: 0
-  out_root: /data/gaoshuo/SimLingo-docker-agent/eval_results/split_agents_local
+  out_root: /data/gaoshuo/SimLingo-docker-agent/eval_results/split_agents_local/latency_comparison
   carla_root: /data/gaoshuo/data/carla0915
   repo_root: /data/gaoshuo/SimLingo-docker-agent
   agent_file: /data/gaoshuo/SimLingo-docker-agent/team_code_adaption/agent_simlingo_remote.py
@@ -16,11 +16,11 @@ eval:
   scene_frame_stride: 5
   scene_frame_format: png
   token_prune:
-    prune_ratio: 0.2
+    prune_ratio: 0.0
 
 budget:
   mode: fixed # random # fixed # rule_based
-  fixed_budget: 0.7
+  fixed_budget: 1.0
   rule_based:
     k_warmup: 5
     eta: 0.03

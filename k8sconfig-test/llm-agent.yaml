@@ -25,7 +25,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: simlingo-llm-agent
-          image: simlingo-llm-agent:0.2.2
+          image: simlingo-llm-agent:0.2.3
           imagePullPolicy: IfNotPresent
           terminationMessagePolicy: FallbackToLogsOnError
           ports:
@@ -48,7 +48,7 @@ spec:
             - name: LLM_LORA
               value: "true"
             - name: LLM_ADAPTION_TRAIN
-              value: "false"
+              value: "true"
             - name: LLM_LORA_ALPHA
               value: "64"
             - name: LLM_LORA_R

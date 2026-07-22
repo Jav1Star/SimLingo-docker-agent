@@ -261,13 +261,14 @@ class LLMRuntime:
         }
         if language_state:
             missing, unexpected = llm.load_state_dict(language_state, strict=False)
+            self._require_exact_load("language model", missing, unexpected)
             logger.info(
-                "Loaded language model partial weights: missing=%d unexpected=%d",
+                "Loaded language model weights exactly: missing=%d unexpected=%d skipped=0",
                 len(missing),
                 len(unexpected),
             )
         else:
-            logger.warning("No language model weights found with prefix %s", language_prefix)
+            raise RuntimeError(f"No language model weights found with prefix {language_prefix}")
 
         driving_prefix = "adaptors.driving."
         driving_state = {
@@ -277,13 +278,14 @@ class LLMRuntime:
         }
         if driving_state:
             missing, unexpected = driving_adaptor.load_state_dict(driving_state, strict=False)
+            self._require_exact_load("driving adaptor", missing, unexpected)
             logger.info(
-                "Loaded driving adaptor partial weights: missing=%d unexpected=%d",
+                "Loaded driving adaptor weights exactly: missing=%d unexpected=%d skipped=0",
                 len(missing),
                 len(unexpected),
             )
         else:
-            logger.warning("No driving adaptor weights found with prefix %s", driving_prefix)
+            raise RuntimeError(f"No driving adaptor weights found with prefix {driving_prefix}")
 
         scheduler_prefixes = ("budget_assigner.scheduler.", "scheduler.")
         scheduler_state: dict[str, Any] = {}
@@ -300,13 +302,14 @@ class LLMRuntime:
             )
         if scheduler_state:
             missing, unexpected = budget_encoder.load_state_dict(scheduler_state, strict=False)
+            self._require_exact_load("budget encoder", missing, unexpected)
             logger.info(
-                "Loaded budget encoder partial weights: missing=%d unexpected=%d",
+                "Loaded budget encoder weights exactly: missing=%d unexpected=%d skipped=0",
                 len(missing),
                 len(unexpected),
             )
         else:
-            logger.warning("No compatible scheduler weights found with prefixes %s", scheduler_prefixes)
+            raise RuntimeError(f"No compatible scheduler weights found with prefixes {scheduler_prefixes}")
 
     def _filter_compatible_state_dict(
         self,
@@ -329,15 +332,23 @@ class LLMRuntime:
             compatible[key] = value
 
         if skipped:
-            preview = "; ".join(skipped[:5])
-            logger.warning(
-                "Skipped %d incompatible %s weights while forcing num_prefix_layers=%d: %s",
-                len(skipped),
-                module_name,
-                int(getattr(module, "num_prefix_layers", SCHEDULER_NUM_PREFIX_LAYERS)),
-                preview,
+            raise RuntimeError(
+                f"Strict checkpoint validation failed for {module_name}: "
+                f"missing=0 unexpected=0 skipped={len(skipped)}; skipped_keys={skipped[:10]}; "
+                f"num_prefix_layers={int(getattr(module, 'num_prefix_layers', SCHEDULER_NUM_PREFIX_LAYERS))}"
             )
         return compatible
+
+    @staticmethod
+    def _require_exact_load(module_name: str, missing: Any, unexpected: Any) -> None:
+        missing_keys = list(missing)
+        unexpected_keys = list(unexpected)
+        if missing_keys or unexpected_keys:
+            raise RuntimeError(
+                f"Strict checkpoint validation failed for {module_name}: "
+                f"missing={len(missing_keys)} unexpected={len(unexpected_keys)} skipped=0; "
+                f"missing_keys={missing_keys[:10]}; unexpected_keys={unexpected_keys[:10]}"
+            )
 
     def _require_loaded(self) -> tuple[LLM, DrivingAdaptor, Any, torch.nn.Module]:
         if self._llm is None or self._driving_adaptor is None or self._tokenizer is None or self._budget_encoder is None:
