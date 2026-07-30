@@ -25,7 +25,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: simlingo-scheduler-agent
-          image: simlingo-scheduler-agent:0.2.3
+          image: simlingo-scheduler-agent:0.2.4
           imagePullPolicy: IfNotPresent
           terminationMessagePolicy: FallbackToLogsOnError
           ports:
@@ -89,6 +89,8 @@ spec:
               value: workflow.>
             - name: NATS_JETSTREAM_DOMAIN
               value: "hub"
+            - name: SIMLINGO_NATS_CODEC
+              value: msgpack-v1
           startupProbe:
             httpGet:
               path: /health

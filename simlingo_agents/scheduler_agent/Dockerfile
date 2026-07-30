@@ -41,6 +41,7 @@ RUN python -m pip install --upgrade pip setuptools wheel && \
     python -m pip install -r /app/requirements.docker.txt
 
 COPY simlingo_adaption_training /app/simlingo_adaption_training
+COPY simlingo_agents/common /app/common
 COPY simlingo_agents/scheduler_agent /app
 RUN mkdir -p /app/models /app/checkpoints/simlingo_scheduler
 COPY --from=simlingo_models InternVL2-1B /app/models/InternVL2-1B

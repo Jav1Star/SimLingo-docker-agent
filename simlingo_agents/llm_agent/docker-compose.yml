@@ -9,7 +9,7 @@ services:
         BASE_IMAGE: ${BASE_IMAGE:-nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
         PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-https://download.pytorch.org/whl/cu128}
-    image: simlingo-llm-agent:0.2.3
+    image: simlingo-llm-agent:0.2.4
     container_name: simlingo-llm-agent
     ports:
       - "9012:9012"
@@ -41,6 +41,7 @@ services:
       NATS_STREAM: ${NATS_STREAM:-WORKFLOW}
       NATS_STREAM_SUBJECTS: ${NATS_STREAM_SUBJECTS:-workflow.>}
       NATS_JETSTREAM_DOMAIN: ${NATS_JETSTREAM_DOMAIN:-}
+      SIMLINGO_NATS_CODEC: ${SIMLINGO_NATS_CODEC:-msgpack-v1}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     gpus: all

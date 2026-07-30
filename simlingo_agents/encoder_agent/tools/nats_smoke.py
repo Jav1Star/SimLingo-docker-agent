@@ -8,7 +8,6 @@ from typing import Any
 import numpy as np
 
 from protocols import NatsComm
-from utils.numpy_utils import decode_structured_numpy, encode_structured_numpy
 
 
 def _build_minimal_encoder_payload(
@@ -84,7 +83,7 @@ async def _publish_minimal_input(args: argparse.Namespace) -> None:
         token_prune_mode=args.token_prune_mode,
         token_prune_min_keep=args.token_prune_min_keep,
     )
-    ack = await comm.send(args.subject, encode_structured_numpy(payload))
+    ack = await comm.send(args.subject, payload)
     print(
         json.dumps(
             {
@@ -115,10 +114,9 @@ async def _fetch_once(args: argparse.Namespace) -> None:
 
     message = messages[0]
     payload = message.payload
-    if args.decode:
-        payload = decode_structured_numpy(payload)
-    if args.summary:
-        payload = _summarize_arrays(payload)
+    # NatsComm always decodes both msgpack-v1 and legacy JSON payloads. Arrays
+    # are summarized so the diagnostic output remains JSON serializable.
+    payload = _summarize_arrays(payload)
 
     print(
         json.dumps(

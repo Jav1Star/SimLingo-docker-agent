@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -9,6 +8,11 @@ from nats.aio.client import Client as NATS
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js.api import ConsumerConfig, DiscardPolicy, StorageType, StreamConfig
 from nats.js.errors import NotFoundError
+
+try:
+    from simlingo_agents.common.nats_codec import decode_message, encode_message
+except ModuleNotFoundError:  # Container images expose the shared package at /app/common.
+    from common.nats_codec import decode_message, encode_message
 
 logger = logging.getLogger(__name__)
 
@@ -217,9 +221,9 @@ class NatsComm:
             logger.warning("failed to ensure JetStream stream %s exists: %s", self.stream, exc)
             raise
 
-    async def send(self, subject: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def send(self, subject: str, payload: Any) -> Dict[str, Any]:
         await self.connect()
-        ack = await self._js.publish(subject, json.dumps(payload).encode())
+        ack = await self._js.publish(subject, encode_message(payload))
         return {
             "subject": subject,
             "stream": ack.stream,
@@ -256,7 +260,7 @@ class NatsComm:
         lease = _SubscriptionLease(subscription=sub, remaining=len(raw_messages))
         try:
             for raw in raw_messages:
-                data = json.loads(raw.data.decode())
+                data = decode_message(raw.data)
                 metadata = raw.metadata
                 messages.append(
                     NatsMessage(
@@ -347,13 +351,13 @@ class NatsComm:
         try:
             msg = await self._nc.request(
                 subject,
-                json.dumps(payload).encode(),
+                encode_message(payload),
                 timeout=timeout_sec,
             )
         except NatsTimeoutError as exc:
             raise TimeoutError(f"timeout waiting for reply on subject={subject}") from exc
 
-        return json.loads(msg.data.decode())
+        return decode_message(msg.data)
 
     async def respond(
         self,
@@ -365,14 +369,14 @@ class NatsComm:
 
         async def _callback(msg):
             try:
-                payload = json.loads(msg.data.decode())
+                payload = decode_message(msg.data)
                 result = handler(payload)
                 if asyncio.iscoroutine(result):
                     result = await result
-                await msg.respond(json.dumps(result or {}).encode())
+                await msg.respond(encode_message(result or {}))
             except Exception as exc:
                 logger.exception("request handler failed for subject=%s", subject)
-                await msg.respond(json.dumps({"error": str(exc)}).encode())
+                await msg.respond(encode_message({"error": str(exc)}))
 
         await self._nc.subscribe(subject, queue=queue, cb=_callback)
         while True:

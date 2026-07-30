@@ -16,10 +16,10 @@ eval:
   scene_frame_stride: 5
   scene_frame_format: png
   token_prune:
-    prune_ratio: 0.0
+    prune_ratio: 0.2
 
 budget:
-  mode: fixed # random # fixed # rule_based
+  mode: rule_based # random # fixed # rule_based
   fixed_budget: 1.0
   rule_based:
     k_warmup: 5

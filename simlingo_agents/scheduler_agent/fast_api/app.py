@@ -11,7 +11,6 @@ from fastapi import FastAPI, HTTPException
 from fast_api.model_runtime import scheduler_runtime
 from protocols import A2AMessage, A2ATaskRequest, A2ATaskResponse, NatsComm
 from utils.logger_utils import get_logger
-from utils.numpy_utils import decode_structured_numpy, encode_structured_numpy
 
 
 logger = get_logger(__name__)
@@ -246,10 +245,8 @@ async def agent_function(
     scheduler_phase = _infer_scheduler_phase_from_subject(received_subject)
     _, _, default_out_subject = _phase_default_routes(scheduler_phase)
     nats_out_subject = nats_out_subject or default_out_subject
-    decoded_data = decode_structured_numpy(data)
-
     try:
-        scheduler_result = await asyncio.to_thread(scheduler_runtime.run, decoded_data, scheduler_phase)
+        scheduler_result = await asyncio.to_thread(scheduler_runtime.run, data, scheduler_phase)
     except ValueError as exc:
         logger.warning("Scheduler request validation failed: %s", exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -257,8 +254,7 @@ async def agent_function(
         logger.exception("Scheduler runtime failed")
         raise HTTPException(status_code=500, detail=f"Scheduler failed: {exc}") from exc
 
-    outbound_payload = encode_structured_numpy(scheduler_result)
-    await _send_data_to_nats(outbound_payload, nats_out_subject=nats_out_subject)
+    await _send_data_to_nats(scheduler_result, nats_out_subject=nats_out_subject)
     return {
         "status": "success",
         "frame_id": scheduler_result.get("encoded_payload", {}).get("frame_id"),

@@ -10,7 +10,6 @@ from fastapi import FastAPI, HTTPException
 from fast_api.model_runtime import encoder_runtime
 from protocols import A2AMessage, A2ATaskRequest, A2ATaskResponse, NatsComm
 from utils.logger_utils import get_logger
-from utils.numpy_utils import decode_structured_numpy, encode_structured_numpy
 
 
 logger = get_logger(__name__)
@@ -116,10 +115,8 @@ async def agent_function(
         nats_in_subject=nats_in_subject,
         nats_in_durable=nats_in_durable,
     )
-    decoded_data = decode_structured_numpy(data)
-
     try:
-        encoded_result = await asyncio.to_thread(encoder_runtime.encode, decoded_data)
+        encoded_result = await asyncio.to_thread(encoder_runtime.encode, data)
     except ValueError as exc:
         logger.warning("Encoder request validation failed: %s", exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -129,7 +126,7 @@ async def agent_function(
 
     result = {
         "status": "success",
-        "encoded_payload": encode_structured_numpy(encoded_result),
+        "encoded_payload": encoded_result,
     }
     await _send_data_to_nats(result, nats_out_subject=nats_out_subject)
     return {

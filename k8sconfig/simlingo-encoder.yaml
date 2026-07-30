@@ -57,6 +57,8 @@ spec:
               value: workflow.>
             - name: NATS_JETSTREAM_DOMAIN
               value: ""
+            - name: SIMLINGO_NATS_CODEC
+              value: msgpack-v1
           startupProbe:
             httpGet:
               path: /health

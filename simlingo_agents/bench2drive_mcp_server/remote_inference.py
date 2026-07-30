@@ -11,12 +11,6 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from simlingo_agents.encoder_agent.utils.numpy_utils import (
-    decode_structured_numpy,
-    encode_structured_numpy,
-)
-
-
 class RemoteInferenceError(RuntimeError):
     """Raised when the split-agent pipeline fails."""
 
@@ -149,7 +143,7 @@ class SplitAgentPipelineClient:
         started = time.time()
         try:
             payload = self._attach_pipeline_request_id(payload, request_id)
-            await nats.send(subjects["source_input"], encode_structured_numpy(payload))
+            await nats.send(subjects["source_input"], payload)
 
             stage_started = time.time()
             self._post_execute(
@@ -254,7 +248,7 @@ class SplitAgentPipelineClient:
                 )
             message = messages[0]
             await message.ack()
-            decoded = decode_structured_numpy(message.payload)
+            decoded = message.payload
             decoded.setdefault("pipeline_meta", {})
             decoded["pipeline_meta"].update(
                 {
