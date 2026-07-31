@@ -97,6 +97,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         logger.exception("Failed to load scheduler model during startup")
         raise RuntimeError(f"Startup scheduler loading failed: {exc}") from exc
     try:
+        await _nats_comm.start()
+        logger.info("Scheduler instance workflow stream is ready")
         yield
     finally:
         await _nats_comm.close()
@@ -156,6 +158,7 @@ async def _receive_data_from_nats(
     nats_in_durable: str,
 ) -> tuple[dict[str, Any], str]:
     try:
+        _nats_comm.validate_own_subject(nats_in_subject)
         messages = await _nats_comm.receive(
             subject=nats_in_subject,
             durable=nats_in_durable,

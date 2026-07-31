@@ -22,6 +22,13 @@ class PipelineEndpoints:
     llm_url: str
 
 
+@dataclass(frozen=True)
+class AgentInstance:
+    cluster_id: str
+    agent_id: str
+    instance_id: str
+
+
 def split_stack_profile() -> str:
     profile = os.getenv("SIMLINGO_SPLIT_STACK_PROFILE", "auto").strip().lower()
     if profile in {"k8s", "kubernetes", "cluster"}:
@@ -80,9 +87,28 @@ def configured_nats_server_url() -> str:
 def configured_jetstream_domain() -> str:
     if "NATS_JETSTREAM_DOMAIN" in os.environ:
         return os.environ["NATS_JETSTREAM_DOMAIN"]
-    if split_stack_profile() in {"k8s", "nodeport"}:
-        return "hub"
-    return ""
+    return os.getenv("CLUSTER_ID", "")
+
+
+def configured_agent_instances() -> dict[str, AgentInstance]:
+    cluster_id = os.getenv("CLUSTER_ID", "").strip()
+    if not cluster_id:
+        raise RemoteInferenceError("CLUSTER_ID is required for instance NATS routing")
+    definitions = {
+        "encoder": ("simlingo-encoder", "SIMLINGO_ENCODER_INSTANCE_ID"),
+        "scheduler": ("simlingo-scheduler", "SIMLINGO_SCHEDULER_INSTANCE_ID"),
+        "llm": ("simlingo-llm", "SIMLINGO_LLM_INSTANCE_ID"),
+    }
+    instances: dict[str, AgentInstance] = {}
+    for role, (default_agent_id, instance_env) in definitions.items():
+        instance_id = os.getenv(instance_env, "").strip()
+        if not instance_id:
+            raise RemoteInferenceError(f"{instance_env} is required")
+        agent_id = os.getenv(
+            f"SIMLINGO_{role.upper()}_AGENT_ID", default_agent_id
+        ).strip()
+        instances[role] = AgentInstance(cluster_id, agent_id, instance_id)
+    return instances
 
 
 class SplitAgentPipelineClient:
@@ -103,9 +129,9 @@ class SplitAgentPipelineClient:
     ) -> None:
         self.endpoints = endpoints or configured_pipeline_endpoints()
         self.nats_server_url = nats_server_url or configured_nats_server_url()
-        self.nats_stream = nats_stream or os.getenv("NATS_STREAM", "WORKFLOW")
-        raw_subjects = os.getenv("NATS_STREAM_SUBJECTS", "workflow.>")
-        self.nats_stream_subjects = nats_stream_subjects or [item.strip() for item in raw_subjects.split(",") if item.strip()]
+        # Kept in the signature for callers during migration. Instance routing
+        # derives the target Stream from each full Subject.
+        del nats_stream, nats_stream_subjects
         self.nats_jetstream_domain = (
             nats_jetstream_domain
             if nats_jetstream_domain is not None
@@ -120,6 +146,7 @@ class SplitAgentPipelineClient:
             os.getenv("SIMLINGO_MCP_SESSION_ID", f"session-{uuid.uuid4().hex[:8]}")
         )
         self.sender_id = sender_id or os.getenv("SIMLINGO_MCP_SENDER_ID", "Bench2DriveMCP")
+        self.agent_instances = configured_agent_instances()
 
     def infer(self, payload: dict[str, Any]) -> dict[str, Any]:
         return asyncio.run(self._infer_async(payload))
@@ -136,8 +163,6 @@ class SplitAgentPipelineClient:
         nats_cls = self._build_nats_comm()
         nats = nats_cls(
             servers=[self.nats_server_url],
-            stream=self.nats_stream,
-            stream_subjects=self.nats_stream_subjects,
             jetstream_domain=self.nats_jetstream_domain,
         )
         started = time.time()
@@ -236,6 +261,19 @@ class SplitAgentPipelineClient:
             )
             stage_durations_ms["scheduler_decision_update"] = int((time.time() - stage_started) * 1000)
 
+            update_messages = await nats.receive(
+                subject=subjects["decision_update_output"],
+                durable=subjects["decision_update_output_durable"],
+                batch=1,
+                timeout_sec=self.nats_timeout_sec,
+            )
+            if not update_messages:
+                raise RemoteInferenceError(
+                    "No scheduler decision-update completion received on "
+                    f"'{subjects['decision_update_output']}'"
+                )
+            await update_messages[0].ack()
+
             messages = await nats.receive(
                 subject=subjects["final_output"],
                 durable=subjects["final_output_durable"],
@@ -256,7 +294,7 @@ class SplitAgentPipelineClient:
                     "subjects": subjects,
                     "endpoints": self.endpoints.__dict__,
                     "nats_server_url": self.nats_server_url,
-                    "nats_stream": self.nats_stream,
+                    "nats_stream_mode": "instance",
                     "nats_jetstream_domain": self.nats_jetstream_domain,
                     "stage_durations_ms": stage_durations_ms,
                     "total_duration_ms": int((time.time() - started) * 1000),
@@ -272,30 +310,13 @@ class SplitAgentPipelineClient:
         return asyncio.run(self._cleanup_route_async(route_key))
 
     async def _cleanup_route_async(self, route_key: str) -> dict[str, Any]:
-        subjects = self._build_subjects(self._build_channel_id(route_key))
-        data_subjects = [
-            subject
-            for key, subject in subjects.items()
-            if not key.endswith("_durable") and "durable" not in key
-        ]
-        durable_consumers = [
-            consumer
-            for key, consumer in subjects.items()
-            if key.endswith("_durable") or "durable" in key
-        ]
-        nats_cls = self._build_nats_comm()
-        nats = nats_cls(
-            servers=[self.nats_server_url],
-            stream=self.nats_stream,
-            stream_subjects=self.nats_stream_subjects,
-            jetstream_domain=self.nats_jetstream_domain,
-        )
-        try:
-            deleted = await nats.delete_consumers(durable_consumers)
-            purged = await nats.purge_subjects(data_subjects)
-            return {"deleted_consumers": deleted, "purged_subjects": purged}
-        finally:
-            await nats.close()
+        return {
+            "route_key": route_key,
+            "nats_cleanup": "not-required",
+            "reason": "instance WorkQueue messages are removed by ACK",
+            "deleted_consumers": {},
+            "purged_subjects": {},
+        }
 
     def _post_execute(
         self,
@@ -403,22 +424,44 @@ class SplitAgentPipelineClient:
         return NatsComm
 
     def _build_subjects(self, request_id: str) -> dict[str, str]:
-        base = f"{self.subject_prefix}.{request_id}"
+        del request_id
+        cluster = self.agent_instances["encoder"].cluster_id
+
+        def subject(role: str, operation: str) -> str:
+            target = self.agent_instances[role]
+            scope = "local" if target.cluster_id == cluster else "global"
+            return (
+                f"workflow.{scope}.{target.cluster_id}.agent.{target.agent_id}."
+                f"instance.{target.instance_id}.{operation}"
+            )
+
+        def durable(role: str, operation: str) -> str:
+            target = self.agent_instances[role]
+            return f"{target.agent_id}-{target.instance_id}-{operation}"
+
         return {
-            "source_input": f"{base}.source_input",
-            "source_durable": f"{base.replace('.', '-')}-source-input",
-            "encoded_output": f"{base}.scheduler_budget_input",
-            "encoded_durable": f"{base.replace('.', '-')}-scheduler-budget-input",
-            "prefix_input": f"{base}.llm_prefix_input",
-            "prefix_input_durable": f"{base.replace('.', '-')}-scheduler-budget-output-llm-prefix-input",
-            "prefix_output": f"{base}.llm_prefix_output",
-            "prefix_output_durable": f"{base.replace('.', '-')}-llm-prefix-output-scheduler-plan-input",
-            "final_input": f"{base}.llm_final_input",
-            "final_input_durable": f"{base.replace('.', '-')}-scheduler-plan-output-llm-final-input",
-            "final_output": f"{base}.llm_final_output",
-            "final_output_durable": f"{base.replace('.', '-')}-llm-final-output",
-            "decision_update_input": f"{base}.scheduler_decision_update_input",
-            "decision_update_input_durable": f"{base.replace('.', '-')}-llm-final-output-scheduler-decision-update-input",
-            "decision_update_output": f"{base}.scheduler_decision_update_output",
-            "decision_update_output_durable": f"{base.replace('.', '-')}-scheduler-decision-update-output",
+            "source_input": subject("encoder", "encoder_input"),
+            "source_durable": durable("encoder", "encoder-input"),
+            "encoded_output": subject("scheduler", "scheduler_budget_input"),
+            "encoded_durable": durable("scheduler", "budget-input"),
+            "prefix_input": subject("llm", "llm_prefix_input"),
+            "prefix_input_durable": durable("llm", "prefix-input"),
+            "prefix_output": subject("scheduler", "scheduler_plan_input"),
+            "prefix_output_durable": durable("scheduler", "plan-input"),
+            "final_input": subject("llm", "llm_final_input"),
+            "final_input_durable": durable("llm", "final-input"),
+            "final_output": subject("llm", "llm_final_output"),
+            "final_output_durable": durable("llm", "final-output"),
+            "decision_update_input": subject(
+                "scheduler", "scheduler_decision_update_input"
+            ),
+            "decision_update_input_durable": durable(
+                "scheduler", "decision-update-input"
+            ),
+            "decision_update_output": subject(
+                "scheduler", "scheduler_decision_update_output"
+            ),
+            "decision_update_output_durable": durable(
+                "scheduler", "decision-update-output"
+            ),
         }

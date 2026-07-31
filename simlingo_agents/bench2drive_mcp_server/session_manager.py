@@ -615,12 +615,13 @@ class EvaluationSessionManager:
                 "llm": endpoints.llm_url,
             },
             "nats_server_url": configured_nats_server_url(),
-            "nats_stream": os.getenv("NATS_STREAM", "WORKFLOW"),
-            "nats_stream_subjects": [
-                item.strip()
-                for item in os.getenv("NATS_STREAM_SUBJECTS", "workflow.>").split(",")
-                if item.strip()
-            ],
+            "nats_stream_mode": "instance",
+            "cluster_id": os.getenv("CLUSTER_ID", ""),
+            "agent_instance_ids": {
+                "encoder": os.getenv("SIMLINGO_ENCODER_INSTANCE_ID", ""),
+                "scheduler": os.getenv("SIMLINGO_SCHEDULER_INSTANCE_ID", ""),
+                "llm": os.getenv("SIMLINGO_LLM_INSTANCE_ID", ""),
+            },
             "nats_jetstream_domain": configured_jetstream_domain(),
         }
 

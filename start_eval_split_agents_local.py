@@ -185,14 +185,18 @@ def _build_env(args: argparse.Namespace, urls: dict[str, str]) -> dict[str, str]
     env["SIMLINGO_SCHEDULER_AGENT_URL"] = urls["scheduler"]
     env["SIMLINGO_LLM_AGENT_URL"] = urls["llm"]
     env["NATS_SERVER_URL"] = urls["nats"]
-    env.setdefault("NATS_STREAM_SUBJECTS", "workflow.*.*.*")
+    env["NATS_SERVERS"] = urls["nats"]
+    env["CLUSTER_ID"] = args.local_cluster
+    env["SIMLINGO_ENCODER_INSTANCE_ID"] = args.encoder_instance_id
+    env["SIMLINGO_SCHEDULER_INSTANCE_ID"] = args.scheduler_instance_id
+    env["SIMLINGO_LLM_INSTANCE_ID"] = args.llm_instance_id
     env["SIMLINGO_MCP_SUBJECT_PREFIX"] = args.subject_prefix
     env["SIMLINGO_MCP_SENDER_ID"] = args.sender_id
 
     if args.nats_jetstream_domain is not None:
         env["NATS_JETSTREAM_DOMAIN"] = args.nats_jetstream_domain
-    elif args.agent_profile in {"k8s", "nodeport"} and "NATS_JETSTREAM_DOMAIN" not in env:
-        env["NATS_JETSTREAM_DOMAIN"] = "hub"
+    else:
+        env["NATS_JETSTREAM_DOMAIN"] = args.local_cluster
 
     return env
 
@@ -291,7 +295,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--nats-jetstream-domain",
         default=None,
-        help="Set NATS_JETSTREAM_DOMAIN. For k8s/nodeport, defaults to hub when unset.",
+        help="Set NATS_JETSTREAM_DOMAIN. Defaults to --local-cluster.",
+    )
+    parser.add_argument(
+        "--local-cluster",
+        default=os.getenv("CLUSTER_ID", "edge-c"),
+        help="Local edge cluster and JetStream domain.",
+    )
+    parser.add_argument(
+        "--encoder-instance-id",
+        default=os.getenv("SIMLINGO_ENCODER_INSTANCE_ID"),
+        required=os.getenv("SIMLINGO_ENCODER_INSTANCE_ID") is None,
+        help="Ready Encoder Pod metadata.uid.",
+    )
+    parser.add_argument(
+        "--scheduler-instance-id",
+        default=os.getenv("SIMLINGO_SCHEDULER_INSTANCE_ID"),
+        required=os.getenv("SIMLINGO_SCHEDULER_INSTANCE_ID") is None,
+        help="Ready Scheduler Pod metadata.uid.",
+    )
+    parser.add_argument(
+        "--llm-instance-id",
+        default=os.getenv("SIMLINGO_LLM_INSTANCE_ID"),
+        required=os.getenv("SIMLINGO_LLM_INSTANCE_ID") is None,
+        help="Ready LLM Pod metadata.uid.",
     )
     parser.add_argument("--subject-prefix", default=os.getenv("SIMLINGO_MCP_SUBJECT_PREFIX", "workflow.local_eval"))
     parser.add_argument("--sender-id", default=os.getenv("SIMLINGO_MCP_SENDER_ID", "LocalBench2DriveEval"))
@@ -320,6 +347,12 @@ def main() -> int:
     print(f"[agent] scheduler: {urls['scheduler']}")
     print(f"[agent] llm:       {urls['llm']}")
     print(f"[nats] {urls['nats']}")
+    print(
+        f"[routing] cluster={args.local_cluster} "
+        f"encoder={args.encoder_instance_id} "
+        f"scheduler={args.scheduler_instance_id} "
+        f"llm={args.llm_instance_id}"
+    )
 
     if not args.skip_runtime_checks and not _validate_runtime(args, urls):
         print("[error] runtime checks failed. Use --skip-runtime-checks only if the probes are expected to fail.")

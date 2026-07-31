@@ -43,6 +43,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         logger.exception("Failed to load encoder model during startup")
         raise RuntimeError(f"Startup model loading failed: {exc}") from exc
     try:
+        await _nats_comm.start()
+        logger.info("Encoder instance workflow stream is ready")
         yield
     finally:
         await _nats_comm.close()
@@ -56,6 +58,7 @@ async def _receive_data_from_nats(
     nats_in_durable: str = NATS_IN_DURABLE,
 ) -> dict[str, Any]:
     try:
+        _nats_comm.validate_own_subject(nats_in_subject)
         messages = await _nats_comm.receive(
             subject=nats_in_subject,
             durable=nats_in_durable,

@@ -25,7 +25,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: simlingo-scheduler-agent
-          image: simlingo-scheduler-agent:0.2.4
+          image: simlingo-scheduler-agent:0.2.5
           imagePullPolicy: IfNotPresent
           terminationMessagePolicy: FallbackToLogsOnError
           ports:
@@ -63,32 +63,63 @@ spec:
               value: "10"
             - name: SCHEDULER_RULE_BASED_CFG_JSON
               value: ""
+            - name: NATS_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: edge-cluster-config
+                  key: NATS_SERVERS
             - name: NATS_SERVER_URL
               value: nats://nats:4222
-            - name: SCHEDULER_BUDGET_IN_SUBJECT
-              value: workflow.simlingo.scheduler_budget_input
-            - name: SCHEDULER_BUDGET_IN_DURABLE
-              value: workflow-simlingo-scheduler-budget-input
-            - name: SCHEDULER_BUDGET_OUT_SUBJECT
-              value: workflow.simlingo.scheduler_budget_output.llm_prefix_input
-            - name: SCHEDULER_PLAN_IN_SUBJECT
-              value: workflow.simlingo.llm_prefix_output.scheduler_plan_input
-            - name: SCHEDULER_PLAN_IN_DURABLE
-              value: workflow-simlingo-llm-prefix-output-scheduler-plan-input
-            - name: SCHEDULER_PLAN_OUT_SUBJECT
-              value: workflow.simlingo.scheduler_plan_output.llm_final_input
-            - name: SCHEDULER_DECISION_UPDATE_IN_SUBJECT
-              value: workflow.simlingo.llm_final_output.scheduler_decision_update_input
-            - name: SCHEDULER_DECISION_UPDATE_IN_DURABLE
-              value: workflow-simlingo-llm-final-output-scheduler-decision-update-input
-            - name: SCHEDULER_DECISION_UPDATE_OUT_SUBJECT
-              value: workflow.simlingo.scheduler_decision_update_output
-            - name: NATS_STREAM
-              value: WORKFLOW
-            - name: NATS_STREAM_SUBJECTS
-              value: workflow.>
+            - name: CLUSTER_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: edge-cluster-config
+                  key: CLUSTER_ID
             - name: NATS_JETSTREAM_DOMAIN
-              value: "hub"
+              valueFrom:
+                configMapKeyRef:
+                  name: edge-cluster-config
+                  key: NATS_JETSTREAM_DOMAIN
+            - name: AGENT_ID
+              value: simlingo-scheduler
+            - name: AGENT_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SCHEDULER_BUDGET_IN_SUBJECT
+              value: workflow.local.$(CLUSTER_ID).agent.$(AGENT_ID).instance.$(AGENT_INSTANCE_ID).scheduler_budget_input
+            - name: SCHEDULER_BUDGET_IN_DURABLE
+              value: simlingo-scheduler-$(AGENT_INSTANCE_ID)-budget-input
+            - name: SCHEDULER_BUDGET_OUT_SUBJECT
+              value: workflow.local.$(CLUSTER_ID).agent.simlingo-llm.instance.__LLM_INSTANCE_ID__.llm_prefix_input
+            - name: SCHEDULER_PLAN_IN_SUBJECT
+              value: workflow.local.$(CLUSTER_ID).agent.$(AGENT_ID).instance.$(AGENT_INSTANCE_ID).scheduler_plan_input
+            - name: SCHEDULER_PLAN_IN_DURABLE
+              value: simlingo-scheduler-$(AGENT_INSTANCE_ID)-plan-input
+            - name: SCHEDULER_PLAN_OUT_SUBJECT
+              value: workflow.local.$(CLUSTER_ID).agent.simlingo-llm.instance.__LLM_INSTANCE_ID__.llm_final_input
+            - name: SCHEDULER_DECISION_UPDATE_IN_SUBJECT
+              value: workflow.local.$(CLUSTER_ID).agent.$(AGENT_ID).instance.$(AGENT_INSTANCE_ID).scheduler_decision_update_input
+            - name: SCHEDULER_DECISION_UPDATE_IN_DURABLE
+              value: simlingo-scheduler-$(AGENT_INSTANCE_ID)-decision-update-input
+            - name: SCHEDULER_DECISION_UPDATE_OUT_SUBJECT
+              value: workflow.local.$(CLUSTER_ID).agent.$(AGENT_ID).instance.$(AGENT_INSTANCE_ID).scheduler_decision_update_output
+            - name: NATS_WORKFLOW_STREAM_PREFIX
+              value: WF
+            - name: NATS_STREAM_MAX_BYTES
+              value: 512MiB
+            - name: NATS_STREAM_DISCARD
+              value: new
+            - name: NATS_STREAM_RETENTION
+              value: workqueue
+            - name: NATS_STREAM_STORAGE
+              value: file
+            - name: NATS_CONSUMER_INACTIVE_THRESHOLD_SEC
+              value: "300"
             - name: SIMLINGO_NATS_CODEC
               value: msgpack-v1
           startupProbe:

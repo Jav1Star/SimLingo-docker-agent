@@ -5,9 +5,9 @@ namespace. Bench2Drive MCP and the NATS broker are intentionally excluded.
 
 ## Manifests
 
-- `encoder-agent.yaml`: `simlingo-encoder-agent:0.2.3`
-- `scheduler-agent.yaml`: `simlingo-scheduler-agent:0.2.3`
-- `llm-agent.yaml`: `simlingo-llm-agent:0.2.3`
+- `encoder-agent.yaml`: `simlingo-encoder-agent:0.2.5`
+- `scheduler-agent.yaml`: `simlingo-scheduler-agent:0.2.5`
+- `llm-agent.yaml`: `simlingo-llm-agent:0.2.5`
 
 Each agent requests and limits one GPU:
 
@@ -43,15 +43,33 @@ kubectl get pods,svc -n default
 - llm HTTP: service port `9012`, nodePort `30112`
 - scheduler HTTP: service port `9013`, nodePort `30113`
 
-The agents expect an existing NATS JetStream Service named `nats` in the same
-`default` namespace:
+The agents expect an existing edge NATS JetStream Service and an
+`edge-cluster-config` ConfigMap in the same `default` namespace:
 
 ```text
-nats://nats:4222
+NATS_SERVERS=nats://nats:4222
+CLUSTER_ID=edge-c
+NATS_JETSTREAM_DOMAIN=edge-c
 ```
 
-If the existing NATS Service has a different name, update `NATS_SERVER_URL` in
-the three agent manifests.
+Each Pod receives `AGENT_INSTANCE_ID=metadata.uid` and manages its own
+`WF_<pod-uid>` WorkQueue Stream. Full input Subjects are expanded from the
+cluster, agent and Pod identity. Cross-agent output Subjects are supplied by
+the evaluation client in `/a2a/execute` metadata.
+
+After all Pods are Ready, record their UIDs:
+
+```bash
+ENCODER_UID="$(kubectl -n default get pod -l app=simlingo-encoder-agent \
+  -o jsonpath='{.items[0].metadata.uid}')"
+SCHEDULER_UID="$(kubectl -n default get pod -l app=simlingo-scheduler-agent \
+  -o jsonpath='{.items[0].metadata.uid}')"
+LLM_UID="$(kubectl -n default get pod -l app=simlingo-llm-agent \
+  -o jsonpath='{.items[0].metadata.uid}')"
+```
+
+Pass these values to `start_eval_split_agents_local.py`. Pod UIDs change after
+a rollout, so they must be queried again before a later evaluation.
 
 ## Smoke test entry points
 

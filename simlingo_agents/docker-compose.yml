@@ -9,7 +9,7 @@ services:
         BASE_IMAGE: ${BASE_IMAGE:-nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
         PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-https://download.pytorch.org/whl/cu128}
-    image: simlingo-encoder-agent:0.2.4
+    image: simlingo-encoder-agent:0.2.5
     container_name: simlingo-encoder-agent
     ports:
       - "9011:9011"
@@ -41,7 +41,7 @@ services:
         BASE_IMAGE: ${BASE_IMAGE:-nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
         PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-https://download.pytorch.org/whl/cu128}
-    image: simlingo-llm-agent:0.2.4
+    image: simlingo-llm-agent:0.2.5
     container_name: simlingo-llm-agent
     ports:
       - "9012:9012"
@@ -88,7 +88,7 @@ services:
         BASE_IMAGE: ${BASE_IMAGE:-nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
         PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-https://download.pytorch.org/whl/cu128}
-    image: simlingo-scheduler-agent:0.2.4
+    image: simlingo-scheduler-agent:0.2.5
     container_name: simlingo-scheduler-agent
     ports:
       - "9013:9013"

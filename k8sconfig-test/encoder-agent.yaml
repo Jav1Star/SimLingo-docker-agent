@@ -25,7 +25,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: simlingo-encoder-agent
-          image: simlingo-encoder-agent:0.2.4
+          image: simlingo-encoder-agent:0.2.5
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 9011
@@ -40,20 +40,51 @@ spec:
               value: /app/models/InternVL2-1B
             - name: ENCODER_CHECKPOINT_PATH
               value: /app/checkpoints/simlingo_encoder/pytorch_model.bin
+            - name: NATS_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: edge-cluster-config
+                  key: NATS_SERVERS
             - name: NATS_SERVER_URL
               value: nats://nats:4222
-            - name: NATS_IN_SUBJECT
-              value: workflow.previousagent.result
-            - name: NATS_IN_DURABLE
-              value: workflow-previousagent-result
-            - name: NATS_OUT_SUBJECT
-              value: workflow.simlingo.scheduler_budget_input
-            - name: NATS_STREAM
-              value: WORKFLOW
-            - name: NATS_STREAM_SUBJECTS
-              value: workflow.>
+            - name: CLUSTER_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: edge-cluster-config
+                  key: CLUSTER_ID
             - name: NATS_JETSTREAM_DOMAIN
-              value: "hub"
+              valueFrom:
+                configMapKeyRef:
+                  name: edge-cluster-config
+                  key: NATS_JETSTREAM_DOMAIN
+            - name: AGENT_ID
+              value: simlingo-encoder
+            - name: AGENT_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NATS_IN_SUBJECT
+              value: workflow.local.$(CLUSTER_ID).agent.$(AGENT_ID).instance.$(AGENT_INSTANCE_ID).encoder_input
+            - name: NATS_IN_DURABLE
+              value: simlingo-encoder-$(AGENT_INSTANCE_ID)-encoder-input
+            - name: NATS_OUT_SUBJECT
+              value: workflow.local.$(CLUSTER_ID).agent.simlingo-scheduler.instance.__SCHEDULER_INSTANCE_ID__.scheduler_budget_input
+            - name: NATS_WORKFLOW_STREAM_PREFIX
+              value: WF
+            - name: NATS_STREAM_MAX_BYTES
+              value: 512MiB
+            - name: NATS_STREAM_DISCARD
+              value: new
+            - name: NATS_STREAM_RETENTION
+              value: workqueue
+            - name: NATS_STREAM_STORAGE
+              value: file
+            - name: NATS_CONSUMER_INACTIVE_THRESHOLD_SEC
+              value: "300"
             - name: SIMLINGO_NATS_CODEC
               value: msgpack-v1
           startupProbe:
