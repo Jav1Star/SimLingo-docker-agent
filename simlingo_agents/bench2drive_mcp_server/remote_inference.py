@@ -11,6 +11,13 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from simlingo_agents.common.inference_profile import (
+    extract_nats_communication_trace,
+    extract_profile_trace,
+    mark_nats_send,
+    record_nats_receive,
+)
+
 class RemoteInferenceError(RuntimeError):
     """Raised when the split-agent pipeline fails."""
 
@@ -168,6 +175,12 @@ class SplitAgentPipelineClient:
         started = time.time()
         try:
             payload = self._attach_pipeline_request_id(payload, request_id)
+            mark_nats_send(
+                payload,
+                sender="bench2drive",
+                receiver="encoder",
+                link="bench2drive_to_encoder",
+            )
             await nats.send(subjects["source_input"], payload)
 
             stage_started = time.time()
@@ -272,6 +285,8 @@ class SplitAgentPipelineClient:
                     "No scheduler decision-update completion received on "
                     f"'{subjects['decision_update_output']}'"
                 )
+            update_payload = update_messages[0].payload
+            record_nats_receive(update_payload, receiver="bench2drive")
             await update_messages[0].ack()
 
             messages = await nats.receive(
@@ -285,8 +300,10 @@ class SplitAgentPipelineClient:
                     f"No final output received on subject '{subjects['final_output']}' within {self.nats_timeout_sec}s"
                 )
             message = messages[0]
+            record_nats_receive(message.payload, receiver="bench2drive")
             await message.ack()
             decoded = message.payload
+            self._merge_terminal_traces(decoded, update_payload)
             decoded.setdefault("pipeline_meta", {})
             decoded["pipeline_meta"].update(
                 {
@@ -304,6 +321,30 @@ class SplitAgentPipelineClient:
             return decoded
         finally:
             await nats.close()
+
+    @staticmethod
+    def _merge_terminal_traces(final_payload: dict[str, Any], update_payload: dict[str, Any]) -> None:
+        def merge_unique(first: list[dict[str, Any]], second: list[dict[str, Any]], fields: tuple[str, ...]):
+            merged: list[dict[str, Any]] = []
+            seen: set[tuple[Any, ...]] = set()
+            for item in first + second:
+                key = tuple(item.get(field) for field in fields)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(item)
+            return merged
+
+        final_payload["profile_trace"] = merge_unique(
+            extract_profile_trace(final_payload),
+            extract_profile_trace(update_payload),
+            ("pipeline_request_id", "agent", "phase"),
+        )
+        final_payload["nats_communication_trace"] = merge_unique(
+            extract_nats_communication_trace(final_payload),
+            extract_nats_communication_trace(update_payload),
+            ("pipeline_request_id", "link"),
+        )
 
     def cleanup_route(self, route_key: str) -> dict[str, Any]:
         """Delete the JetStream resources owned by one completed route."""

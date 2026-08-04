@@ -14,6 +14,7 @@ services:
     ports:
       - "9011:9011"
     environment:
+      SIMLINGO_EVAL_RECORD_TFLOPS: ${SIMLINGO_EVAL_RECORD_TFLOPS:-1}
       ENCODER_MODEL_VARIANT: ${ENCODER_MODEL_VARIANT:-/app/models/InternVL2-1B}
       ENCODER_CHECKPOINT_PATH: ${ENCODER_CHECKPOINT_PATH:-/app/checkpoints/simlingo_encoder/pytorch_model.bin}
       ENCODER_TOKEN_PRUNE_MODE: ${ENCODER_TOKEN_PRUNE_MODE:-origin}
@@ -46,6 +47,7 @@ services:
     ports:
       - "9012:9012"
     environment:
+      SIMLINGO_EVAL_RECORD_TFLOPS: ${SIMLINGO_EVAL_RECORD_TFLOPS:-1}
       LLM_MODEL_VARIANT: ${LLM_MODEL_VARIANT:-/app/models/InternVL2-1B}
       LLM_CHECKPOINT_PATH: ${LLM_CHECKPOINT_PATH:-/app/checkpoints/simlingo_llm/pytorch_model.bin}
       LLM_SPEED_WPS_MODE: ${LLM_SPEED_WPS_MODE:-2d}
@@ -93,6 +95,7 @@ services:
     ports:
       - "9013:9013"
     environment:
+      SIMLINGO_EVAL_RECORD_TFLOPS: ${SIMLINGO_EVAL_RECORD_TFLOPS:-1}
       SCHEDULER_MODEL_VARIANT: ${SCHEDULER_MODEL_VARIANT:-/app/models/InternVL2-1B}
       SCHEDULER_CHECKPOINT_PATH: ${SCHEDULER_CHECKPOINT_PATH:-/app/checkpoints/simlingo_scheduler/pytorch_model.bin}
       SCHEDULER_MODE: ${SCHEDULER_MODE:-rule_based}

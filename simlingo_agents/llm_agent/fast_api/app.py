@@ -12,6 +12,15 @@ from fast_api.model_runtime import llm_runtime
 from protocols import A2AMessage, A2ATaskRequest, A2ATaskResponse, NatsComm
 from utils.logger_utils import get_logger
 
+try:
+    from simlingo_agents.common.inference_profile import (
+        attach_traces, mark_nats_send, profile_call, record_nats_receive,
+    )
+except ModuleNotFoundError:
+    from common.inference_profile import (
+        attach_traces, mark_nats_send, profile_call, record_nats_receive,
+    )
+
 
 logger = get_logger(__name__)
 
@@ -150,6 +159,7 @@ async def _receive_data_from_nats(
         )
         if messages:
             message = messages[0]
+            record_nats_receive(message.payload, receiver="llm")
             await message.ack()
             logger.info(
                 "Received message on subject '%s' with durable '%s'",
@@ -168,7 +178,10 @@ async def _receive_data_from_nats(
         raise HTTPException(status_code=500, detail=f"Failed to receive message: {exc}") from exc
 
 
-async def _send_data_to_nats(data: dict[str, Any], nats_out_subject: str) -> None:
+async def _send_data_to_nats(
+    data: dict[str, Any], nats_out_subject: str, *, receiver: str, link: str
+) -> None:
+    mark_nats_send(data, sender="llm", receiver=receiver, link=link)
     ack = await _nats_comm.send(subject=nats_out_subject, payload=data)
     logger.info("Data sent to NATS subject '%s' with ack: %s", nats_out_subject, ack)
 
@@ -204,7 +217,13 @@ async def agent_function(
     _, _, default_out_subject = _phase_default_routes(llm_phase)
     nats_out_subject = nats_out_subject or default_out_subject
     try:
-        llm_result = await asyncio.to_thread(llm_runtime.run, data, llm_phase)
+        llm_result, profile_record = await asyncio.to_thread(
+            profile_call,
+            lambda: llm_runtime.run(data, llm_phase),
+            agent="llm",
+            phase=llm_phase,
+            payload=data,
+        )
     except ValueError as exc:
         logger.warning("LLM request validation failed: %s", exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -212,13 +231,32 @@ async def agent_function(
         logger.exception("LLM runtime failed")
         raise HTTPException(status_code=500, detail=f"LLM forward failed: {exc}") from exc
 
-    await _send_data_to_nats(llm_result, nats_out_subject=nats_out_subject)
+    attach_traces(llm_result, data, profile_record)
+    if llm_phase == "prefix":
+        await _send_data_to_nats(
+            llm_result,
+            nats_out_subject=nats_out_subject,
+            receiver="scheduler",
+            link="llm_prefix_to_scheduler_plan",
+        )
+    else:
+        await _send_data_to_nats(
+            llm_result,
+            nats_out_subject=nats_out_subject,
+            receiver="bench2drive",
+            link="llm_final_to_bench2drive",
+        )
     if llm_phase == "final":
         update_subject = decision_update_out_subject
         if update_subject is None:
             update_subject = LLM_DECISION_UPDATE_OUT_SUBJECT
         if update_subject:
-            await _send_data_to_nats(llm_result, nats_out_subject=update_subject)
+            await _send_data_to_nats(
+                llm_result,
+                nats_out_subject=update_subject,
+                receiver="scheduler",
+                link="llm_final_to_scheduler_decision_update",
+            )
     return {
         "status": "success",
         "frame_id": llm_result.get("frame_id"),

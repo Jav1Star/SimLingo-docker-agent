@@ -12,6 +12,15 @@ from fast_api.model_runtime import scheduler_runtime
 from protocols import A2AMessage, A2ATaskRequest, A2ATaskResponse, NatsComm
 from utils.logger_utils import get_logger
 
+try:
+    from simlingo_agents.common.inference_profile import (
+        attach_traces, mark_nats_send, profile_call, record_nats_receive,
+    )
+except ModuleNotFoundError:
+    from common.inference_profile import (
+        attach_traces, mark_nats_send, profile_call, record_nats_receive,
+    )
+
 
 logger = get_logger(__name__)
 
@@ -168,6 +177,7 @@ async def _receive_data_from_nats(
         )
         if messages:
             message = messages[0]
+            record_nats_receive(message.payload, receiver="scheduler")
             await message.ack()
             logger.info(
                 "Received message on subject '%s' with durable '%s'",
@@ -186,7 +196,16 @@ async def _receive_data_from_nats(
         raise HTTPException(status_code=500, detail=f"Failed to receive message: {exc}") from exc
 
 
-async def _send_data_to_nats(data: dict[str, Any], nats_out_subject: str) -> None:
+async def _send_data_to_nats(
+    data: dict[str, Any], nats_out_subject: str, *, scheduler_phase: str
+) -> None:
+    if scheduler_phase == "budget":
+        receiver, link = "llm", "scheduler_budget_to_llm_prefix"
+    elif scheduler_phase == "plan":
+        receiver, link = "llm", "scheduler_plan_to_llm_final"
+    else:
+        receiver, link = "bench2drive", "scheduler_decision_update_to_bench2drive"
+    mark_nats_send(data, sender="scheduler", receiver=receiver, link=link)
     ack = await _nats_comm.send(subject=nats_out_subject, payload=data)
     logger.info("Data sent to NATS subject '%s' with ack: %s", nats_out_subject, ack)
 
@@ -249,7 +268,13 @@ async def agent_function(
     _, _, default_out_subject = _phase_default_routes(scheduler_phase)
     nats_out_subject = nats_out_subject or default_out_subject
     try:
-        scheduler_result = await asyncio.to_thread(scheduler_runtime.run, data, scheduler_phase)
+        scheduler_result, profile_record = await asyncio.to_thread(
+            profile_call,
+            lambda: scheduler_runtime.run(data, scheduler_phase),
+            agent="scheduler",
+            phase=scheduler_phase,
+            payload=data,
+        )
     except ValueError as exc:
         logger.warning("Scheduler request validation failed: %s", exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -257,7 +282,12 @@ async def agent_function(
         logger.exception("Scheduler runtime failed")
         raise HTTPException(status_code=500, detail=f"Scheduler failed: {exc}") from exc
 
-    await _send_data_to_nats(scheduler_result, nats_out_subject=nats_out_subject)
+    attach_traces(scheduler_result, data, profile_record)
+    await _send_data_to_nats(
+        scheduler_result,
+        nats_out_subject=nats_out_subject,
+        scheduler_phase=scheduler_phase,
+    )
     return {
         "status": "success",
         "frame_id": scheduler_result.get("encoded_payload", {}).get("frame_id"),

@@ -14,6 +14,7 @@ services:
     ports:
       - "9012:9012"
     environment:
+      SIMLINGO_EVAL_RECORD_TFLOPS: ${SIMLINGO_EVAL_RECORD_TFLOPS:-1}
       LLM_MODEL_VARIANT: ${LLM_MODEL_VARIANT:-/app/models/InternVL2-1B}
       LLM_CHECKPOINT_PATH: ${LLM_CHECKPOINT_PATH:-/app/checkpoints/simlingo_llm/pytorch_model.bin}
       LLM_SPEED_WPS_MODE: ${LLM_SPEED_WPS_MODE:-2d}

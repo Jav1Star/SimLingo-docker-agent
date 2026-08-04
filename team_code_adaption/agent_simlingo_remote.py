@@ -235,6 +235,9 @@ class RemoteSplitLingoAgent(LingoAgent):
             "failed_frame_count": 0,
             "accumulated_remote_inference_sec": 0.0,
         }
+        self.record_tflops = self._env_flag("SIMLINGO_EVAL_RECORD_TFLOPS", True)
+        self._split_profile_frames = []
+        self._split_profile_errors = []
         if DEBUG:
             self.save_path_img = self.debug_save_path + "/images"
             Path(self.save_path_img).mkdir(parents=True, exist_ok=True)
@@ -316,6 +319,7 @@ class RemoteSplitLingoAgent(LingoAgent):
             status="success",
             remote_result=remote_result,
         )
+        self._accumulate_split_profile(remote_result)
 
         llm_payload = remote_result.get("llm_payload", {})
         self._log_remote_frame_alignment(
@@ -406,6 +410,7 @@ class RemoteSplitLingoAgent(LingoAgent):
         return control
 
     def destroy(self, results=None):  # pylint: disable=unused-argument
+        self._write_split_tflops_summary()
         self._finalize_route_inference_timing(results=results)
         try:
             cleanup_result = self.remote_pipeline.cleanup_route(self.route_key)
@@ -418,6 +423,204 @@ class RemoteSplitLingoAgent(LingoAgent):
         except Exception as exc:  # Cleanup must not hide the route evaluation result.
             print(f"[remote-pipeline] route NATS cleanup failed for {self.route_key}: {exc}")
         del self.config
+
+    def _accumulate_split_profile(self, remote_result: dict) -> None:
+        if not self.record_tflops:
+            return
+        profile_trace = remote_result.get("profile_trace", [])
+        communication_trace = remote_result.get("nats_communication_trace", [])
+        if not isinstance(profile_trace, list):
+            profile_trace = []
+        if not isinstance(communication_trace, list):
+            communication_trace = []
+
+        inter_agent_records = []
+        agent_names = {"encoder", "scheduler", "llm"}
+        for item in communication_trace:
+            if not isinstance(item, dict):
+                continue
+            if item.get("sender") in agent_names and item.get("receiver") in agent_names:
+                inter_agent_records.append(item)
+
+        valid_profiles = [item for item in profile_trace if isinstance(item, dict)]
+        frame_profile_latency = [
+            float(item["latency_ms"])
+            for item in valid_profiles
+            if item.get("profile_success") and item.get("latency_ms") is not None
+        ]
+        communication_latency = [
+            float(item["latency_ms"])
+            for item in inter_agent_records
+            if item.get("latency_ms") is not None
+        ]
+        expected_links = {
+            "encoder_to_scheduler_budget",
+            "scheduler_budget_to_llm_prefix",
+            "llm_prefix_to_scheduler_plan",
+            "scheduler_plan_to_llm_final",
+            "llm_final_to_scheduler_decision_update",
+        }
+        observed_links = {str(item.get("link")) for item in inter_agent_records}
+        communication_complete = expected_links.issubset(observed_links)
+        pipeline_meta = remote_result.get("pipeline_meta", {})
+        self._split_profile_frames.append(
+            {
+                "step": int(self.step),
+                "pipeline_request_id": pipeline_meta.get("request_id") if isinstance(pipeline_meta, dict) else None,
+                "profile_trace": valid_profiles,
+                "nats_communication_trace": inter_agent_records,
+                "gpu_compute_latency_ms": float(sum(frame_profile_latency)),
+                "agent_nats_communication_ms": (
+                    float(sum(communication_latency)) if communication_complete else None
+                ),
+                "nats_communication_complete": communication_complete,
+                "end_to_end_latency_ms": (
+                    float(pipeline_meta.get("total_duration_ms"))
+                    if isinstance(pipeline_meta, dict) and pipeline_meta.get("total_duration_ms") is not None
+                    else None
+                ),
+            }
+        )
+
+    @staticmethod
+    def _latency_summary(values):
+        values = [float(value) for value in values if value is not None]
+        return {
+            "count": len(values),
+            "avg_ms": None if not values else float(sum(values) / len(values)),
+            "p50_ms": None if not values else float(np.percentile(values, 50)),
+            "p90_ms": None if not values else float(np.percentile(values, 90)),
+            "max_ms": None if not values else float(max(values)),
+        }
+
+    def _resolve_split_tflops_output_path(self):
+        result_file = os.getenv("SIMLINGO_EVAL_RESULT_FILE", "").strip()
+        if result_file:
+            result_path = Path(result_file)
+            if result_path.name.endswith("_res.json"):
+                return result_path.with_name(result_path.name.replace("_res.json", "_tflops.json"))
+            return result_path.with_suffix(".tflops.json")
+        if getattr(self, "save_path", None) is not None:
+            return Path(self.save_path) / "route_tflops.json"
+        return None
+
+    def _write_split_tflops_summary(self) -> None:
+        output_path = self._resolve_split_tflops_output_path()
+        if output_path is None:
+            return
+
+        frames = list(getattr(self, "_split_profile_frames", []))
+        profile_records = [record for frame in frames for record in frame["profile_trace"]]
+        communication_records = [
+            record for frame in frames for record in frame["nats_communication_trace"]
+        ]
+        total_flops = sum(
+            int(record.get("flops", 0) or 0)
+            for record in profile_records
+            if record.get("profile_success")
+        )
+        gpu_values = [frame["gpu_compute_latency_ms"] for frame in frames]
+        communication_values = [frame["agent_nats_communication_ms"] for frame in frames]
+        end_to_end_values = [frame["end_to_end_latency_ms"] for frame in frames]
+
+        expected_phases = {
+            ("encoder", "encode"),
+            ("scheduler", "budget"),
+            ("llm", "prefix"),
+            ("scheduler", "plan"),
+            ("llm", "final"),
+            ("scheduler", "decision_update"),
+        }
+        fully_profiled_steps = 0
+        for frame in frames:
+            successful = {
+                (record.get("agent"), record.get("phase"))
+                for record in frame["profile_trace"]
+                if record.get("profile_success")
+            }
+            if expected_phases.issubset(successful):
+                fully_profiled_steps += 1
+
+        agents = {}
+        for agent_name in ("encoder", "scheduler", "llm"):
+            agent_records = [r for r in profile_records if r.get("agent") == agent_name]
+            phase_names = sorted({str(r.get("phase")) for r in agent_records})
+            phases = {}
+            for phase_name in phase_names:
+                phase_records = [r for r in agent_records if str(r.get("phase")) == phase_name]
+                phase_latencies = [r.get("latency_ms") for r in phase_records if r.get("profile_success")]
+                phases[phase_name] = {
+                    "calls": len(phase_records),
+                    "total_flops": sum(int(r.get("flops", 0) or 0) for r in phase_records),
+                    "latency": self._latency_summary(phase_latencies),
+                }
+            agents[agent_name] = {
+                "calls": len(agent_records),
+                "total_flops": sum(int(r.get("flops", 0) or 0) for r in agent_records),
+                "phases": phases,
+            }
+
+        link_summaries = {}
+        for link in sorted({str(r.get("link")) for r in communication_records}):
+            link_values = [r.get("latency_ms") for r in communication_records if str(r.get("link")) == link]
+            link_summaries[link] = self._latency_summary(link_values)
+
+        step_count = len(frames)
+        avg_flops = None if step_count == 0 else total_flops / step_count
+        gpu_summary = self._latency_summary(gpu_values)
+        communication_summary = self._latency_summary(communication_values)
+        end_to_end_summary = self._latency_summary(end_to_end_values)
+        errors = [
+            {
+                "agent": r.get("agent"),
+                "phase": r.get("phase"),
+                "step": r.get("frame_id"),
+                "error": r.get("error"),
+            }
+            for r in profile_records
+            if not r.get("profile_success")
+        ]
+        summary = {
+            "route_id": os.getenv("SIMLINGO_EVAL_ROUTE_ID"),
+            "route_key": getattr(self, "route_key", None),
+            "record_tflops": bool(getattr(self, "record_tflops", False)),
+            "compute_steps": step_count,
+            "inference_profiled_steps": fully_profiled_steps,
+            "total_inference_flops": int(total_flops),
+            "total_inference_tflops": total_flops / 1e12,
+            "avg_inference_flops_per_step": avg_flops,
+            "avg_inference_tflops_per_step": None if avg_flops is None else avg_flops / 1e12,
+            "forward_latency_ms_values": gpu_values,
+            "forward_latency_ms_count": gpu_summary["count"],
+            "avg_forward_latency_ms": gpu_summary["avg_ms"],
+            "max_forward_latency_ms": gpu_summary["max_ms"],
+            "p50_forward_latency_ms": gpu_summary["p50_ms"],
+            "p90_forward_latency_ms": gpu_summary["p90_ms"],
+            "agent_nats_communication_ms_values": communication_values,
+            "agent_nats_communication_ms_count": communication_summary["count"],
+            "avg_agent_nats_communication_ms_per_step": communication_summary["avg_ms"],
+            "p50_agent_nats_communication_ms_per_step": communication_summary["p50_ms"],
+            "p90_agent_nats_communication_ms_per_step": communication_summary["p90_ms"],
+            "max_agent_nats_communication_ms_per_step": communication_summary["max_ms"],
+            "nats_communication_ms_values": communication_values,
+            "nats_communication_profiled_steps": communication_summary["count"],
+            "avg_nats_communication_ms_per_step": communication_summary["avg_ms"],
+            "total_nats_communication_ms": float(
+                sum(value for value in communication_values if value is not None)
+            ),
+            "end_to_end_latency_ms_values": end_to_end_values,
+            "end_to_end_latency": end_to_end_summary,
+            "agents": agents,
+            "nats_links": link_summaries,
+            "profile_errors": errors,
+            "profiler": "per-container torch.profiler.profile(with_flops=True)",
+            "latency_source": "sum of per-container CUDA events",
+            "nats_timing_source": "sender time.time_ns to receiver time.time_ns after decode",
+            "nats_timing_note": "Agent-to-agent one-way timings require synchronized host clocks; Bench2Drive boundary links are excluded.",
+        }
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as outfile:
+            json.dump(summary, outfile, indent=4, ensure_ascii=False)
 
     def _load_eval_token_prune_cfg(self):
         value = os.getenv("SIMLINGO_EVAL_TOKEN_PRUNE_RATIO", "").strip()

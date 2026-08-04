@@ -14,6 +14,7 @@ services:
     ports:
       - "9011:9011"
     environment:
+      SIMLINGO_EVAL_RECORD_TFLOPS: ${SIMLINGO_EVAL_RECORD_TFLOPS:-1}
       ENCODER_MODEL_VARIANT: ${ENCODER_MODEL_VARIANT:-/app/models/InternVL2-1B}
       ENCODER_CHECKPOINT_PATH: ${ENCODER_CHECKPOINT_PATH:-/app/checkpoints/simlingo_encoder/pytorch_model.bin}
       ENCODER_TOKEN_PRUNE_MODE: ${ENCODER_TOKEN_PRUNE_MODE:-origin}

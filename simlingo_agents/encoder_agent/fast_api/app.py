@@ -11,6 +11,15 @@ from fast_api.model_runtime import encoder_runtime
 from protocols import A2AMessage, A2ATaskRequest, A2ATaskResponse, NatsComm
 from utils.logger_utils import get_logger
 
+try:
+    from simlingo_agents.common.inference_profile import (
+        attach_traces, mark_nats_send, profile_call, record_nats_receive,
+    )
+except ModuleNotFoundError:
+    from common.inference_profile import (
+        attach_traces, mark_nats_send, profile_call, record_nats_receive,
+    )
+
 
 logger = get_logger(__name__)
 
@@ -68,6 +77,7 @@ async def _receive_data_from_nats(
         )
         if messages:
             message = messages[0]
+            record_nats_receive(message.payload, receiver="encoder")
             await message.ack()
             logger.info(
                 "Received message on subject '%s' with durable '%s'",
@@ -87,6 +97,9 @@ async def _receive_data_from_nats(
 
 
 async def _send_data_to_nats(data: dict[str, Any], nats_out_subject: str = NATS_OUT_SUBJECT) -> None:
+    mark_nats_send(
+        data, sender="encoder", receiver="scheduler", link="encoder_to_scheduler_budget"
+    )
     ack = await _nats_comm.send(subject=nats_out_subject, payload=data)
     logger.info("Data sent to NATS subject '%s' with ack: %s", nats_out_subject, ack)
 
@@ -119,7 +132,13 @@ async def agent_function(
         nats_in_durable=nats_in_durable,
     )
     try:
-        encoded_result = await asyncio.to_thread(encoder_runtime.encode, data)
+        encoded_result, profile_record = await asyncio.to_thread(
+            profile_call,
+            lambda: encoder_runtime.encode(data),
+            agent="encoder",
+            phase="encode",
+            payload=data,
+        )
     except ValueError as exc:
         logger.warning("Encoder request validation failed: %s", exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -131,6 +150,7 @@ async def agent_function(
         "status": "success",
         "encoded_payload": encoded_result,
     }
+    attach_traces(result, data, profile_record)
     await _send_data_to_nats(result, nats_out_subject=nats_out_subject)
     return {
         "status": "success",
