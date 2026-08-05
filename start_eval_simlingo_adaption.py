@@ -49,6 +49,12 @@ def tflops_file_for_result(result_file: str) -> str:
     return os.path.splitext(result_file)[0] + ".tflops.json"
 
 
+def token_file_for_result(result_file: str) -> str:
+    if result_file.endswith("_res.json"):
+        return result_file[:-len("_res.json")] + "_token.json"
+    return os.path.splitext(result_file)[0] + ".token.json"
+
+
 def needs_resubmit(job) -> bool:
     result_file = job["result_file"]
     if not os.path.exists(result_file):
@@ -74,6 +80,9 @@ def needs_resubmit(job) -> bool:
             return True
 
     if tflops_recording_enabled() and not os.path.exists(job.get("tflops_file", tflops_file_for_result(result_file))):
+        return True
+
+    if not os.path.exists(job.get("token_file", token_file_for_result(result_file))):
         return True
 
     return False
@@ -514,6 +523,7 @@ def main(args):
                 err_file = os.path.join(base_dir, "err", f"{route_id}_err.log")
                 result_file = os.path.join(base_dir, "res", f"{route_id}_res.json")
                 tflops_file = tflops_file_for_result(result_file)
+                token_file = token_file_for_result(result_file)
                 # 修改后的筛选：基于 res.json 的 status 字段判断
                 should_skip = False
                 if os.path.exists(result_file):
@@ -530,6 +540,8 @@ def main(args):
                                 print(f"[queue] route {route_id} mode {cfg['budget_mode']} status is Completed but save_scene_frames is true -> queue")
                             elif tflops_recording_enabled() and not os.path.exists(tflops_file):
                                 print(f"[queue] route {route_id} mode {cfg['budget_mode']} status is Completed but TFLOPs file is missing -> queue")
+                            elif not os.path.exists(token_file):
+                                print(f"[queue] route {route_id} mode {cfg['budget_mode']} status is Completed but token file is missing -> queue")
                             else:
                                 should_skip = True
                                 print(f"[skip] route {route_id} mode {cfg['budget_mode']} status is Completed -> skip")
@@ -556,6 +568,7 @@ def main(args):
                     "viz_path": viz_path,
                     "result_file": result_file,
                     "tflops_file": tflops_file,
+                    "token_file": token_file,
                     "log_file": log_file,
                     "err_file": err_file,
                     "tries_initial": cfg["tries"],

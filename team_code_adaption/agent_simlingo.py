@@ -152,6 +152,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.forward_latency_ms_sum = 0.0
         self.forward_latency_ms_max = 0.0
         self.forward_latency_ms_count = 0
+        self.token_usage_records = []
 
         if self.config.eval_route_as == -1:
             self.config.eval_route_as = self.model.route_as
@@ -973,6 +974,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         Also writes logging files to disk.
         """
         self._write_tflops_summary()
+        self._write_token_summary()
         if hasattr(self, "model") and hasattr(self.model, "decision_shift_state"):
             self.model.decision_shift_state = {}
         if hasattr(self, "model"):
@@ -1064,7 +1066,9 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
     def _profile_model_forward(self, model_input):
         if not self.record_tflops:
-            return self.model(model_input, route_keys=[self.route_key])
+            outputs = self.model(model_input, route_keys=[self.route_key])
+            self._record_token_usage()
+            return outputs
 
         try:
             activities = [torch.profiler.ProfilerActivity.CPU]
@@ -1094,11 +1098,33 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                 self.forward_latency_ms_sum += latency_ms
                 self.forward_latency_ms_max = max(self.forward_latency_ms_max, latency_ms)
                 self.forward_latency_ms_count += 1
+            self._record_token_usage()
             return outputs
         except Exception as exc:
             if len(self.flops_profile_errors) < 5:
                 self.flops_profile_errors.append(str(exc))
-            return self.model(model_input, route_keys=[self.route_key])
+            outputs = self.model(model_input, route_keys=[self.route_key])
+            self._record_token_usage()
+            return outputs
+
+    def _record_token_usage(self):
+        if not hasattr(self, "model"):
+            return
+        stats = getattr(self.model, "inference_token_stats", None)
+        if not isinstance(stats, dict):
+            return
+        # 每步模型 forward 后立刻拷贝统计，避免后续张量状态被释放或覆盖。
+        record = {"step": int(getattr(self, "step", -1))}
+        for key, value in stats.items():
+            if isinstance(value, (np.integer, int)):
+                record[key] = int(value)
+            elif isinstance(value, (np.floating, float)):
+                record[key] = float(value)
+            elif value is None:
+                record[key] = None
+            else:
+                record[key] = value
+        self.token_usage_records.append(record)
 
     def _resolve_tflops_output_path(self):
         result_file = os.getenv("SIMLINGO_EVAL_RESULT_FILE", "").strip()
@@ -1111,6 +1137,19 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         save_path = getattr(self, "save_path", None)
         if save_path is not None:
             return Path(save_path) / "route_tflops.json"
+        return None
+
+    def _resolve_token_output_path(self):
+        result_file = os.getenv("SIMLINGO_EVAL_RESULT_FILE", "").strip()
+        if result_file:
+            result_path = Path(result_file)
+            if result_path.name.endswith("_res.json"):
+                return result_path.with_name(result_path.name.replace("_res.json", "_token.json"))
+            return result_path.with_suffix(".token.json")
+
+        save_path = getattr(self, "save_path", None)
+        if save_path is not None:
+            return Path(save_path) / "route_token.json"
         return None
 
     def _write_tflops_summary(self):
@@ -1146,6 +1185,48 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             "profiler": "torch.profiler.profile(with_flops=True)",
             "note": "FLOPs are accumulated over LingoAgent model forward calls for this route.",
             "profile_errors": getattr(self, "flops_profile_errors", []),
+        }
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=4)
+
+    def _write_token_summary(self):
+        output_path = self._resolve_token_output_path()
+        if output_path is None:
+            return
+
+        records = list(getattr(self, "token_usage_records", []))
+        numeric_keys = [
+            "llm_sequence_length",
+            "llm_input_tokens",
+            "language_sequence_length_before_prune",
+            "language_tokens_before_prune",
+            "language_sequence_length_after_prune",
+            "language_tokens_after_prune",
+            "visual_tokens_before_prune",
+            "visual_tokens_after_prune",
+            "visual_tokens_pruned",
+            "visual_keep_ratio",
+            "driving_tokens",
+            "budget_tokens",
+        ]
+        averages = {}
+        totals = {}
+        for key in numeric_keys:
+            values = [record[key] for record in records if record.get(key) is not None]
+            totals[key] = None if not values else float(sum(values))
+            averages[key] = None if not values else float(sum(values)) / len(values)
+
+        summary = {
+            "route_id": os.getenv("SIMLINGO_EVAL_ROUTE_ID"),
+            "route_key": getattr(self, "route_key", None),
+            "compute_steps": len(records),
+            "token_prune_ratio": self._load_eval_token_prune_ratio(),
+            "averages": averages,
+            "totals": totals,
+            "per_step": records,
+            "note": "Token counts are measured from compacted LLM inputs after visual token pruning.",
         }
 
         output_path.parent.mkdir(parents=True, exist_ok=True)

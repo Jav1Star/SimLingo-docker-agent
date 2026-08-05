@@ -6,7 +6,7 @@ eval:
   route_ids: ["009","037","124"]
   seeds: [3]
   tries: 0
-  out_root: ~/1-4-J-104/simlingo-heuristic/eval_results/latency_compare_10routes/test
+  out_root: ~/1-4-J-104/output
   export_route_panel: false
   carla_root: ~/data/carla0915
   repo_root: ~/1-4-J-104/simlingo-heuristic
@@ -16,9 +16,8 @@ eval:
   save_scene_frames: true
   scene_frame_stride: 2
   scene_frame_format: png
-
 budget:
-  mode: fixed # random # fixed # rule_based
+  mode: fixed
   fixed_budget: 1.0
   rule_based:
     k_warmup: 5
@@ -53,6 +52,5 @@ budget:
       route_shift:
         q10: 0.1959435195
         q90: 0.7455124855
-
 token_prune:
   prune_ratio: 0.0

@@ -216,3 +216,4 @@ ds_config.json
 
 # 5. 忽略 tests 目录及其内容
 tests/
+configs/test_algo1-4-J-104/

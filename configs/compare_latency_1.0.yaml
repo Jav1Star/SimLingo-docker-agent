@@ -3,7 +3,7 @@ eval:
   checkpoint: ~/simlingo-heuristic/models/simlingoModels/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin
   benchmark: bench2drive
   route_path: ~/simlingo-heuristic/leaderboard/data/bench2drive_split
-  route_ids: ["037","074","078","124","40"]
+  route_ids: ["009","037","074","078","124","40"]
   seeds: [3]
   tries: 0
   out_root: ~/simlingo-heuristic/eval_results/latency_compare_10routes

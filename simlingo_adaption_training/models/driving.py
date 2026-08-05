@@ -215,6 +215,16 @@ class DrivingModel(pl.LightningModule):
         driving_input: DrivingInput,
         adaptor_dict: Dict,
     ) -> Tensor:
+        language_ids_before_prune = adaptor_dict["language__ids"]
+        language_mask_before_prune = adaptor_dict["language_inputs_mask"]
+        img_context_token_id = self.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
+        visual_tokens_before_prune = int(
+            (
+                (language_ids_before_prune == img_context_token_id)
+                & language_mask_before_prune.bool()
+            ).sum().item()
+        )
+
         adaptor_dict = self.vision_model.image_encoder.replace_placeholder_tokens(
             adaptor_dict=adaptor_dict,
             pixel_values=driving_input.camera_images,
@@ -228,6 +238,33 @@ class DrivingModel(pl.LightningModule):
         input_embeds = adaptor_embeds.to(dtype=self.language_model.model.dtype)
         attention_mask = adaptor_mask
         self._last_inputs_embeds = input_embeds
+        language_ids_after_prune = adaptor_dict["language__ids"]
+        language_mask_after_prune = adaptor_dict["language_inputs_mask"].bool()
+        visual_tokens_after_prune = int(
+            (
+                (language_ids_after_prune == img_context_token_id)
+                & language_mask_after_prune
+            ).sum().item()
+        )
+        visual_keep_ratio = None
+        if visual_tokens_before_prune > 0:
+            visual_keep_ratio = visual_tokens_after_prune / visual_tokens_before_prune
+        # 关键统计点：这里的 inputs_mask 已经是视觉 token compact 后真实送入 LLM 的序列。
+        self.inference_token_stats = {
+            "batch_size": int(adaptor_mask.size(0)),
+            "llm_sequence_length": int(adaptor_embeds.size(1)),
+            "llm_input_tokens": int(adaptor_mask.bool().sum().item()),
+            "language_sequence_length_before_prune": int(language_ids_before_prune.size(1)),
+            "language_tokens_before_prune": int(language_mask_before_prune.bool().sum().item()),
+            "language_sequence_length_after_prune": int(language_ids_after_prune.size(1)),
+            "language_tokens_after_prune": int(language_mask_after_prune.sum().item()),
+            "visual_tokens_before_prune": visual_tokens_before_prune,
+            "visual_tokens_after_prune": visual_tokens_after_prune,
+            "visual_tokens_pruned": visual_tokens_before_prune - visual_tokens_after_prune,
+            "visual_keep_ratio": visual_keep_ratio,
+            "driving_tokens": int(adaptor_dict["driving_inputs_mask"].bool().sum().item()),
+            "budget_tokens": int(adaptor_dict["budget_inputs_mask"].bool().sum().item()),
+        }
 
         self.budget_assigner.prepare_llm_runtime(adaptor_dict)
         features, logits = self.language_model(
