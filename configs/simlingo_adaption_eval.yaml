@@ -17,6 +17,9 @@ eval:
   scene_frame_format: png
   token_prune:
     prune_ratio: 0.0
+  predict_language:
+    enabled: true
+    max_new_tokens: 100
 
 budget:
   mode: fixed # random # fixed # rule_based

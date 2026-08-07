@@ -263,6 +263,7 @@ class LLM(nn.Module):
         attention_mask = None,
         position_ids = None,
         assigner: Optional[object] = None,
+        execution_plan: Optional[Tensor] = None,
     ) -> Tuple[Tensor, int]:
         
         if input_embed_matrix is None:
@@ -307,6 +308,7 @@ class LLM(nn.Module):
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 assigner=assigner,
+                execution_plan=execution_plan,
             )
             # ============================================
 
@@ -326,7 +328,13 @@ class LLM(nn.Module):
             x = F.embedding(next_token.unsqueeze(1), input_embed_matrix)
 
             input_embeds = torch.cat([input_embeds, x], dim=1)
-            attention_mask = torch.cat([attention_mask, torch.ones((input_embeds.size(0), 1), device=input_embeds.device)], dim=1)
+            attention_mask = torch.cat(
+                [
+                    attention_mask,
+                    torch.ones((input_embeds.size(0), 1), device=input_embeds.device, dtype=attention_mask.dtype),
+                ],
+                dim=1,
+            )
 
             # only update sequences where we haven't predicted the eos token before
             sampled_tokens[incomplete_seq_mask, i] = next_token[incomplete_seq_mask]

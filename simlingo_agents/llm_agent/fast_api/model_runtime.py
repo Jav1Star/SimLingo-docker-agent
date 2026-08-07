@@ -356,7 +356,7 @@ class LLMRuntime:
         return self._llm, self._driving_adaptor, self._tokenizer, self._budget_encoder
 
     def run(self, payload: dict[str, Any], phase: str = "final") -> dict[str, Any]:
-        llm, driving_adaptor, _tokenizer, budget_encoder = self._require_loaded()
+        llm, driving_adaptor, tokenizer, budget_encoder = self._require_loaded()
         phase = str(phase).strip().lower()
         if phase not in {"prefix", "final"}:
             raise ValueError(f"Unsupported llm phase: {phase}")
@@ -405,12 +405,14 @@ class LLMRuntime:
         budget_value_np = self._validate_budget_value(budget_value_np, batch_size=input_ids_np.shape[0])
         if execution_plan_np is not None:
             self._validate_execution_plan(execution_plan_np, batch_size=input_ids_np.shape[0])
+        predict_language_cfg = self._predict_language_cfg(encoded_payload)
 
         input_ids_tensor = torch.as_tensor(input_ids_np, device=self._device, dtype=torch.long)
         attention_mask_tensor = torch.as_tensor(attention_mask_np, device=self._device, dtype=torch.bool)
         budget_value_tensor = torch.as_tensor(budget_value_np, device=self._device, dtype=torch.float32)
         execution_plan_tensor = None if execution_plan_np is None else torch.as_tensor(execution_plan_np, device=self._device)
 
+        language_prediction = None
         with self._model_lock:
             with torch.no_grad():
                 language_inputs = self._embed_input_ids(llm, input_ids_tensor)
@@ -462,6 +464,16 @@ class LLMRuntime:
                     )
 
                 outputs = llm.model(**model_kwargs)
+                if phase == "final" and predict_language_cfg["enabled"]:
+                    # 仅生成日志文本，不把生成结果回灌到 driving query 预测路径。
+                    language_prediction = self._generate_language_log(
+                        llm=llm,
+                        tokenizer=tokenizer,
+                        language_inputs=language_inputs,
+                        attention_mask=attention_mask_tensor,
+                        execution_plan=execution_plan_tensor,
+                        max_new_tokens=predict_language_cfg["max_new_tokens"],
+                    )
 
         route_key = encoded_payload.get("route_key")
         frame_id = encoded_payload.get("frame_id")
@@ -519,6 +531,8 @@ class LLMRuntime:
                 "frame_id": frame_id,
                 "speed_wps": None if speed_wps is None else speed_wps.detach().float().cpu().numpy(),
                 "route": None if route is None else route.detach().float().cpu().numpy(),
+                "language": language_prediction,
+                "predict_language": predict_language_cfg,
                 "driving_features": driving_features.detach().float().cpu().numpy(),
                 "execution_plan_applied": execution_plan_np,
                 "budget_value": budget_value_np,
@@ -538,6 +552,63 @@ class LLMRuntime:
                 },
             },
         }
+
+    def _predict_language_cfg(self, encoded_payload: dict[str, Any]) -> dict[str, Any]:
+        cfg = encoded_payload.get("predict_language", {}) or {}
+        if isinstance(cfg, bool):
+            cfg = {"enabled": cfg}
+        if not isinstance(cfg, dict):
+            raise ValueError("encoded_payload.predict_language must be a bool or dict")
+        enabled = bool(cfg.get("enabled", False))
+        max_new_tokens = int(cfg.get("max_new_tokens", 100))
+        if max_new_tokens < 1:
+            raise ValueError(f"predict_language.max_new_tokens must be >= 1, got {max_new_tokens}")
+        return {
+            "enabled": enabled,
+            "max_new_tokens": max_new_tokens,
+        }
+
+    def _generate_language_log(
+        self,
+        *,
+        llm: LLM,
+        tokenizer: Any,
+        language_inputs: torch.Tensor,
+        attention_mask: torch.Tensor,
+        execution_plan: torch.Tensor | None,
+        max_new_tokens: int,
+    ) -> list[str]:
+        eos_token_id = self._language_eos_token_id(tokenizer)
+        sampled_tokens, _ = llm.greedy_sample(
+            input_embeds=language_inputs,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            eos_token_id=eos_token_id,
+            input_embed_matrix=llm.model.get_input_embeddings().weight,
+            logit_matrix=self._language_lm_head_weight(llm),
+            execution_plan=execution_plan,
+        )
+        return [
+            text.strip()
+            for text in tokenizer.batch_decode(sampled_tokens.detach().cpu(), skip_special_tokens=True)
+        ]
+
+    @staticmethod
+    def _language_eos_token_id(tokenizer: Any) -> int | None:
+        added_tokens = getattr(tokenizer, "added_tokens_encoder", {}) or {}
+        if "<|im_end|>" in added_tokens:
+            return int(added_tokens["<|im_end|>"])
+        if "<|end|>" in added_tokens:
+            return int(added_tokens["<|end|>"])
+        eos_token_id = getattr(tokenizer, "eos_token_id", None)
+        return None if eos_token_id is None else int(eos_token_id)
+
+    @staticmethod
+    def _language_lm_head_weight(llm: LLM) -> torch.Tensor:
+        output_embeddings = llm.model.get_output_embeddings()
+        if output_embeddings is None or not hasattr(output_embeddings, "weight"):
+            raise ValueError("Language model must expose get_output_embeddings().weight for predict_language")
+        return output_embeddings.weight
 
     def _tensor_stats(self, value: torch.Tensor, *, max_items: int = 8) -> dict[str, Any]:
         tensor = value.detach().float().cpu()

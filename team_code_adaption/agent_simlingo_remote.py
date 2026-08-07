@@ -152,6 +152,7 @@ class RemoteSplitLingoAgent(LingoAgent):
 
         self.remote_pipeline = SplitAgentPipelineClient()
         self.token_prune_cfg = self._load_eval_token_prune_cfg()
+        self.predict_language_cfg = self._load_predict_language_cfg()
 
         self.iter = self.config_path.split("epoch=")[-1].split("/")[0]
         self.session = self.config_path.split("/")[-4]
@@ -584,6 +585,7 @@ class RemoteSplitLingoAgent(LingoAgent):
             "route_id": os.getenv("SIMLINGO_EVAL_ROUTE_ID"),
             "route_key": getattr(self, "route_key", None),
             "record_tflops": bool(getattr(self, "record_tflops", False)),
+            "predict_language": self._to_jsonable(getattr(self, "predict_language_cfg", {})),
             "compute_steps": step_count,
             "inference_profiled_steps": fully_profiled_steps,
             "total_inference_flops": int(total_flops),
@@ -636,6 +638,16 @@ class RemoteSplitLingoAgent(LingoAgent):
             "mode": "prune2drive",
             "prune_ratio": prune_ratio,
             "min_keep": 1,
+        }
+
+    def _load_predict_language_cfg(self):
+        enabled = self._env_flag("SIMLINGO_PREDICT_LANGUAGE", False)
+        max_new_tokens = int(os.getenv("SIMLINGO_PREDICT_LANGUAGE_MAX_NEW_TOKENS", "100"))
+        if max_new_tokens < 1:
+            raise ValueError(f"SIMLINGO_PREDICT_LANGUAGE_MAX_NEW_TOKENS must be >= 1, got {max_new_tokens}")
+        return {
+            "enabled": enabled,
+            "max_new_tokens": max_new_tokens,
         }
 
     @staticmethod
@@ -693,6 +705,7 @@ class RemoteSplitLingoAgent(LingoAgent):
             "brake": round(float(control.brake), 4),
             "stage_durations_ms": pipeline_meta.get("stage_durations_ms", {}),
             "prompt": getattr(self, "prompt", ""),
+            "language": self._to_jsonable(llm_payload.get("language")),
         }
         try:
             save_scene_visualization(
@@ -745,6 +758,7 @@ class RemoteSplitLingoAgent(LingoAgent):
             "num_patches": num_patches,
             "expand_image_token": False,
             "runtime_context": runtime_context,
+            "predict_language": self.predict_language_cfg,
         }
         if self.token_prune_cfg is not None:
             # 关键调用点：split encoder 按帧接收 prune 配置，避免不同实验需要重启 agent。
@@ -964,6 +978,8 @@ class RemoteSplitLingoAgent(LingoAgent):
                 runtime_context.get("pipeline_request_id") if isinstance(runtime_context, dict) else None
             ),
             "budget_value": self._to_jsonable(llm_payload.get("budget_value")),
+            "language": self._to_jsonable(llm_payload.get("language")),
+            "predict_language": self._to_jsonable(llm_payload.get("predict_language")),
             "scheduler_plan_meta": self._to_jsonable(llm_payload.get("scheduler_plan_meta")),
             "visual_token_prune": self._to_jsonable(llm_payload.get("visual_token_prune")),
             "visual_token_keep_ratio": self._to_jsonable(llm_payload.get("visual_token_keep_ratio")),
@@ -1026,6 +1042,8 @@ class RemoteSplitLingoAgent(LingoAgent):
             "gt_velocity": self._scalar_or_none(tick_data.get("speed")),
             "pred_route": self._array_summary(pred_route),
             "pred_speed_wps": self._array_summary(pred_speed_wps),
+            "language": self._to_jsonable(llm_payload.get("language")),
+            "predict_language": self._to_jsonable(llm_payload.get("predict_language")),
             "visual_token_prune": self._to_jsonable(llm_payload.get("visual_token_prune")),
             "visual_token_keep_ratio": self._to_jsonable(llm_payload.get("visual_token_keep_ratio")),
             "visual_token_prune_summary": self._visual_token_prune_summary(llm_payload),

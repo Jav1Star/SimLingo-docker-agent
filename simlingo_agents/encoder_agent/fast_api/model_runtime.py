@@ -406,6 +406,7 @@ class EncoderRuntime:
             "visual_token_prune": visual_meta.get("visual_token_prune"),
             "visual_token_keep_ratio": visual_meta.get("visual_token_keep_ratio"),
             "waypoint_embeds": waypoint_embeds,
+            "predict_language": payload.get("predict_language", {}),
             "runtime_context": payload.get("runtime_context", {}),
             "meta": {
                 "model_variant": self._model_variant,

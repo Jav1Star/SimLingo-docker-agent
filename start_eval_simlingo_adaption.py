@@ -133,6 +133,24 @@ def parse_token_prune_settings(data):
     return prune_ratio
 
 
+def parse_predict_language_settings(data):
+    eval_cfg = data.get("eval", data)
+    predict_cfg = data.get("predict_language", eval_cfg.get("predict_language", {})) or {}
+    if isinstance(predict_cfg, bool):
+        predict_cfg = {"enabled": predict_cfg}
+    if not isinstance(predict_cfg, dict):
+        raise ValueError("predict_language must be a bool or dict when configured")
+
+    enabled = bool(predict_cfg.get("enabled", False))
+    max_new_tokens = int(predict_cfg.get("max_new_tokens", 100))
+    if max_new_tokens < 1:
+        raise ValueError(f"predict_language.max_new_tokens must be >= 1, got {max_new_tokens}")
+    return {
+        "enabled": enabled,
+        "max_new_tokens": max_new_tokens,
+    }
+
+
 def fixed_budget_dir_name(fixed_budget: float, token_prune_ratio=None) -> str:
     # 固定预算目录名统一在这里拼，避免启动与汇总脚本口径不一致。
     dir_name = f"bud_{float(fixed_budget):.3f}"
@@ -196,6 +214,7 @@ def build_eval_config(args, no_server_launch):
     cfg = eval_yaml.get("eval", eval_yaml)
     budget_mode, fixed_budget, rule_based_cfg = parse_budget_settings(eval_yaml)
     token_prune_ratio = parse_token_prune_settings(eval_yaml)
+    predict_language_cfg = parse_predict_language_settings(eval_yaml)
     config_route_ids = cfg.get("route_ids", eval_yaml.get("route_ids"))
     route_ids = parse_route_id_list(args.route_id) or parse_route_id_list(config_route_ids)
 
@@ -246,6 +265,7 @@ def build_eval_config(args, no_server_launch):
         "fixed_budget": fixed_budget,
         "rule_based_cfg": rule_based_cfg,
         "token_prune_ratio": token_prune_ratio,
+        "predict_language": predict_language_cfg,
         "route_ids": route_ids,
         "save_scene_frames": bool(cfg.get("save_scene_frames", False)),
         "save_scene_raw_frames": bool(cfg.get("save_scene_raw_frames", False)),
@@ -291,6 +311,9 @@ def launch_job(job, gpu_id, world_port, tm_port):
     env["SIMLINGO_SAVE_SCENE_RAW_FRAMES"] = "1" if cfg["save_scene_raw_frames"] else "0"
     env["SIMLINGO_SCENE_FRAME_STRIDE"] = str(cfg["scene_frame_stride"])
     env["SIMLINGO_SCENE_FRAME_FORMAT"] = cfg["scene_frame_format"]
+    # 每帧随 payload 下发到 split LLM agent，避免依赖远端 pod 环境变量。
+    env["SIMLINGO_PREDICT_LANGUAGE"] = "1" if cfg["predict_language"]["enabled"] else "0"
+    env["SIMLINGO_PREDICT_LANGUAGE_MAX_NEW_TOKENS"] = str(cfg["predict_language"]["max_new_tokens"])
     token_prune_ratio = cfg.get("token_prune_ratio", None)
     if token_prune_ratio is not None:
         env["SIMLINGO_EVAL_TOKEN_PRUNE_RATIO"] = str(token_prune_ratio)

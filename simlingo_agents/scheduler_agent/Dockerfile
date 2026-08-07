@@ -45,7 +45,7 @@ COPY simlingo_agents/common /app/common
 COPY simlingo_agents/scheduler_agent /app
 RUN mkdir -p /app/models /app/checkpoints/simlingo_scheduler
 COPY --from=simlingo_models InternVL2-1B /app/models/InternVL2-1B
-COPY --from=simlingo_models 2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin /app/checkpoints/simlingo_scheduler/pytorch_model.bin
+COPY --from=simlingo_models simlingoModels/2026_01_29_21_59_03_adaption_train_seed_9876/checkpoints/epoch=002.ckpt/pytorch_model.bin /app/checkpoints/simlingo_scheduler/pytorch_model.bin
 
 ENV PYTHONPATH=/app \
     SCHEDULER_MODEL_VARIANT=/app/models/InternVL2-1B \
