@@ -25,7 +25,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: simlingo-encoder-agent
-          image: simlingo-encoder-agent:0.2.5
+          image: simlingo-encoder-agent:0.2.7
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 9011
@@ -36,6 +36,8 @@ spec:
             limits:
               nvidia.com/gpu: "1"
           env:
+            - name: SIMLINGO_EVAL_RECORD_TFLOPS
+              value: "1"
             - name: ENCODER_MODEL_VARIANT
               value: /app/models/InternVL2-1B
             - name: ENCODER_CHECKPOINT_PATH

@@ -143,11 +143,15 @@ def parse_predict_language_settings(data):
 
     enabled = bool(predict_cfg.get("enabled", False))
     max_new_tokens = int(predict_cfg.get("max_new_tokens", 100))
+    stride = int(predict_cfg.get("stride", 1))
     if max_new_tokens < 1:
         raise ValueError(f"predict_language.max_new_tokens must be >= 1, got {max_new_tokens}")
+    if stride < 1:
+        raise ValueError(f"predict_language.stride must be >= 1, got {stride}")
     return {
         "enabled": enabled,
         "max_new_tokens": max_new_tokens,
+        "stride": stride,
     }
 
 
@@ -314,6 +318,7 @@ def launch_job(job, gpu_id, world_port, tm_port):
     # 每帧随 payload 下发到 split LLM agent，避免依赖远端 pod 环境变量。
     env["SIMLINGO_PREDICT_LANGUAGE"] = "1" if cfg["predict_language"]["enabled"] else "0"
     env["SIMLINGO_PREDICT_LANGUAGE_MAX_NEW_TOKENS"] = str(cfg["predict_language"]["max_new_tokens"])
+    env["SIMLINGO_PREDICT_LANGUAGE_STRIDE"] = str(cfg["predict_language"]["stride"])
     token_prune_ratio = cfg.get("token_prune_ratio", None)
     if token_prune_ratio is not None:
         env["SIMLINGO_EVAL_TOKEN_PRUNE_RATIO"] = str(token_prune_ratio)
@@ -659,7 +664,7 @@ def main(args):
             
 
             if not needs_resubmit(job) and return_code == 0: 
-                export_route_budget_layer_panel(job)
+                # export_route_budget_layer_panel(job)
                 job["status"] = "completed"
                 progress.update(1)
                 continue

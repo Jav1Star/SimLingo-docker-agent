@@ -25,7 +25,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: simlingo-scheduler-agent
-          image: simlingo-scheduler-agent:0.2.5
+          image: simlingo-scheduler-agent:0.2.7
           imagePullPolicy: IfNotPresent
           terminationMessagePolicy: FallbackToLogsOnError
           ports:
@@ -37,6 +37,8 @@ spec:
             limits:
               nvidia.com/gpu: "1"
           env:
+            - name: SIMLINGO_EVAL_RECORD_TFLOPS
+              value: "1"
             - name: SCHEDULER_MODEL_VARIANT
               value: /app/models/InternVL2-1B
             - name: SCHEDULER_CHECKPOINT_PATH

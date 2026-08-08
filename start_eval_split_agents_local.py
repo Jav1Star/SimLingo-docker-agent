@@ -273,7 +273,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--checkpoint", default=str(DEFAULT_CHECKPOINT), help="Override eval.checkpoint.")
     parser.add_argument("--route-path", default=str(DEFAULT_ROUTE_PATH), help="Override eval.route_path.")
-    parser.add_argument("--out-root", default=str(DEFAULT_OUT_ROOT), help="Override eval.out_root.")
+    parser.add_argument("--out-root", default=None, help="Override eval.out_root. If omitted, use eval.out_root from YAML.")
     parser.add_argument("--carla-root", default=str(DEFAULT_CARLA_ROOT), help="Override eval.carla_root.")
     parser.add_argument(
         "--run-dir",

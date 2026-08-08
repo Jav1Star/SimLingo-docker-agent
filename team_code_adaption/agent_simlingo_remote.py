@@ -28,6 +28,7 @@ from simlingo_agents.bench2drive_mcp_server.remote_inference import (
     RemoteInferenceError,
     SplitAgentPipelineClient,
 )
+from team_code_adaption.behavior_window_logger import BehaviorWindowLogger
 from team_code_adaption.agent_simlingo import (
     DEBUG,
     LingoAgent,
@@ -207,6 +208,7 @@ class RemoteSplitLingoAgent(LingoAgent):
         Path(self.debug_save_path).mkdir(parents=True, exist_ok=True)
         self.save_path_metric = self.debug_save_path + "/metric"
         Path(self.save_path_metric).mkdir(parents=True, exist_ok=True)
+        self._behavior_logger = self._create_behavior_logger()
         self.save_scene_frames = self._env_flag("SIMLINGO_SAVE_SCENE_FRAMES", False)
         self.save_scene_raw_frames = self._env_flag("SIMLINGO_SAVE_SCENE_RAW_FRAMES", False)
         self.scene_frame_stride = self._load_scene_frame_stride()
@@ -413,6 +415,11 @@ class RemoteSplitLingoAgent(LingoAgent):
     def destroy(self, results=None):  # pylint: disable=unused-argument
         self._write_split_tflops_summary()
         self._finalize_route_inference_timing(results=results)
+        if getattr(self, "_behavior_logger", None) is not None:
+            try:
+                self._behavior_logger.finalize()
+            except Exception as exc:
+                print(f"[behavior-log] failed to finalize route sample: {exc}", flush=True)
         try:
             cleanup_result = self.remote_pipeline.cleanup_route(self.route_key)
             print(
@@ -643,12 +650,41 @@ class RemoteSplitLingoAgent(LingoAgent):
     def _load_predict_language_cfg(self):
         enabled = self._env_flag("SIMLINGO_PREDICT_LANGUAGE", False)
         max_new_tokens = int(os.getenv("SIMLINGO_PREDICT_LANGUAGE_MAX_NEW_TOKENS", "100"))
+        stride = int(os.getenv("SIMLINGO_PREDICT_LANGUAGE_STRIDE", "1"))
         if max_new_tokens < 1:
             raise ValueError(f"SIMLINGO_PREDICT_LANGUAGE_MAX_NEW_TOKENS must be >= 1, got {max_new_tokens}")
+        if stride < 1:
+            raise ValueError(f"SIMLINGO_PREDICT_LANGUAGE_STRIDE must be >= 1, got {stride}")
         return {
             "enabled": enabled,
             "max_new_tokens": max_new_tokens,
+            "stride": stride,
         }
+
+    def _create_behavior_logger(self):
+        save_path = os.getenv("SAVE_PATH", "").strip()
+        route_id = os.getenv("SIMLINGO_EVAL_ROUTE_ID", "").strip()
+        if not save_path or not route_id:
+            return None
+        try:
+            # SAVE_PATH is <base_dir>/viz/<route_id>; behaviors is a sibling of viz.
+            base_dir = Path(save_path).parent.parent
+            return BehaviorWindowLogger(
+                base_dir / "behaviors" / route_id,
+                route_id=route_id,
+                route_key=self.route_key,
+                prune_ratio=(
+                    None if self.token_prune_cfg is None else float(self.token_prune_cfg["prune_ratio"])
+                ),
+                mode=self.eval_budget_mode,
+                fixed_budget=self.fixed_eval_budget,
+                predict_language_enabled=self.predict_language_cfg["enabled"],
+                predict_language_max_new_tokens=self.predict_language_cfg["max_new_tokens"],
+                predict_language_stride=self.predict_language_cfg["stride"],
+            )
+        except Exception as exc:
+            print(f"[behavior-log] failed to initialize route sample logger: {exc}", flush=True)
+            return None
 
     @staticmethod
     def _env_flag(name: str, default: bool) -> bool:
@@ -748,6 +784,14 @@ class RemoteSplitLingoAgent(LingoAgent):
             "speed_mps": float(tick_data["speed"][0].item()) if hasattr(tick_data.get("speed"), "__getitem__") else None,
         }
 
+        predict_language_cfg = {
+            "enabled": (
+                self.predict_language_cfg["enabled"]
+                and self.step % self.predict_language_cfg["stride"] == 0
+            ),
+            "max_new_tokens": self.predict_language_cfg["max_new_tokens"],
+        }
+
         payload = {
             "route_key": self.route_key,
             "route_keys": [self.route_key],
@@ -758,7 +802,7 @@ class RemoteSplitLingoAgent(LingoAgent):
             "num_patches": num_patches,
             "expand_image_token": False,
             "runtime_context": runtime_context,
-            "predict_language": self.predict_language_cfg,
+            "predict_language": predict_language_cfg,
         }
         if self.token_prune_cfg is not None:
             # 关键调用点：split encoder 按帧接收 prune 配置，避免不同实验需要重启 agent。
@@ -997,6 +1041,18 @@ class RemoteSplitLingoAgent(LingoAgent):
                 record["layer_active_mask"] = active.tolist()
                 record["active_layer_count"] = int(active.sum())
                 record["layer_keep_ratio"] = (batch_plan > 0.5).mean(axis=layer_axes).astype(np.float32).tolist()
+
+        behavior_logger = getattr(self, "_behavior_logger", None)
+        if behavior_logger is not None:
+            try:
+                behavior_logger.add_step(
+                    step=self.step,
+                    timestamp=timestamp,
+                    remote_inference_sec=self._route_inference_timing["last_frame_remote_inference_sec"],
+                    layer_active_mask=record.get("layer_active_mask"),
+                )
+            except Exception as exc:
+                print(f"[behavior-log] failed to record step {self.step}: {exc}", flush=True)
 
         try:
             log_path = Path(self.save_path_metric) / "remote_scheduler_plan.jsonl"
