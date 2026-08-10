@@ -241,6 +241,7 @@ class RemoteSplitLingoAgent(LingoAgent):
         self.record_tflops = self._env_flag("SIMLINGO_EVAL_RECORD_TFLOPS", True)
         self._split_profile_frames = []
         self._split_profile_errors = []
+        self._visual_token_frames = []
         if DEBUG:
             self.save_path_img = self.debug_save_path + "/images"
             Path(self.save_path_img).mkdir(parents=True, exist_ok=True)
@@ -325,6 +326,7 @@ class RemoteSplitLingoAgent(LingoAgent):
         self._accumulate_split_profile(remote_result)
 
         llm_payload = remote_result.get("llm_payload", {})
+        self._accumulate_visual_token_stats(remote_payload, llm_payload)
         self._log_remote_frame_alignment(
             timestamp=timestamp,
             remote_payload=remote_payload,
@@ -414,6 +416,7 @@ class RemoteSplitLingoAgent(LingoAgent):
 
     def destroy(self, results=None):  # pylint: disable=unused-argument
         self._write_split_tflops_summary()
+        self._write_visual_token_summary()
         self._finalize_route_inference_timing(results=results)
         if getattr(self, "_behavior_logger", None) is not None:
             try:
@@ -511,6 +514,107 @@ class RemoteSplitLingoAgent(LingoAgent):
         if getattr(self, "save_path", None) is not None:
             return Path(self.save_path) / "route_tflops.json"
         return None
+
+    def _resolve_visual_token_output_path(self):
+        result_file = os.getenv("SIMLINGO_EVAL_RESULT_FILE", "").strip()
+        if result_file:
+            result_path = Path(result_file)
+            if result_path.name.endswith("_res.json"):
+                return result_path.with_name(result_path.name.replace("_res.json", "_token.json"))
+            return result_path.with_suffix(".token.json")
+        if getattr(self, "save_path", None) is not None:
+            return Path(self.save_path) / "route_token.json"
+        return None
+
+    def _accumulate_visual_token_stats(self, remote_payload: dict, llm_payload: dict) -> None:
+        """Record effective visual/input token counts using values returned by the encoder."""
+        prompt_texts = remote_payload.get("prompt_texts", [])
+        original_visual_tokens = sum(str(text).count("<IMG_CONTEXT>") for text in prompt_texts)
+        if original_visual_tokens <= 0:
+            num_patches = int(remote_payload.get("num_patches", 0) or 0)
+            tokens_per_patch = int(getattr(self, "num_image_token", 0) or 0)
+            original_visual_tokens = num_patches * tokens_per_patch
+
+        keep_values = np.asarray(llm_payload.get("visual_token_keep_ratio", []), dtype=np.float64).reshape(-1)
+        keep_ratio = float(keep_values.mean()) if keep_values.size else None
+        kept_visual_tokens = (
+            int(round(original_visual_tokens * keep_ratio))
+            if keep_ratio is not None and original_visual_tokens > 0
+            else None
+        )
+        pruned_visual_tokens = (
+            original_visual_tokens - kept_visual_tokens if kept_visual_tokens is not None else None
+        )
+
+        # phrase_valid was tokenized before the remote request and includes visual placeholders.
+        prompt_label = self.DrivingInput.get("prompt_inference") or self.DrivingInput.get("prompt")
+        phrase_valid = getattr(prompt_label, "phrase_valid", None)
+        original_input_tokens = int(phrase_valid.sum().item()) if phrase_valid is not None else None
+        effective_input_tokens = (
+            original_input_tokens - pruned_visual_tokens
+            if original_input_tokens is not None and pruned_visual_tokens is not None
+            else None
+        )
+        prune_cfg = llm_payload.get("visual_token_prune")
+        pipeline_context = llm_payload.get("runtime_context", {})
+        self._visual_token_frames.append(
+            {
+                "step": int(self.step),
+                "pipeline_request_id": (
+                    pipeline_context.get("pipeline_request_id")
+                    if isinstance(pipeline_context, dict)
+                    else None
+                ),
+                "configured_prune_ratio": (
+                    self._scalar_or_none(prune_cfg.get("prune_ratio"))
+                    if isinstance(prune_cfg, dict)
+                    else None
+                ),
+                "actual_keep_ratio": keep_ratio,
+                "actual_prune_ratio": None if keep_ratio is None else 1.0 - keep_ratio,
+                "original_visual_tokens": int(original_visual_tokens),
+                "kept_visual_tokens": kept_visual_tokens,
+                "pruned_visual_tokens": pruned_visual_tokens,
+                "original_input_tokens": original_input_tokens,
+                "effective_input_tokens_after_prune": effective_input_tokens,
+            }
+        )
+
+    def _write_visual_token_summary(self) -> None:
+        output_path = self._resolve_visual_token_output_path()
+        if output_path is None:
+            return
+        frames = list(getattr(self, "_visual_token_frames", []))
+
+        def total(field):
+            values = [frame[field] for frame in frames if frame.get(field) is not None]
+            return int(sum(values)) if values else 0
+
+        original_visual = total("original_visual_tokens")
+        kept_visual = total("kept_visual_tokens")
+        pruned_visual = total("pruned_visual_tokens")
+        summary = {
+            "route_id": os.getenv("SIMLINGO_EVAL_ROUTE_ID"),
+            "route_key": getattr(self, "route_key", None),
+            "token_type": "visual input tokens (attention-mask effective count)",
+            "configured_token_prune": self._to_jsonable(getattr(self, "token_prune_cfg", None)),
+            "frame_count": len(frames),
+            "totals": {
+                "original_visual_tokens": original_visual,
+                "kept_visual_tokens": kept_visual,
+                "pruned_visual_tokens": pruned_visual,
+                "actual_keep_ratio": None if original_visual == 0 else kept_visual / original_visual,
+                "actual_prune_ratio": None if original_visual == 0 else pruned_visual / original_visual,
+                "original_input_tokens": total("original_input_tokens"),
+                "effective_input_tokens_after_prune": total("effective_input_tokens_after_prune"),
+            },
+            "frames": frames,
+        }
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = output_path.with_suffix(output_path.suffix + ".tmp")
+        with open(temporary_path, "w", encoding="utf-8") as outfile:
+            json.dump(summary, outfile, indent=2, ensure_ascii=False)
+        os.replace(temporary_path, output_path)
 
     def _write_split_tflops_summary(self) -> None:
         output_path = self._resolve_split_tflops_output_path()
