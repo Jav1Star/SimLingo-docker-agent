@@ -14,7 +14,7 @@ eval:
   agent_config: not_used
   save_scene_frames: true
   save_scene_raw_frames: false
-  scene_frame_stride: 5
+  scene_frame_stride: 1
   scene_frame_format: png
   token_prune:
     prune_ratio: 0.0
